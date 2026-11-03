@@ -1,5 +1,8 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
+import { getSite } from '../lib/content';
+
+const site = await getSite();
 ---
 
 <BaseLayout>
@@ -7,6 +10,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     <p class="prompt">
       <span class="ps1">vlad@vfil:~$</span> whoami
     </p>
-    <p>Placeholder home page. The Post list arrives in step 7.</p>
+    <p>Placeholder home page ({site.posts.length} posts). The Post list arrives in step 7.</p>
   </section>
 </BaseLayout>
