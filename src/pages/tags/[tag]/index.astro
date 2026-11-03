@@ -1,0 +1,20 @@
+---
+import type { GetStaticPaths } from 'astro';
+import BaseLayout from '../../../layouts/BaseLayout.astro';
+import ListingHeader from '../../../components/ListingHeader.astro';
+import PostList from '../../../components/PostList.astro';
+import { getSite } from '../../../lib/content';
+
+export const getStaticPaths = (async () => {
+  const site = await getSite();
+  return site.tags.map((tag) => ({ params: { tag } }));
+}) satisfies GetStaticPaths;
+
+const { tag } = Astro.params;
+const site = await getSite();
+---
+
+<BaseLayout title={`#${tag}`} description={`Posts tagged #${tag}.`}>
+  <ListingHeader command={`grep -l '#${tag}' posts/*`} title={`#${tag}`} />
+  <PostList posts={site.postsWithTag(tag)} />
+</BaseLayout>

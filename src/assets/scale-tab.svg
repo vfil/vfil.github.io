@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 150" width="480" height="150" role="img" aria-label="Guitar tab of a one-octave C major scale">
+  <rect width="480" height="150" fill="#171a1c"/>
+  <g stroke="#95999c" stroke-width="1">
+    <line x1="20" y1="25" x2="460" y2="25"/>
+    <line x1="20" y1="45" x2="460" y2="45"/>
+    <line x1="20" y1="65" x2="460" y2="65"/>
+    <line x1="20" y1="85" x2="460" y2="85"/>
+    <line x1="20" y1="105" x2="460" y2="105"/>
+    <line x1="20" y1="125" x2="460" y2="125"/>
+  </g>
+  <g font-family="ui-monospace, Menlo, monospace" font-size="15" fill="#ff9abc" text-anchor="middle">
+    <text x="60" y="110">3</text>
+    <text x="110" y="90">0</text>
+    <text x="160" y="90">2</text>
+    <text x="210" y="90">3</text>
+    <text x="260" y="70">0</text>
+    <text x="310" y="70">2</text>
+    <text x="360" y="50">0</text>
+    <text x="410" y="50">1</text>
+  </g>
+</svg>

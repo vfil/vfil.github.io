@@ -1,0 +1,108 @@
+---
+import { getSite } from '../lib/content';
+import { formatDate, type Post } from '../lib/model';
+
+interface Props {
+  posts: Post[];
+  /** Text shown when there are no Posts. */
+  empty?: string;
+}
+
+const { posts, empty = 'Nothing here yet.' } = Astro.props;
+const site = await getSite();
+---
+
+{posts.length === 0 ? (
+  <p class="empty">{empty}</p>
+) : (
+  <ol class="posts">
+    {posts.map((post) => {
+      const place = site.placeInSeries(post);
+      return (
+        <li class="post">
+          <time datetime={post.pubDate.toISOString()}>{formatDate(post.pubDate)}</time>
+          <a class="cat" href={`/${post.category}/`}>
+            [{post.category}]
+          </a>
+          <span class="title-cell">
+            <a class="title" href={`/posts/${post.slug}/`}>
+              {post.title}
+            </a>
+            {place && (
+              <span
+                class="part"
+                title={`Part ${place.number} of ${place.total} in ${place.series.title}`}
+              >
+                · {place.number}/{place.total}
+              </span>
+            )}
+            {post.draft && <span class="draft">[draft]</span>}
+          </span>
+        </li>
+      );
+    })}
+  </ol>
+)}
+
+<style>
+  .posts {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--line);
+  }
+
+  .post {
+    display: grid;
+    grid-template-columns: 6.5rem 7.5rem minmax(0, 1fr);
+    gap: 0.25rem 1rem;
+    align-items: baseline;
+    padding-block: 0.7rem;
+    border-bottom: 1px solid var(--line);
+  }
+
+  time,
+  .cat,
+  .part,
+  .draft {
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cat {
+    color: var(--accent-2);
+    text-decoration: none;
+  }
+
+  .cat:hover,
+  .title:hover {
+    color: var(--accent);
+  }
+
+  .title {
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .part,
+  .draft {
+    margin-left: 0.4rem;
+    white-space: nowrap;
+  }
+
+  .draft {
+    color: var(--accent);
+  }
+
+  @media (max-width: 34rem) {
+    .post {
+      grid-template-columns: auto 1fr;
+    }
+
+    .title-cell {
+      grid-column: 1 / -1;
+    }
+  }
+</style>

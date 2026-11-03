@@ -1,0 +1,62 @@
+---
+import SeriesParts from './SeriesParts.astro';
+import type { PlaceInSeries } from '../lib/model';
+
+interface Props {
+  place: PlaceInSeries;
+}
+
+const { place } = Astro.props;
+const { series } = place;
+---
+
+<details class="series-box">
+  <summary>
+    <span class="label">series:</span> <span class="title">{series.title}</span>{' '}
+    <span class="meta">
+      · part {place.number} of {place.total}
+    </span>
+  </summary>
+  <div class="body">
+    <SeriesParts series={series} current={place.number} />
+    <a class="all" href={`/series/${series.slug}/`}>
+      about this series →
+    </a>
+  </div>
+</details>
+
+<style>
+  .series-box {
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+
+  summary {
+    cursor: pointer;
+    color: var(--fg);
+  }
+
+  summary .label,
+  summary .meta {
+    color: var(--muted);
+  }
+
+  summary .title {
+    font-weight: 500;
+  }
+
+  .body {
+    display: grid;
+    gap: 0.75rem;
+    margin-top: 0.85rem;
+  }
+
+  .all {
+    color: var(--muted);
+    text-decoration: none;
+  }
+</style>

@@ -1,0 +1,20 @@
+---
+import type { GetStaticPaths } from 'astro';
+import PostLayout from '../../layouts/PostLayout.astro';
+import { getSite, renderPost } from '../../lib/content';
+
+export const getStaticPaths = (async () => {
+  const site = await getSite();
+  return site.posts.map((post) => ({ params: { slug: post.slug } }));
+}) satisfies GetStaticPaths;
+
+const site = await getSite();
+const post = site.posts.find((p) => p.slug === Astro.params.slug);
+if (!post) throw new Error(`No visible Post "${Astro.params.slug}"`);
+const place = site.placeInSeries(post);
+const { Content } = await renderPost(post.slug);
+---
+
+<PostLayout post={post} place={place}>
+  <Content />
+</PostLayout>

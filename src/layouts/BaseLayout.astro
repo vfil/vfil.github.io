@@ -1,0 +1,44 @@
+---
+import BaseHead from '../components/BaseHead.astro';
+import Header, { type Section } from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+  title?: string;
+  description?: string;
+  type?: 'website' | 'article';
+  /** Menu entry to mark as current. */
+  current?: Section | undefined;
+}
+
+const { title, description, type, current } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead title={title} description={description} type={type} />
+  </head>
+  <body>
+    <div class="wrap">
+      <Header current={current} />
+      <main id="main">
+        <slot />
+      </main>
+      <Footer />
+    </div>
+  </body>
+</html>
+
+<style>
+  main > :global(*) {
+    min-width: 0;
+  }
+
+  main {
+    display: grid;
+    gap: 3rem;
+    padding-block: 2.75rem 4rem;
+    min-width: 0;
+  }
+</style>

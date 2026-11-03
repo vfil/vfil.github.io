@@ -1,0 +1,174 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PostList from '../components/PostList.astro';
+import { getSite } from '../lib/content';
+import { CATEGORIES } from '../lib/categories';
+import { SITE } from '../site';
+
+const site = await getSite();
+const latest = site.posts.slice(0, SITE.homePostLimit);
+const ongoing = site.series.filter((s) => s.status === 'ongoing');
+---
+
+<BaseLayout>
+  <section class="whoami" aria-label="About this blog">
+    <p class="prompt">
+      <span class="ps1">vlad@vfil:~$</span> whoami
+    </p>
+    <p class="lede">
+      Vlad Filimon. Engineering leader, learning agentic AI in public. Notes on building with LLM
+      agents, leading teams, and the occasional detour into music.
+      <span class="cursor" aria-hidden="true"></span>
+    </p>
+    {ongoing.map((s) => (
+      <p class="now">
+        <span class="label">currently writing:</span>
+        <a href={`/series/${s.slug}/`}>{s.title}</a>
+        <span class="meta">
+          · {s.readable} of {s.total} parts out
+        </span>
+      </p>
+    ))}
+  </section>
+
+  <section aria-labelledby="latest">
+    <div class="section-head">
+      <p class="prompt" id="latest">
+        <span class="ps1">$</span> ls -t posts/ | head -20
+      </p>
+      <a href="/posts/">all posts →</a>
+    </div>
+    <PostList posts={latest} />
+  </section>
+
+  <section aria-labelledby="cats-head">
+    <div class="section-head">
+      <p class="prompt" id="cats-head">
+        <span class="ps1">$</span> ls categories/
+      </p>
+    </div>
+    <dl class="cats">
+      {CATEGORIES.map((c) => (
+        <div class="cat-card">
+          <dt>
+            <a href={`/${c.slug}/`}>/{c.slug}</a>{' '}
+            <span class="count">{site.postsInCategory(c.slug).length}</span>
+          </dt>
+          <dd>{c.description}</dd>
+        </div>
+      ))}
+    </dl>
+  </section>
+</BaseLayout>
+
+<style>
+  .lede {
+    margin: 0;
+    font-size: var(--step-1);
+    max-width: 38rem;
+    text-wrap: pretty;
+  }
+
+  .whoami {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .whoami .prompt {
+    margin-bottom: -0.9rem;
+  }
+
+  .now {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.75rem;
+    align-items: baseline;
+    margin: 0;
+    padding: 0.8rem 1rem;
+    background: var(--surface);
+    border-left: 2px solid var(--accent);
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+
+  .now .label,
+  .now .meta {
+    color: var(--muted);
+  }
+
+  .now a {
+    font-weight: 500;
+  }
+
+  .cursor {
+    display: inline-block;
+    width: 0.55em;
+    height: 1.05em;
+    margin-left: 0.15em;
+    vertical-align: -0.15em;
+    background: var(--accent);
+    animation: blink 1.1s steps(1) infinite;
+  }
+
+  @keyframes blink {
+    50% {
+      opacity: 0;
+    }
+  }
+
+  .section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .section-head .prompt {
+    margin: 0;
+  }
+
+  .section-head a {
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+
+  .cats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: 1rem;
+    margin: 0;
+  }
+
+  .cat-card {
+    padding-top: 1rem;
+    border-top: 1px solid var(--line);
+  }
+
+  dt {
+    margin-bottom: 0.3rem;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+
+  dt a {
+    color: var(--accent-2);
+    text-decoration: none;
+  }
+
+  dt a:hover {
+    color: var(--accent);
+  }
+
+  .count {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+  }
+</style>

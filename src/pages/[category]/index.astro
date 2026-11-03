@@ -1,0 +1,26 @@
+---
+import type { GetStaticPaths } from 'astro';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import ListingHeader from '../../components/ListingHeader.astro';
+import PostList from '../../components/PostList.astro';
+import { getSite } from '../../lib/content';
+import { CATEGORIES } from '../../lib/categories';
+
+export const getStaticPaths = (() =>
+  CATEGORIES.map((category) => ({
+    params: { category: category.slug },
+    props: { category },
+  }))) satisfies GetStaticPaths;
+
+const { category } = Astro.props;
+const site = await getSite();
+---
+
+<BaseLayout title={category.label} description={category.description} current={category.slug}>
+  <ListingHeader
+    command={`cd /${category.slug}`}
+    title={category.label}
+    description={category.description}
+  />
+  <PostList posts={site.postsInCategory(category.slug)} />
+</BaseLayout>

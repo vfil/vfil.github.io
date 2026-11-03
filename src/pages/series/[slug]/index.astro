@@ -1,0 +1,53 @@
+---
+import type { GetStaticPaths } from 'astro';
+import BaseLayout from '../../../layouts/BaseLayout.astro';
+import ListingHeader from '../../../components/ListingHeader.astro';
+import SeriesParts from '../../../components/SeriesParts.astro';
+import { getSite, renderSeries } from '../../../lib/content';
+
+export const getStaticPaths = (async () => {
+  const site = await getSite();
+  return site.series.map((s) => ({ params: { slug: s.slug } }));
+}) satisfies GetStaticPaths;
+
+const site = await getSite();
+const series = site.seriesBySlug(Astro.params.slug);
+if (!series) throw new Error(`No visible Series "${Astro.params.slug}"`);
+const { Content } = await renderSeries(series.slug);
+---
+
+<BaseLayout title={series.title} description={series.description} current="series">
+  <div class="intro">
+    <ListingHeader command={`cat series/${series.slug}`} title={series.title} />
+    <p class="meta">
+      [{series.status}] · {series.readable} of {series.total} parts out
+    </p>
+    <div class="prose">
+      <Content />
+    </div>
+  </div>
+  <section aria-labelledby="parts-head">
+    <p class="prompt" id="parts-head">
+      <span class="ps1">$</span> ls parts/
+    </p>
+    <SeriesParts series={series} />
+  </section>
+</BaseLayout>
+
+<style>
+  .intro {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .intro .prose {
+    margin-top: 0.75rem;
+  }
+
+  .meta {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+</style>
