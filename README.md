@@ -1,43 +1,91 @@
-# Astro Starter Kit: Minimal
+# ~/vfil
+
+Vlad Filimon's blog: learning agentic AI in public, plus notes on leadership and the occasional detour into music. Live at **https://vfil.github.io**.
+
+Built with Astro, TypeScript and plain CSS. Pages ship as static HTML with almost no JavaScript.
+
+## Run it locally
+
+Needs [Bun](https://bun.sh) and Node 24 (`.nvmrc`).
 
 ```sh
-bun create astro@latest -- --template minimal
+bun install
+bun run dev        # http://localhost:4321 (Drafts are visible here, marked [draft])
+bun run build      # production build into dist/ (Drafts are left out)
+bun run preview    # serve the production build
+bun run check      # TypeScript + content schema
+bun run test       # content model tests (Vitest)
+bun run format     # Prettier
 ```
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## Write a Post
 
-## 🚀 Project Structure
+Create a Markdown (`.md`) or MDX (`.mdx`) file in `src/content/posts/`. Start the filename with the date so your editor sorts it; the date is not part of the URL:
 
-Inside of your Astro project, you'll see the following folders and files:
-
-```text
-/
-├── public/
-├── src/
-│   └── pages/
-│       └── index.astro
-└── package.json
+```
+src/content/posts/2026-11-24-tools.md   →   /posts/tools/
 ```
 
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
+Frontmatter:
 
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
+```yaml
+---
+title: 'Tools: giving the model hands'
+description: 'One sentence. Used for search results and link previews.'
+pubDate: 2026-11-24
+updatedDate: 2026-12-01 # optional, shown as "updated …"
+category: agentic-ai # exactly one of: agentic-ai, leadership, music
+tags: [agents, tool-use] # optional; lowercase words joined by hyphens
+draft: true # optional; Drafts show in `bun run dev` only
+series: building-an-agent-from-scratch # optional, see below
+part: 2 # required together with `series`
+---
+```
 
-Any static assets, like images, can be placed in the `public/` directory.
+Then write the body in Markdown. Code blocks are highlighted and get a copy button. Images go in `src/assets/` and are referenced relatively, e.g. `![Alt text](../../assets/diagram.svg)`.
 
-## 🧞 Commands
+To publish, set `draft: false` (or remove the line), commit and push to `main`.
 
-All commands are run from the root of the project, from a terminal:
+The build fails, with a message saying what's wrong, if a Post has an unknown Category, a malformed Tag, or breaks a Series rule. That's deliberate: mistakes never reach readers.
 
-| Command               | Action                                           |
-| :-------------------- | :----------------------------------------------- |
-| `bun install`         | Installs dependencies                            |
-| `bun dev`             | Starts local dev server at `localhost:4321`      |
-| `bun build`           | Build your production site to `./dist/`          |
-| `bun preview`         | Preview your build locally, before deploying     |
-| `bun astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `bun astro -- --help` | Get help using the Astro CLI                     |
+## Write a Series
 
-## 👀 Want to learn more?
+A Series is an ordered sequence of Posts. Create it once in `src/content/series/<slug>.md`:
 
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+```yaml
+---
+title: 'Building an agent from scratch'
+description: 'One line shown in lists.'
+status: ongoing # or: complete
+planned: ['Memory', 'Evals'] # titles of Parts not written yet, in order
+---
+Introduction shown on the Series page.
+```
+
+Each Post in the Series sets `series: <slug>` and `part: <n>`.
+
+Rules (the build enforces them):
+
+- Parts are numbered 1, 2, 3… with no gaps and no duplicates.
+- A Part can't be published while an earlier Part is still a Draft.
+- Planned Parts come after the written ones. Readers see their titles, greyed out, but can't open them.
+
+**Starting a planned Part:** remove its title from `planned` and create the Post with the next `part` number and `draft: true`. Until you publish it, readers still see it as a Planned Part, so "part 2 of 4" stays stable while you write.
+
+A Series appears on the site once it has at least one published Part. While it's `ongoing`, the home page shows it under "currently writing".
+
+## Categories
+
+The Categories and their descriptions live in `src/lib/categories.ts`. They form the site menu.
+
+## Deploy
+
+Every push runs CI (format, typecheck, tests, build). Pushes to `main` also deploy to GitHub Pages via `.github/workflows/deploy.yml`.
+
+One-time setup: GitHub repo → Settings → Pages → Source: **GitHub Actions**.
+
+## How this repo is planned
+
+- `specs/`: every feature starts as a step-by-step product and tech spec, implemented afterwards in a separate session.
+- `GLOSSARY.md`: the words used for things on this blog (Post, Draft, Category, Tag, Series, Part…). Code and specs use the same words.
+- `docs/adr/`: decisions that were hard to make and would be expensive to reverse.

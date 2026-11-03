@@ -108,7 +108,7 @@ Author (Vlad): 16. As the author, I want to write a Post as one Markdown/MDX fil
 
 ### Architecture & seam
 
-- **`src/lib/model.ts`** is a pure module with no `astro:*` imports. It takes plain arrays of post/series records and the mode (`dev`/`prod`) and does all the logic: `visiblePosts`, `sortPosts`, `postsByCategory`, `postsByTag`, `allTags`, `resolveSeries` (validates and returns ordered Parts incl. Planned), `seriesNav` (prev/next for a Post), `readingTime`, `slugFromFilename`, `formatDate`. **This is the only test seam.**
+- **`src/lib/model.ts`** is a pure module with no `astro:*` imports. It takes plain arrays of post/series records and the mode (`dev`/`prod`) and does all the logic. **This is the only test seam.** _Implemented as:_ one entry point `buildSite(posts, series, mode)` that runs every validation rule and returns a `Site` (`posts`, `postsInCategory`, `tags`, `postsWithTag`, `series`, `seriesBySlug`, `placeInSeries`), plus the utilities `readingTime`, `slugFromFilename` and `formatDate`. A single entry point means pages cannot skip validation. This replaced the originally listed loose helpers (`visiblePosts`, `sortPosts`, `resolveSeries`, `seriesNav`, …).
 - **`src/lib/content.ts`** is a thin adapter: calls `getCollection`, maps entries to the plain records `model.ts` expects, and memoises one validated "site" object. Pages only talk to this module.
 - Components (in `src/components/`): `BaseHead` (title, description, canonical, OG text tags, Mode no-flash script), `Header` (brand + menu + Mode toggle), `Footer`, `PostList` (the dense one-line rows), `SeriesBox`, `SeriesNav`, `TagList`. Layouts: `BaseLayout`, `PostLayout`.
 

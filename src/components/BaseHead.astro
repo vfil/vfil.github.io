@@ -32,8 +32,9 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 <meta property="og:site_name" content={SITE.shortTitle} />
 <meta name="twitter:card" content="summary" />
 
-<Font cssVariable="--font-mono" preload />
-<Font cssVariable="--font-sans" preload />
+<!-- Preload only what the first screen needs; other weights and subsets load on demand. -->
+<Font cssVariable="--font-mono" preload={[{ weight: 400, style: 'normal', subset: 'latin' }]} />
+<Font cssVariable="--font-sans" preload={[{ weight: 400, style: 'normal', subset: 'latin' }]} />
 
 <script is:inline>
   // Apply the reader's saved Mode before first paint (no flash of the wrong Mode).
