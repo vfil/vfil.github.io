@@ -7,6 +7,7 @@ import { SITE } from '../site';
 
 const site = await getSite();
 const latest = site.posts.slice(0, SITE.homePostLimit);
+const ongoing = site.series.filter((s) => s.status === 'ongoing');
 ---
 
 <BaseLayout>
@@ -19,6 +20,15 @@ const latest = site.posts.slice(0, SITE.homePostLimit);
       agents, leading teams, and the occasional detour into music.
       <span class="cursor" aria-hidden="true"></span>
     </p>
+    {ongoing.map((s) => (
+      <p class="now">
+        <span class="label">currently writing:</span>
+        <a href={`/series/${s.slug}/`}>{s.title}</a>
+        <span class="meta">
+          · {s.readable} of {s.total} parts out
+        </span>
+      </p>
+    ))}
   </section>
 
   <section aria-labelledby="latest">
@@ -57,6 +67,37 @@ const latest = site.posts.slice(0, SITE.homePostLimit);
     font-size: var(--step-1);
     max-width: 38rem;
     text-wrap: pretty;
+  }
+
+  .whoami {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .whoami .prompt {
+    margin-bottom: -0.9rem;
+  }
+
+  .now {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.75rem;
+    align-items: baseline;
+    margin: 0;
+    padding: 0.8rem 1rem;
+    background: var(--surface);
+    border-left: 2px solid var(--accent);
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+
+  .now .label,
+  .now .meta {
+    color: var(--muted);
+  }
+
+  .now a {
+    font-weight: 500;
   }
 
   .cursor {

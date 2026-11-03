@@ -1,0 +1,74 @@
+---
+import type { SeriesView } from '../lib/model';
+
+interface Props {
+  series: SeriesView;
+  /** Part number of the Post being read, if any. */
+  current?: number | undefined;
+}
+
+const { series, current } = Astro.props;
+---
+
+<ol class="parts">
+  {series.parts.map((part) => (
+    <li class:list={{ current: part.number === current, planned: !part.post }}>
+      <span class="n">{part.number}.</span>
+      {part.number === current ? (
+        <span aria-current="page">{part.title}</span>
+      ) : part.post ? (
+        <a href={`/posts/${part.post.slug}/`}>
+          {part.title}
+          {part.post.draft && <span class="draft"> [draft]</span>}
+        </a>
+      ) : (
+        <span>
+          {part.title} <span class="soon">(coming soon)</span>
+        </span>
+      )}
+    </li>
+  ))}
+</ol>
+
+<style>
+  .parts {
+    display: grid;
+    gap: 0.35rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+
+  li {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  .n {
+    min-width: 1.6rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .current {
+    color: var(--accent);
+  }
+
+  .planned {
+    color: var(--muted);
+  }
+
+  .soon {
+    font-size: 0.75rem;
+  }
+
+  .draft {
+    color: var(--accent);
+  }
+
+  a {
+    text-decoration: none;
+  }
+</style>

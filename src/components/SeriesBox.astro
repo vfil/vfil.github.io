@@ -1,4 +1,5 @@
 ---
+import SeriesParts from './SeriesParts.astro';
 import type { PlaceInSeries } from '../lib/model';
 
 interface Props {
@@ -16,25 +17,12 @@ const { series } = place;
       · part {place.number} of {place.total}
     </span>
   </summary>
-  <ol class="parts">
-    {series.parts.map((part) => (
-      <li class:list={{ current: part.number === place.number, planned: !part.post }}>
-        <span class="n">{part.number}.</span>
-        {part.number === place.number ? (
-          <span aria-current="page">{part.title}</span>
-        ) : part.post ? (
-          <a href={`/posts/${part.post.slug}/`}>{part.title}</a>
-        ) : (
-          <span>
-            {part.title} <span class="soon">(coming soon)</span>
-          </span>
-        )}
-      </li>
-    ))}
-  </ol>
-  <a class="all" href={`/series/${series.slug}/`}>
-    about this series →
-  </a>
+  <div class="body">
+    <SeriesParts series={series} current={place.number} />
+    <a class="all" href={`/series/${series.slug}/`}>
+      about this series →
+    </a>
+  </div>
 </details>
 
 <style>
@@ -61,42 +49,14 @@ const { series } = place;
     font-weight: 500;
   }
 
-  .parts {
+  .body {
     display: grid;
-    gap: 0.35rem;
-    margin: 0.85rem 0 0.75rem;
-    padding: 0;
-    list-style: none;
-  }
-
-  .parts li {
-    display: flex;
-    gap: 0.6rem;
-  }
-
-  .n {
-    min-width: 1.6rem;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .current {
-    color: var(--accent);
-  }
-
-  .planned {
-    color: var(--muted);
-  }
-
-  .soon {
-    font-size: 0.75rem;
-  }
-
-  a {
-    text-decoration: none;
+    gap: 0.75rem;
+    margin-top: 0.85rem;
   }
 
   .all {
     color: var(--muted);
+    text-decoration: none;
   }
 </style>

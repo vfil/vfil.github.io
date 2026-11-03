@@ -1,0 +1,71 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import ListingHeader from '../../components/ListingHeader.astro';
+import { getSite } from '../../lib/content';
+
+const site = await getSite();
+---
+
+<BaseLayout title="Series" description="Multi-part Series on vfil." current="series">
+  <ListingHeader
+    command="ls series/"
+    title="Series"
+    description="Longer explorations written as a sequence of Parts."
+  />
+  {site.series.length === 0 ? (
+    <p class="empty">No series yet.</p>
+  ) : (
+    <ul class="series-list">
+      {site.series.map((s) => (
+        <li>
+          <p class="meta">
+            [{s.status}] · {s.readable} of {s.total} parts out
+          </p>
+          <a class="title" href={`/series/${s.slug}/`}>
+            {s.title}
+          </a>
+          <p class="description">{s.description}</p>
+        </li>
+      ))}
+    </ul>
+  )}
+</BaseLayout>
+
+<style>
+  .series-list {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--line);
+  }
+
+  li {
+    display: grid;
+    gap: 0.3rem;
+    padding-block: 1rem;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .meta {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+
+  .title {
+    font-size: var(--step-1);
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .title:hover {
+    color: var(--accent);
+  }
+
+  .description {
+    margin: 0;
+    color: var(--muted);
+  }
+</style>
