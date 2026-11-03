@@ -1,0 +1,64 @@
+---
+import type { PlaceInSeries } from '../lib/model';
+
+interface Props {
+  place: PlaceInSeries;
+}
+
+const { place } = Astro.props;
+const { previous, next } = place;
+---
+
+{(previous || next) && (
+  <nav class="series-nav" aria-label={`More from ${place.series.title}`}>
+    {previous ? (
+      <a class="prev" href={`/posts/${previous.slug}/`}>
+        <span class="dir">← part {place.number - 1}</span>
+        <span class="t">{previous.title}</span>
+      </a>
+    ) : (
+      <span />
+    )}
+    {next && (
+      <a class="next" href={`/posts/${next.slug}/`}>
+        <span class="dir">part {place.number + 1} →</span>
+        <span class="t">{next.title}</span>
+      </a>
+    )}
+  </nav>
+)}
+
+<style>
+  .series-nav {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: 1rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--line);
+  }
+
+  a {
+    display: grid;
+    gap: 0.2rem;
+    text-decoration: none;
+    min-width: 0;
+  }
+
+  .next {
+    text-align: right;
+  }
+
+  .dir {
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+
+  .t {
+    font-weight: 500;
+  }
+
+  a:hover .t {
+    color: var(--accent);
+  }
+</style>

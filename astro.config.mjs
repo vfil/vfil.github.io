@@ -7,6 +7,13 @@ import sitemap from '@astrojs/sitemap';
 export default defineConfig({
   site: 'https://vfil.github.io',
   integrations: [mdx(), sitemap()],
+  markdown: {
+    shikiConfig: {
+      // Both themes are emitted as CSS variables; global.css picks one per Mode.
+      themes: { light: 'github-light', dark: 'github-dark-dimmed' },
+      defaultColor: false,
+    },
+  },
   fonts: [
     {
       provider: fontProviders.fontsource(),

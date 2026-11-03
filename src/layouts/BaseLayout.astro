@@ -31,6 +31,10 @@ const { title, description, type, current } = Astro.props;
 </html>
 
 <style>
+  main > :global(*) {
+    min-width: 0;
+  }
+
   main {
     display: grid;
     gap: 3rem;

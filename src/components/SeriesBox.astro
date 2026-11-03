@@ -1,0 +1,102 @@
+---
+import type { PlaceInSeries } from '../lib/model';
+
+interface Props {
+  place: PlaceInSeries;
+}
+
+const { place } = Astro.props;
+const { series } = place;
+---
+
+<details class="series-box">
+  <summary>
+    <span class="label">series:</span> <span class="title">{series.title}</span>{' '}
+    <span class="meta">
+      · part {place.number} of {place.total}
+    </span>
+  </summary>
+  <ol class="parts">
+    {series.parts.map((part) => (
+      <li class:list={{ current: part.number === place.number, planned: !part.post }}>
+        <span class="n">{part.number}.</span>
+        {part.number === place.number ? (
+          <span aria-current="page">{part.title}</span>
+        ) : part.post ? (
+          <a href={`/posts/${part.post.slug}/`}>{part.title}</a>
+        ) : (
+          <span>
+            {part.title} <span class="soon">(coming soon)</span>
+          </span>
+        )}
+      </li>
+    ))}
+  </ol>
+  <a class="all" href={`/series/${series.slug}/`}>
+    about this series →
+  </a>
+</details>
+
+<style>
+  .series-box {
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+
+  summary {
+    cursor: pointer;
+    color: var(--fg);
+  }
+
+  summary .label,
+  summary .meta {
+    color: var(--muted);
+  }
+
+  summary .title {
+    font-weight: 500;
+  }
+
+  .parts {
+    display: grid;
+    gap: 0.35rem;
+    margin: 0.85rem 0 0.75rem;
+    padding: 0;
+    list-style: none;
+  }
+
+  .parts li {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  .n {
+    min-width: 1.6rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .current {
+    color: var(--accent);
+  }
+
+  .planned {
+    color: var(--muted);
+  }
+
+  .soon {
+    font-size: 0.75rem;
+  }
+
+  a {
+    text-decoration: none;
+  }
+
+  .all {
+    color: var(--muted);
+  }
+</style>
