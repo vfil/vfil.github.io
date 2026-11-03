@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>~/vfil home mockup</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<!--
+  VISUAL TARGET for specs/0001-blog-foundation.md (home page + menu) and
+  specs/0002-reader-palette-picker.md (the palette button + popover in the header).
+  - Static mockup. The real site self-hosts IBM Plex via the Astro Fonts API;
+    Google Fonts is used here only so the file renders standalone.
+  - Post rows are EXAMPLE content to show density; seed content is defined in spec 0001.
+  - The bare :root / light blocks below hold the DEFAULT PALETTE
+    (hue 359°, chroma 0.211, tint 10%) and are the source of truth for src/styles/tokens.css.
+  - The palette recipe in the last script block is the reference for src/lib/palette.ts.
+-->
+<script>
+  // Before first paint: apply the reader's saved Mode and Custom Palette (if any).
+  (function () {
+    var root = document.documentElement;
+    try {
+      var mode = localStorage.getItem('mode'); if (mode) root.setAttribute('data-theme', mode);
+      var p = JSON.parse(localStorage.getItem('palette') || 'null');
+      if (p && p.v === 1 && p.tokens) {
+        for (var t in p.tokens.dark) root.style.setProperty('--d-' + t, p.tokens.dark[t]);
+        for (var u in p.tokens.light) root.style.setProperty('--l-' + u, p.tokens.light[u]);
+        root.setAttribute('data-palette', 'custom');
+      }
+    } catch (e) {}
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Layout: one left-aligned 46rem column; mono "chrome" frames proportional reading text. Dark-first.
+     Default Palette: triad hue 359° (accent) / 119° (secondary) / 239° (ground), chroma 0.211, tint 10%. */
+  :root {
+    --bg: #101214;
+    --surface: #171a1c;
+    --line: #2b2e31;
+    --muted: #95999c;
+    --fg: #e3e5e6;
+    --accent: #ff9abc;      /* hue 359: links hover, cursor, current page, brand ~ */
+    --accent-2: #a6c000;    /* hue 119: prompt, Category labels */
+    --accent-fg: #101214;   /* text on accent */
+    --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --step--1: 0.8125rem;
+    --step-0: 1rem;
+    --step-1: 1.125rem;
+    --step-2: 1.5rem;
+    --measure: 46rem;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f9fafb; --surface: #eef0f2; --line: #dcdee0; --muted: #616466; --fg: #191b1c;
+      --accent: #c91a6f; --accent-2: #5c6c00; --accent-fg: #f9fafb; color-scheme: light;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f9fafb; --surface: #eef0f2; --line: #dcdee0; --muted: #616466; --fg: #191b1c;
+    --accent: #c91a6f; --accent-2: #5c6c00; --accent-fg: #f9fafb; color-scheme: light;
+  }
+  /* Custom Palette: the picker writes --d-* / --l-* on <html> and sets data-palette="custom". */
+  :root[data-palette="custom"] {
+    --bg: var(--d-bg); --surface: var(--d-surface); --line: var(--d-line); --muted: var(--d-muted); --fg: var(--d-fg);
+    --accent: var(--d-accent); --accent-2: var(--d-accent-2); --accent-fg: var(--d-accent-fg); color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root[data-palette="custom"]:not([data-theme="dark"]) {
+      --bg: var(--l-bg); --surface: var(--l-surface); --line: var(--l-line); --muted: var(--l-muted); --fg: var(--l-fg);
+      --accent: var(--l-accent); --accent-2: var(--l-accent-2); --accent-fg: var(--l-accent-fg); color-scheme: light;
+    }
+  }
+  :root[data-palette="custom"][data-theme="light"] {
+    --bg: var(--l-bg); --surface: var(--l-surface); --line: var(--l-line); --muted: var(--l-muted); --fg: var(--l-fg);
+    --accent: var(--l-accent); --accent-2: var(--l-accent-2); --accent-fg: var(--l-accent-fg); color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 400 var(--step-0)/1.65 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: calc(var(--measure) + 2 * 16px);
+    margin-inline: auto;
+    padding-block: 0;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
+  a:hover { color: var(--accent); text-decoration-color: currentColor; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  /* ---------- header + category menu ---------- */
+  .site-header {
+    position: relative;
+    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+    gap: 0.75rem 1.5rem;
+    padding-block: 1.75rem 1.25rem;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+  .brand { font-weight: 600; font-size: var(--step-0); text-decoration: none; }
+  .brand .tilde { color: var(--accent); }
+  .nav { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 1.1rem; }
+  .nav ul { display: contents; list-style: none; }
+  .nav a { text-decoration: none; color: var(--muted); }
+  .nav a:hover { color: var(--fg); }
+  .nav a[aria-current="page"] { color: var(--accent); }
+  .nav .slash { color: var(--line); }
+  .nav a:hover .slash, .nav a[aria-current="page"] .slash { color: inherit; }
+  .tools { display: inline-flex; gap: 0.4rem; margin-left: 0.35rem; }
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.9rem; height: 1.9rem; padding: 0;
+    background: none; border: 1px solid var(--line); border-radius: 4px;
+    color: var(--muted); cursor: pointer; text-decoration: none;
+  }
+  .icon-btn:hover, .icon-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+  .icon-btn svg { width: 0.95rem; height: 0.95rem; }
+  /* palette button icon: three dots of the live triad */
+  .triad-icon { position: relative; width: 0.95rem; height: 0.95rem; }
+  .triad-icon i { position: absolute; width: 0.42rem; height: 0.42rem; border-radius: 50%; }
+  .triad-icon i:nth-child(1) { left: 0.265rem; top: 0; background: var(--accent); }
+  .triad-icon i:nth-child(2) { left: 0; bottom: 0.02rem; background: var(--accent-2); }
+  .triad-icon i:nth-child(3) { right: 0; bottom: 0.02rem; background: var(--muted); }
+  :root .sun { display: none; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .sun { display: block; } :root:not([data-theme="dark"]) .moon { display: none; } }
+  :root[data-theme="light"] .sun { display: block; } :root[data-theme="light"] .moon { display: none; }
+
+  /* ---------- palette popover ---------- */
+  .palette-pop {
+    position: absolute; top: calc(100% - 0.5rem); right: 0; z-index: 20;
+    width: min(19rem, 100%);
+    display: grid; gap: 0.9rem;
+    padding: 1rem;
+    background: var(--surface); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px;
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.28);
+    font-family: var(--font-mono); font-size: var(--step--1);
+  }
+  .pop-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+  .pop-head strong { font-weight: 600; }
+  .pop-head span { color: var(--muted); }
+  .pop-hint { margin: 0; color: var(--muted); line-height: 1.5; }
+  .wheel { position: relative; width: min(100%, 14rem); aspect-ratio: 1; max-width: 100%; margin-inline: auto; touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
+  .wheel canvas { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; }
+  .wheel svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  .wheel svg line, .wheel svg polygon { fill: none; stroke: #ffffff; stroke-width: 0.6; stroke-opacity: 0.7; }
+  .wheel svg polygon { stroke-dasharray: 1.6 1.2; }
+  .handle {
+    position: absolute; width: 1.35rem; height: 1.35rem; margin: -0.675rem 0 0 -0.675rem; padding: 0;
+    border-radius: 50%; border: 2px solid #ffffff; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45), 0 2px 6px rgb(0 0 0 / 0.35);
+    background: var(--c, #808080); cursor: grab; touch-action: none;
+  }
+  .handle.main { width: 1.75rem; height: 1.75rem; margin: -0.875rem 0 0 -0.875rem; }
+  .wheel.dragging, .wheel.dragging .handle { cursor: grabbing; }
+  .slider { display: grid; gap: 0.35rem; }
+  .slider label { display: flex; justify-content: space-between; color: var(--muted); }
+  .slider input { width: 100%; accent-color: var(--accent); }
+  .pop-foot { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  .pop-foot output { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .btn { font: inherit; padding: 0.35rem 0.7rem; border-radius: 4px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: 0.5; cursor: default; border-color: var(--line); color: var(--muted); }
+
+  /* ---------- whoami ---------- */
+  main { display: grid; gap: 3rem; padding-block: 2.75rem 4rem; }
+  .prompt { font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted); margin: 0 0 0.6rem; }
+  .prompt .ps1 { color: var(--accent-2); }
+  .whoami p.lede { margin: 0; font-size: var(--step-1); max-width: 38rem; text-wrap: pretty; }
+  .cursor { display: inline-block; width: 0.55em; height: 1.05em; vertical-align: -0.15em; background: var(--accent); margin-left: 0.15em; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+
+  /* ---------- currently writing ---------- */
+  .now {
+    display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem; align-items: baseline;
+    margin-top: 1.5rem; padding: 0.8rem 1rem;
+    background: var(--surface); border-left: 2px solid var(--accent);
+    font-family: var(--font-mono); font-size: var(--step--1);
+  }
+  .now .label { color: var(--muted); }
+  .now a { font-weight: 500; }
+  .now .meta { color: var(--muted); }
+
+  /* ---------- post list ---------- */
+  .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-bottom: 0.75rem; }
+  .section-head .prompt { margin: 0; }
+  .section-head a { font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted); }
+  .posts { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+  .post {
+    display: grid; grid-template-columns: 6.5rem 7.5rem minmax(0, 1fr);
+    gap: 0.25rem 1rem; align-items: baseline;
+    padding-block: 0.7rem; border-bottom: 1px solid var(--line);
+  }
+  .post time, .post .cat, .post .part { font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .post .cat { text-decoration: none; color: var(--accent-2); }
+  .post .cat:hover { color: var(--accent); }
+  .post .title { font-weight: 500; text-decoration: none; min-width: 0; }
+  .post .title:hover { color: var(--accent); }
+  .post .part { margin-left: 0.4rem; white-space: nowrap; }
+  @media (max-width: 34rem) {
+    .post { grid-template-columns: auto 1fr; }
+    .post .title-cell { grid-column: 1 / -1; }
+  }
+
+  /* ---------- categories block ---------- */
+  .cats { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; margin: 0; }
+  .cat-card { padding: 1rem 0 0; border-top: 1px solid var(--line); }
+  .cat-card dt { font-family: var(--font-mono); font-size: var(--step--1); margin-bottom: 0.3rem; }
+  .cat-card dt a { color: var(--accent-2); text-decoration: none; }
+  .cat-card dt .count { color: var(--muted); }
+  .cat-card dd { margin: 0; color: var(--muted); font-size: 0.9375rem; line-height: 1.5; }
+
+  /* ---------- footer ---------- */
+  .site-footer {
+    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem 1.5rem;
+    padding-block: 1.25rem 2.5rem; border-top: 1px solid var(--line);
+    font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted);
+  }
+  .site-footer nav { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+  .site-footer a { color: var(--muted); }
+  .site-footer a:hover { color: var(--accent); }
+  .mock-note { color: var(--muted); font-family: var(--font-mono); font-size: 0.75rem; opacity: 0.8; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="site-header">
+    <a class="brand" href="#" aria-label="vfil home"><span class="tilde">~</span>/vfil</a>
+    <nav class="nav" aria-label="Main">
+      <ul>
+        <li><a href="#agentic-ai"><span class="slash">/</span>agentic-ai</a></li>
+        <li><a href="#leadership"><span class="slash">/</span>leadership</a></li>
+        <li><a href="#music"><span class="slash">/</span>music</a></li>
+        <li><a href="#series"><span class="slash">/</span>series</a></li>
+        <li><a href="#about"><span class="slash">/</span>about</a></li>
+      </ul>
+      <span class="tools">
+        <button class="icon-btn" id="palette-btn" type="button" aria-label="Change colours" title="Change colours" aria-expanded="false" aria-controls="palette-pop">
+          <span class="triad-icon" aria-hidden="true"><i></i><i></i><i></i></span>
+        </button>
+        <button class="icon-btn" id="mode-toggle" type="button" aria-label="Switch between dark and light mode" title="Dark / light">
+          <svg class="moon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6.2 1.3a6.8 6.8 0 1 0 8.5 8.5A5.6 5.6 0 0 1 6.2 1.3Z"/></svg>
+          <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3 3l1.1 1.1M11.9 11.9 13 13M3 13l1.1-1.1M11.9 4.1 13 3" stroke-linecap="round"/></svg>
+        </button>
+      </span>
+    </nav>
+
+    <div class="palette-pop" id="palette-pop" role="dialog" aria-label="Colours" hidden>
+      <div class="pop-head"><strong>colours</strong><span>saved in this browser</span></div>
+      <p class="pop-hint">Drag a dot to turn all three colours. Closer to the centre is calmer.</p>
+      <div class="wheel" id="wheel">
+        <canvas id="wheel-canvas" aria-hidden="true"></canvas>
+        <svg viewBox="0 0 100 100" aria-hidden="true"><polygon id="tri" points="50,50 50,50 50,50"/><line id="sp0" x1="50" y1="50" x2="50" y2="50"/><line id="sp1" x1="50" y1="50" x2="50" y2="50"/><line id="sp2" x1="50" y1="50" x2="50" y2="50"/></svg>
+        <button class="handle main" id="h0" type="button" data-k="0" aria-label="Accent colour. Left and right arrows turn the colours, up and down change strength."></button>
+        <button class="handle" id="h1" type="button" data-k="1" aria-label="Second colour. Left and right arrows turn the colours, up and down change strength."></button>
+        <button class="handle" id="h2" type="button" data-k="2" aria-label="Background colour. Left and right arrows turn the colours, up and down change strength."></button>
+      </div>
+      <div class="slider">
+        <label for="tint"><span>background tint</span><span id="tint-v"></span></label>
+        <input id="tint" type="range" min="0" max="100" step="1">
+      </div>
+      <div class="pop-foot">
+        <output id="readout" for="wheel tint"></output>
+        <button class="btn" id="reset" type="button">Reset to default</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="whoami" aria-label="About this blog">
+      <p class="prompt"><span class="ps1">vlad@vfil:~$</span> whoami</p>
+      <p class="lede">Vlad Filimon. Engineering leader, learning agentic AI in public. Notes on building with LLM agents, leading teams, and the occasional detour into music.<span class="cursor" aria-hidden="true"></span></p>
+      <div class="now">
+        <span class="label">currently writing:</span>
+        <a href="#series/building-an-agent-from-scratch">Building an agent from scratch</a>
+        <span class="meta">· 2 of 4 parts out</span>
+      </div>
+    </section>
+
+    <section aria-labelledby="latest">
+      <div class="section-head">
+        <p class="prompt" id="latest"><span class="ps1">$</span> ls -t posts/ | head -20</p>
+        <a href="#posts">all posts →</a>
+      </div>
+      <ol class="posts" reversed>
+        <li class="post">
+          <time datetime="2026-11-24">2026-11-24</time>
+          <a class="cat" href="#agentic-ai">[agentic-ai]</a>
+          <span class="title-cell"><a class="title" href="#">Tools: giving the model hands</a><span class="part">· 2/4</span></span>
+        </li>
+        <li class="post">
+          <time datetime="2026-11-17">2026-11-17</time>
+          <a class="cat" href="#leadership">[leadership]</a>
+          <span class="title-cell"><a class="title" href="#">What I stopped doing in 1:1s</a></span>
+        </li>
+        <li class="post">
+          <time datetime="2026-11-10">2026-11-10</time>
+          <a class="cat" href="#agentic-ai">[agentic-ai]</a>
+          <span class="title-cell"><a class="title" href="#">The loop: an agent is a while statement</a><span class="part">· 1/4</span></span>
+        </li>
+        <li class="post">
+          <time datetime="2026-11-06">2026-11-06</time>
+          <a class="cat" href="#music">[music]</a>
+          <span class="title-cell"><a class="title" href="#">Practising scales like writing tests</a></span>
+        </li>
+        <li class="post">
+          <time datetime="2026-11-03">2026-11-03</time>
+          <a class="cat" href="#leadership">[leadership]</a>
+          <span class="title-cell"><a class="title" href="#">Hello, world: why this blog exists</a></span>
+        </li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="cats-head">
+      <div class="section-head">
+        <p class="prompt" id="cats-head"><span class="ps1">$</span> ls categories/</p>
+      </div>
+      <dl class="cats">
+        <div class="cat-card">
+          <dt><a href="#agentic-ai">/agentic-ai</a> <span class="count">2</span></dt>
+          <dd>Learning to build with LLM agents: tools, evals, patterns, and what breaks.</dd>
+        </div>
+        <div class="cat-card">
+          <dt><a href="#leadership">/leadership</a> <span class="count">2</span></dt>
+          <dd>Notes on leading engineers and teams.</dd>
+        </div>
+        <div class="cat-card">
+          <dt><a href="#music">/music</a> <span class="count">1</span></dt>
+          <dd>Occasional notes on music.</dd>
+        </div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>© 2026 Vlad Filimon</span>
+    <nav aria-label="Elsewhere">
+      <a href="https://github.com/vfil">github</a>
+      <a href="https://www.linkedin.com/in/vlad-filimon-60a14a39/">linkedin</a>
+    </nav>
+    <span class="mock-note">mockup · example posts</span>
+  </footer>
+
+</div>
+<script>
+  // Mode toggle (dark/light): explicit choice wins over the OS setting; remembered per browser.
+  (function () {
+    var root = document.documentElement;
+    document.getElementById('mode-toggle').addEventListener('click', function () {
+      var current = root.getAttribute('data-theme') ||
+        (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      var next = current === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('mode', next); } catch (e) {}
+    });
+  })();
+</script>
+<script>
+  // Palette picker. Reference implementation for spec 0002:
+  //   palette recipe  -> src/lib/palette.ts (pure, unit-tested)
+  //   popover + wheel -> the PalettePicker component (code loaded on first open)
+  (function () {
+    var root = document.documentElement;
+    var DEFAULT = { hue: 359, chroma: 0.211, tint: 10 };
+    var CMAX = 0.25, OFF = [0, 120, 240], WHEEL_L = 0.75, MIN_CONTRAST = 4.5;
+
+    // ---------- palette recipe (pure) ----------
+    function lin(L, C, h) {
+      var r = h * Math.PI / 180, a = C * Math.cos(r), b = C * Math.sin(r);
+      var l_ = L + 0.3963377774 * a + 0.2158037573 * b, m_ = L - 0.1055613458 * a - 0.0638541728 * b, s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+      var l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+      return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+    }
+    function inGamut(c) { return c[0] >= -1e-4 && c[0] <= 1.0001 && c[1] >= -1e-4 && c[1] <= 1.0001 && c[2] >= -1e-4 && c[2] <= 1.0001; }
+    function mapped(L, C, h) {
+      var c = lin(L, C, h); if (inGamut(c)) return c;
+      var lo = 0, hi = C; for (var i = 0; i < 12; i++) { var mid = (lo + hi) / 2; if (inGamut(lin(L, mid, h))) lo = mid; else hi = mid; }
+      return lin(L, lo, h).map(function (v) { return Math.min(1, Math.max(0, v)); });
+    }
+    function enc(v) { v = Math.min(1, Math.max(0, v)); return v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055; }
+    function hex(c) { return '#' + c.map(function (v) { return Math.round(enc(v) * 255).toString(16).padStart(2, '0'); }).join(''); }
+    function lum(c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; }
+    function contrast(a, b) { var A = lum(a) + 0.05, B = lum(b) + 0.05; return A > B ? A / B : B / A; }
+    function norm(h) { return ((h % 360) + 360) % 360; }
+    // round-trip through #rrggbb so contrast is measured on the colour that actually ships
+    function rounded(c) { var x = hex(c); return [1, 3, 5].map(function (i) { var v = parseInt(x.slice(i, i + 2), 16) / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); }
+
+    // [L, C, h] per token for dark and light Mode; text tokens are nudged in lightness until >= 4.5:1 on bg
+    // (measured after rounding to hex).
+    function paletteTokens(p) {
+      var ha = norm(p.hue), hs = norm(p.hue + 120), hg = norm(p.hue + 240), C = p.chroma, g = (p.tint / 100) * 0.05;
+      var R = {
+        'bg':       [[0.18, g, hg],        [0.985, g * 0.35, hg]],
+        'surface':  [[0.215, g * 1.1, hg], [0.955, g * 0.6, hg]],
+        'line':     [[0.30, g * 1.2, hg],  [0.90, g * 0.8, hg]],
+        'muted':    [[0.68, g * 1.2, hg],  [0.50, g, hg]],
+        'fg':       [[0.92, g * 0.5, hg],  [0.22, g * 0.8, hg]],
+        'accent':   [[0.80, C, ha],        [0.55, C, ha]],
+        'accent-2': [[0.76, C * 0.85, hs], [0.50, C * 0.85, hs]]
+      };
+      var TEXT = { 'muted': 1, 'fg': 1, 'accent': 1, 'accent-2': 1 };
+      var out = { dark: {}, light: {} };
+      [['dark', 0, 1], ['light', 1, -1]].forEach(function (m) {
+        var mode = m[0], i = m[1], dir = m[2], bg = mapped.apply(null, R.bg[i]);
+        Object.keys(R).forEach(function (t) {
+          var L = R[t][i][0], c = R[t][i][1], h = R[t][i][2], v = mapped(L, c, h), n = 0;
+          if (TEXT[t]) while (contrast(rounded(v), rounded(bg)) < MIN_CONTRAST && n < 40) { L += dir * 0.01; v = mapped(L, c, h); n++; }
+          out[mode][t] = hex(v);
+        });
+        out[mode]['accent-fg'] = out[mode].bg;
+      });
+      return out;
+    }
+
+    // ---------- state ----------
+    var state = Object.assign({}, DEFAULT);
+    try { var saved = JSON.parse(localStorage.getItem('palette') || 'null'); if (saved && saved.v === 1) state = { hue: saved.hue, chroma: saved.chroma, tint: saved.tint }; } catch (e) {}
+    function isDefault() { return state.hue === DEFAULT.hue && state.chroma === DEFAULT.chroma && state.tint === DEFAULT.tint; }
+
+    function applyPalette() {
+      if (isDefault()) {
+        root.removeAttribute('data-palette');
+        try { localStorage.removeItem('palette'); } catch (e) {}
+      } else {
+        var tk = paletteTokens(state);
+        Object.keys(tk.dark).forEach(function (t) { root.style.setProperty('--d-' + t, tk.dark[t]); root.style.setProperty('--l-' + t, tk.light[t]); });
+        root.setAttribute('data-palette', 'custom');
+        try { localStorage.setItem('palette', JSON.stringify({ v: 1, hue: state.hue, chroma: state.chroma, tint: state.tint, tokens: tk })); } catch (e) {}
+      }
+      renderPicker();
+    }
+
+    // ---------- popover ----------
+    var btn = document.getElementById('palette-btn'), pop = document.getElementById('palette-pop');
+    var wheel = document.getElementById('wheel'), canvas = document.getElementById('wheel-canvas');
+    var handles = [0, 1, 2].map(function (k) { return document.getElementById('h' + k); });
+    var tint = document.getElementById('tint'), resetBtn = document.getElementById('reset');
+
+    function open() { pop.hidden = false; btn.setAttribute('aria-expanded', 'true'); drawWheel(); renderPicker(); handles[0].focus(); }
+    function close(returnFocus) { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); if (returnFocus) btn.focus(); }
+    btn.addEventListener('click', function () { pop.hidden ? open() : close(false); });
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && !pop.hidden) close(true); });
+    document.addEventListener('pointerdown', function (ev) { if (!pop.hidden && !pop.contains(ev.target) && !btn.contains(ev.target)) close(false); });
+
+    function drawWheel() {
+      var rect = wheel.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+      var n = Math.max(1, Math.round(rect.width * dpr)); if (!rect.width || canvas.width === n) return;
+      canvas.width = canvas.height = n;
+      var ctx = canvas.getContext('2d'), img = ctx.createImageData(n, n), d = img.data, cx = n / 2, R = n / 2;
+      for (var y = 0; y < n; y++) for (var x = 0; x < n; x++) {
+        var dx = x + 0.5 - cx, dy = cx - (y + 0.5), dist = Math.sqrt(dx * dx + dy * dy), i = (y * n + x) * 4;
+        if (dist > R) { d[i + 3] = 0; continue; }
+        var c = mapped(WHEEL_L, (dist / R) * CMAX, norm(Math.atan2(dy, dx) * 180 / Math.PI));
+        d[i] = Math.round(enc(c[0]) * 255); d[i + 1] = Math.round(enc(c[1]) * 255); d[i + 2] = Math.round(enc(c[2]) * 255);
+        d[i + 3] = dist > R - 1 ? Math.round((R - dist) * 255) : 255;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+    // hue -> position in % of the wheel box; hue runs counter-clockwise from the right, chroma grows outwards.
+    function pos(hue, chroma) { var r = (chroma / CMAX) * 50, a = hue * Math.PI / 180; return [50 + r * Math.cos(a), 50 - r * Math.sin(a)]; }
+
+    function renderPicker() {
+      var pts = [];
+      handles.forEach(function (el, k) {
+        var hk = norm(state.hue + OFF[k]), p = pos(hk, state.chroma); pts.push(p);
+        el.style.left = p[0] + '%'; el.style.top = p[1] + '%';
+        el.style.setProperty('--c', hex(mapped(WHEEL_L, state.chroma, hk)));
+        var sp = document.getElementById('sp' + k); sp.setAttribute('x2', p[0]); sp.setAttribute('y2', p[1]);
+      });
+      document.getElementById('tri').setAttribute('points', pts.map(function (p) { return p[0].toFixed(2) + ',' + p[1].toFixed(2); }).join(' '));
+      tint.value = state.tint; document.getElementById('tint-v').textContent = state.tint + '%';
+      document.getElementById('readout').textContent = Math.round(state.hue) + '° · ' + state.chroma.toFixed(3) + ' · ' + state.tint + '%';
+      resetBtn.disabled = isDefault();
+    }
+
+    var dragK = null;
+    function polar(ev) {
+      var r = wheel.getBoundingClientRect(), dx = ev.clientX - (r.left + r.width / 2), dy = (r.top + r.height / 2) - ev.clientY;
+      return { hue: norm(Math.atan2(dy, dx) * 180 / Math.PI), chroma: Math.min(1, Math.sqrt(dx * dx + dy * dy) / (r.width / 2)) * CMAX, x: dx, y: dy };
+    }
+    function moveTo(k, p) { state.hue = Math.round(norm(p.hue - OFF[k])); state.chroma = Math.round(Math.max(0, Math.min(CMAX, p.chroma)) * 1000) / 1000; applyPalette(); }
+    wheel.addEventListener('pointerdown', function (ev) {
+      var p = polar(ev), k = ev.target.dataset ? ev.target.dataset.k : undefined;
+      if (k === undefined) {
+        var best = Infinity, r = wheel.getBoundingClientRect();
+        handles.forEach(function (el, i) {
+          var q = pos(norm(state.hue + OFF[i]), state.chroma), hx = (q[0] / 100 - 0.5) * r.width, hy = (0.5 - q[1] / 100) * r.height;
+          var dd = (hx - p.x) * (hx - p.x) + (hy - p.y) * (hy - p.y); if (dd < best) { best = dd; k = i; }
+        });
+      }
+      dragK = Number(k); wheel.setPointerCapture(ev.pointerId); wheel.classList.add('dragging');
+      moveTo(dragK, p); ev.preventDefault();
+    });
+    wheel.addEventListener('pointermove', function (ev) { if (dragK !== null) moveTo(dragK, polar(ev)); });
+    function end() { dragK = null; wheel.classList.remove('dragging'); }
+    wheel.addEventListener('pointerup', end); wheel.addEventListener('pointercancel', end);
+    handles.forEach(function (el) {
+      el.addEventListener('keydown', function (ev) {
+        var step = ev.shiftKey ? 10 : 2, used = true;
+        if (ev.key === 'ArrowLeft') state.hue = norm(state.hue + step);
+        else if (ev.key === 'ArrowRight') state.hue = norm(state.hue - step);
+        else if (ev.key === 'ArrowUp') state.chroma = Math.round(Math.min(CMAX, state.chroma + 0.005) * 1000) / 1000;
+        else if (ev.key === 'ArrowDown') state.chroma = Math.round(Math.max(0, state.chroma - 0.005) * 1000) / 1000;
+        else used = false;
+        if (used) { ev.preventDefault(); applyPalette(); }
+      });
+    });
+    tint.addEventListener('input', function () { state.tint = Number(tint.value); applyPalette(); });
+    resetBtn.addEventListener('click', function () { state = Object.assign({}, DEFAULT); applyPalette(); });
+
+    renderPicker();
+  })();
+</script>
+</body>
+</html>
