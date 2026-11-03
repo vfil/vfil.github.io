@@ -1,0 +1,190 @@
+---
+import { CATEGORIES } from '../lib/categories';
+
+export type Section = (typeof CATEGORIES)[number]['slug'] | 'series' | 'about';
+
+interface Props {
+  /** The menu entry to mark as the current page. */
+  current?: Section | undefined;
+}
+
+const { current } = Astro.props;
+
+const items: Array<{ id: Section; href: string; label: string }> = [
+  ...CATEGORIES.map((c) => ({ id: c.slug, href: `/${c.slug}/`, label: c.slug })),
+  { id: 'series', href: '/series/', label: 'series' },
+  { id: 'about', href: '/about/', label: 'about' },
+];
+---
+
+<header class="site-header">
+  <a class="brand" href="/" aria-label="vfil home">
+    <span class="tilde">~</span>/vfil
+  </a>
+  <nav class="nav" aria-label="Main">
+    <ul>
+      {items.map((item) => (
+        <li>
+          <a href={item.href} aria-current={item.id === current ? 'page' : undefined}>
+            <span class="slash">/</span>
+            {item.label}
+          </a>
+        </li>
+      ))}
+    </ul>
+    <span class="tools">
+      <button
+        class="icon-btn"
+        id="mode-toggle"
+        type="button"
+        aria-label="Switch between dark and light mode"
+        title="Dark / light"
+      >
+        <svg class="moon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M6.2 1.3a6.8 6.8 0 1 0 8.5 8.5A5.6 5.6 0 0 1 6.2 1.3Z"></path>
+        </svg>
+        <svg
+          class="sun"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          aria-hidden="true"
+        >
+          <circle cx="8" cy="8" r="3"></circle>
+          <path
+            d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3 3l1.1 1.1M11.9 11.9 13 13M3 13l1.1-1.1M11.9 4.1 13 3"
+            stroke-linecap="round"
+          ></path>
+        </svg>
+      </button>
+    </span>
+  </nav>
+</header>
+
+<script>
+  // Mode toggle: an explicit choice wins over the OS setting and is remembered per browser.
+  const root = document.documentElement;
+  document.getElementById('mode-toggle')?.addEventListener('click', () => {
+    const current =
+      root.getAttribute('data-theme') ??
+      (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    const next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try {
+      localStorage.setItem('mode', next);
+    } catch {
+      // Storage unavailable (private mode): the choice lasts for this page only.
+    }
+  });
+</script>
+
+<style>
+  .site-header {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem 1.5rem;
+    padding-block: 1.75rem 1.25rem;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+  }
+
+  .brand {
+    font-weight: 600;
+    font-size: var(--step-0);
+    text-decoration: none;
+  }
+
+  .brand .tilde {
+    color: var(--accent);
+  }
+
+  .nav {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem 1.1rem;
+  }
+
+  .nav ul {
+    display: contents;
+    list-style: none;
+  }
+
+  .nav a {
+    text-decoration: none;
+    color: var(--muted);
+  }
+
+  .nav a:hover {
+    color: var(--fg);
+  }
+
+  .nav a[aria-current='page'] {
+    color: var(--accent);
+  }
+
+  .nav .slash {
+    color: var(--line);
+  }
+
+  .nav a:hover .slash,
+  .nav a[aria-current='page'] .slash {
+    color: inherit;
+  }
+
+  .tools {
+    display: inline-flex;
+    gap: 0.4rem;
+    margin-left: 0.35rem;
+  }
+
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.9rem;
+    height: 1.9rem;
+    padding: 0;
+    background: none;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .icon-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .icon-btn svg {
+    width: 0.95rem;
+    height: 0.95rem;
+  }
+
+  .sun {
+    display: none;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :global(:root:not([data-theme='dark'])) .sun {
+      display: block;
+    }
+    :global(:root:not([data-theme='dark'])) .moon {
+      display: none;
+    }
+  }
+
+  :global(:root[data-theme='light']) .sun {
+    display: block;
+  }
+
+  :global(:root[data-theme='light']) .moon {
+    display: none;
+  }
+</style>

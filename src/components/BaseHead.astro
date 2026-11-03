@@ -1,0 +1,45 @@
+---
+import { Font } from 'astro:assets';
+import { SITE } from '../site';
+import '../styles/global.css';
+
+interface Props {
+  /** Page title; omit on the home page to use the full site title. */
+  title?: string;
+  description?: string;
+  /** Open Graph type: 'article' for Posts. */
+  type?: 'website' | 'article';
+}
+
+const { title, description = SITE.description, type = 'website' } = Astro.props;
+const fullTitle = title ? `${title} · ${SITE.shortTitle}` : SITE.title;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>{fullTitle}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonical} />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="sitemap" href="/sitemap-index.xml" />
+<meta name="generator" content={Astro.generator} />
+
+<meta property="og:type" content={type} />
+<meta property="og:title" content={title ?? SITE.title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonical} />
+<meta property="og:site_name" content={SITE.shortTitle} />
+<meta name="twitter:card" content="summary" />
+
+<Font cssVariable="--font-mono" preload />
+<Font cssVariable="--font-sans" preload />
+
+<script is:inline>
+  // Apply the reader's saved Mode before first paint (no flash of the wrong Mode).
+  try {
+    var mode = localStorage.getItem('mode');
+    if (mode === 'dark' || mode === 'light')
+      document.documentElement.setAttribute('data-theme', mode);
+  } catch (e) {}
+</script>
