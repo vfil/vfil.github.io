@@ -50,28 +50,38 @@ Changes apply instantly to the whole site, in both Modes. The reader's Custom Pa
 
 ```ts
 export type Palette = { hue: number; chroma: number; tint: number }; // hue 0–359 (int), chroma 0–0.25 (3 dp), tint 0–100 (int)
-export type TokenName = 'bg' | 'surface' | 'line' | 'muted' | 'fg' | 'accent' | 'accent-2' | 'accent-fg';
-export type Tokens = Record<TokenName, string>;              // '#rrggbb'
-export const DEFAULT_PALETTE: Palette;                       // { hue: 359, chroma: 0.211, tint: 10 }
-export const RECIPE_VERSION: number;                         // 1; bump whenever paletteTokens' output can change
+export type TokenName =
+  'bg' | 'surface' | 'line' | 'muted' | 'fg' | 'accent' | 'accent-2' | 'accent-fg';
+export type Tokens = Record<TokenName, string>; // '#rrggbb'
+export const DEFAULT_PALETTE: Palette; // { hue: 359, chroma: 0.211, tint: 10 }
+export const RECIPE_VERSION: number; // 1; bump whenever paletteTokens' output can change
 export const CHROMA_MAX = 0.25;
-export const HANDLE_OFFSETS = [0, 120, 240] as const;        // accent, secondary, ground
+export const HANDLE_OFFSETS = [0, 120, 240] as const; // accent, secondary, ground
 export function paletteTokens(p: Palette): { dark: Tokens; light: Tokens };
-export function paletteCss(p: Palette): string;              // the three dark-first :root blocks (see below)
-export function rotateTo(p: Palette, handle: 0 | 1 | 2, pointer: { hue: number; chroma: number }): Palette;
+export function paletteCss(p: Palette): string; // the three dark-first :root blocks (see below)
+export function rotateTo(
+  p: Palette,
+  handle: 0 | 1 | 2,
+  pointer: { hue: number; chroma: number },
+): Palette;
 export function nudge(p: Palette, key: 'left' | 'right' | 'up' | 'down', big: boolean): Palette;
 export function handlePositions(p: Palette): Array<{ x: number; y: number; color: string }>; // x/y in % of wheel box
-export function pointerToPolar(dx: number, dy: number, radiusPx: number): { hue: number; chroma: number };
+export function pointerToPolar(
+  dx: number,
+  dy: number,
+  radiusPx: number,
+): { hue: number; chroma: number };
 export function nearestHandle(p: Palette, dx: number, dy: number, radiusPx: number): 0 | 1 | 2;
 export function isDefault(p: Palette): boolean;
-export function serialize(p: Palette): string;               // JSON { v: RECIPE_VERSION, hue, chroma, tint, tokens }
+export function serialize(p: Palette): string; // JSON { v: RECIPE_VERSION, hue, chroma, tint, tokens }
 export function parseStored(raw: string | null): Palette | null; // null if missing, malformed, out of range or wrong v
-export function contrast(a: string, b: string): number;      // WCAG ratio of two hex colours
+export function contrast(a: string, b: string): number; // WCAG ratio of two hex colours
 ```
 
 Internal helpers are not exported: OKLCH→linear sRGB, gamut mapping by binary search on chroma, sRGB encode, hex.
 
 **Recipe.** Port it exactly from the mockup's `paletteTokens`. Each token is an OKLCH `[L, C, h]` per Mode, where `ha` is the hue, `hs = ha + 120`, `hg = ha + 240` and `g = tint/100 × 0.05`:
+
 - `bg`: dark `[0.18, g, hg]`, light `[0.985, 0.35g, hg]`
 - `surface`: dark `[0.215, 1.1g, hg]`, light `[0.955, 0.6g, hg]`
 - `line`: dark `[0.30, 1.2g, hg]`, light `[0.90, 0.8g, hg]`
@@ -86,11 +96,13 @@ Any colour outside sRGB has its chroma reduced until it fits. **Contrast guard:*
 **Wheel geometry.** Hue runs counter-clockwise from the right (3 o'clock = 0°). The radius is proportional to chroma (rim = `CHROMA_MAX`). The wheel image is drawn at L = 0.75.
 
 ### Default Palette is generated, not hand-copied
+
 - `BaseHead` emits the colour tokens as an inline `<style>` built at build time from `paletteCss(DEFAULT_PALETTE)`: dark on bare `:root`, light under `@media (prefers-color-scheme: light) :root:not([data-theme="dark"])` and under `:root[data-theme="light"]`.
 - Remove the colour hex values that spec 0001 put in the global stylesheet. Non-colour tokens (fonts, steps, measure) stay there.
 - The global stylesheet gains the three `:root[data-palette="custom"]` blocks from the mockup, mapping `--x` to `var(--d-x)` / `var(--l-x)`.
 
 ### Before-first-paint script (inline in `<head>`, extends spec 0001's Mode script)
+
 1. Add class `js` to `<html>`.
 2. Apply `localStorage.mode`, as in 0001.
 3. Read `localStorage.palette`. If it parses and `v === RECIPE_VERSION`, write each `tokens.dark[t]` to `--d-t` and `tokens.light[t]` to `--l-t` on `<html>`, and set `data-palette="custom"`. Otherwise remove the key.
@@ -98,6 +110,7 @@ Any colour outside sRGB has its chroma reduced until it fits. **Contrast guard:*
 Everything is wrapped in try/catch. `RECIPE_VERSION` is injected at build time (`define:vars` or string interpolation); the script has no imports. Storing the computed tokens is what keeps this script tiny: it never runs the colour maths.
 
 ### `PalettePicker` component
+
 - **Markup:** the header button (`aria-expanded`, `aria-controls`, label "Change colours", triad-dots icon coloured by `--accent`, `--accent-2` and `--muted`) and the popover container (`role="dialog"`, `aria-label="Colours"`, `hidden`).
 - **No JS:** CSS hides the button unless `html.js` is set.
 - **Loading:** on first click, the component's `<script>` runs `import('./palette-picker-controller')`. Vite splits that into its own chunk, which then renders the wheel, handles, slider and reset into the popover. No picker logic is in the initial bundle.
@@ -115,6 +128,7 @@ Everything is wrapped in try/catch. `RECIPE_VERSION` is injected at build time (
 - **Header order:** colours · Mode toggle.
 
 ### Not affected
+
 Shiki code-block colours stay on their fixed GitHub light/dark themes; only `--surface` behind them follows the Palette.
 
 ## Testing decisions
@@ -135,6 +149,7 @@ Shiki code-block colours stay on their fixed GitHub light/dark themes; only `--s
 - The controller (DOM, canvas, pointer events) is not unit-tested. It is verified by the step checks below.
 
 ## Out of scope
+
 Sharing a Palette by link, presets or named palettes, syncing across devices, changing fonts or Shiki code themes, a separate picker per Mode.
 
 ---
@@ -144,13 +159,17 @@ Sharing a Palette by link, presets or named palettes, syncing across devices, ch
 One commit per step. Every step ends with `bun run check && bun run test && bun run build` green.
 
 ### Step 1: `palette.ts` (TDD)
+
 Depends on: spec 0001 complete
+
 - Implement `src/lib/palette.ts` and `src/lib/palette.test.ts` covering every Testing case.
 
 Done when: all tests pass, and `paletteTokens(DEFAULT_PALETTE)` matches spec 0001's table exactly.
 
 ### Step 2: Generate the Default Palette CSS
+
 Depends on: 1
+
 - `BaseHead` emits `paletteCss(DEFAULT_PALETTE)` inline.
 - Remove the hand-written colour hex values from the global stylesheet.
 - Add the `data-palette="custom"` mapping blocks.
@@ -158,19 +177,25 @@ Depends on: 1
 Done when: the site looks pixel-identical to before in both Modes (compare `/` and `/posts/hello-world/` screenshots), and `grep -E '#[0-9a-f]{6}' src/styles` finds no colour-token definitions.
 
 ### Step 3: Before-first-paint script
+
 Depends on: 2
+
 - Extend the head script as specified, with `RECIPE_VERSION` injected.
 
 Done when, testing by hand in the browser console:
+
 - After `localStorage.setItem('palette', <serialize({hue:200,chroma:0.15,tint:40})>)`, a hard reload shows the custom colours with no flash of the default.
 - After changing `v` to 999, a reload shows the default and the key is gone.
 - With JS disabled, the site shows the Default Palette and no colours button.
 
 ### Step 4: `PalettePicker` component and controller
+
 Depends on: 3
+
 - The header button, popover and lazily imported controller, with behaviour as specified and visuals as in the mockup.
 
 Done when:
+
 - Dragging any handle rotates all three, keeping 120°, and recolours the page live in both Modes.
 - The choice survives navigation and reload.
 - Reset restores the default and clears storage.
@@ -180,9 +205,11 @@ Done when:
 - The network panel shows the controller chunk is fetched only on first open.
 
 ### Step 5: Budget, accessibility and docs
+
 Depends on: 4
 
 Checks:
+
 - Initial JS per page (inline scripts + component stub) is ≤ 2 KB gzipped more than at the end of spec 0001.
 - Lighthouse accessibility ≥ 95 with the popover closed.
 - Changing `DEFAULT_PALETTE` to `{ hue: 200, chroma: 0.15, tint: 40 }` in a scratch run makes step 1's table test fail. That's the expected guard. Revert the change.
@@ -192,5 +219,6 @@ Docs: add a README section "Colours" covering how readers use the picker, how to
 Done when: all three checks pass and the README section is written.
 
 ## Further notes
+
 - Use the glossary words in code and UI copy: `Palette`, `Mode`, `DEFAULT_PALETTE`. The button says "colours", never "theme".
 - The mockup's controller is plain ES5-style JS for portability. Port it to typed TS modules: no `var`, no globals.
