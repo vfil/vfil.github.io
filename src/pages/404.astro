@@ -1,0 +1,39 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="Not found" description="This page does not exist.">
+  <section class="not-found">
+    <p class="prompt">
+      <span class="ps1">$</span> cd {'<'}this page{'>'}
+    </p>
+    <p class="error">cd: no such file or directory</p>
+    <h1 class="page-title">404: nothing here</h1>
+    <p>
+      The page may have moved, or the link may be wrong. <a href="/">Go to the home page</a> or{' '}
+      <a href="/posts/">see all posts</a>.
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  .not-found {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .not-found p {
+    margin: 0;
+  }
+
+  .not-found .prompt {
+    margin: 0;
+  }
+
+  .error {
+    margin-top: -0.5rem;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    color: var(--accent);
+  }
+</style>

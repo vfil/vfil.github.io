@@ -1,0 +1,27 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import ListingHeader from '../components/ListingHeader.astro';
+import { SITE } from '../site';
+---
+
+<BaseLayout title="About" description="Who writes vfil, and why." current="about">
+  <ListingHeader command="cat about.md" title="About" />
+  <div class="prose">
+    <!-- Placeholder bio: Vlad rewrites this. -->
+    <p>
+      I am Vlad Filimon. I lead engineering teams, and I am learning to build with LLM agents in my
+      spare time. This blog is my notebook for that: what I try, what works, what breaks, and what
+      it changes about leading people who build software.
+    </p>
+    <p>I also play music, badly but happily, and sometimes write about that too.</p>
+    <h2>Elsewhere</h2>
+    <ul>
+      <li>
+        <a href={SITE.links.github}>GitHub</a>: code from the posts and other experiments
+      </li>
+      <li>
+        <a href={SITE.links.linkedin}>LinkedIn</a>: the professional version of me
+      </li>
+    </ul>
+  </div>
+</BaseLayout>
