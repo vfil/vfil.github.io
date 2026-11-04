@@ -1,9 +1,13 @@
 import { describe, expect, test } from 'vitest';
 import {
   buildSite,
+  checkQuiz,
   formatDate,
+  inlineCodeHtml,
   readingTime,
   slugFromFilename,
+  splitInlineCode,
+  type QuizSpec,
   type PostRecord,
   type SeriesRecord,
 } from './model';
@@ -305,5 +309,76 @@ describe('buildSite: moving through a Series', () => {
 
   test('a Post outside any Series has no place in one', () => {
     expect(site.placeInSeries(find('unrelated'))).toBeUndefined();
+  });
+});
+
+describe('checkQuiz', () => {
+  const quiz = (fields: Partial<QuizSpec> = {}): QuizSpec => ({
+    question: 'Which one?',
+    options: ['a', 'b', 'c'],
+    correct: 1,
+    right: 'Right.',
+    wrong: 'Not quite.',
+    ...fields,
+  });
+
+  test('accepts a well-formed quiz', () => {
+    expect(() => checkQuiz(quiz())).not.toThrow();
+  });
+
+  test('rejects a quiz with fewer than two options', () => {
+    expect(() => checkQuiz(quiz({ options: ['a'], correct: 0 }))).toThrow(/at least two options/);
+  });
+
+  test.each([-1, 3, 1.5, Number.NaN])('rejects correct = %s', (correct) => {
+    expect(() => checkQuiz(quiz({ correct }))).toThrow(/correct/);
+  });
+
+  test.each(['question', 'right', 'wrong'] as const)('rejects an empty %s', (field) => {
+    expect(() => checkQuiz(quiz({ [field]: '  ' }))).toThrow(new RegExp(field));
+  });
+
+  test('rejects an empty option', () => {
+    expect(() => checkQuiz(quiz({ options: ['a', '', 'c'] }))).toThrow(/option/);
+  });
+
+  test('names the question in the error, so the author can find it', () => {
+    expect(() => checkQuiz(quiz({ correct: 9 }))).toThrow(/Which one\?/);
+  });
+});
+
+describe('splitInlineCode', () => {
+  test('plain text is one piece', () => {
+    expect(splitInlineCode('no code here')).toEqual([{ text: 'no code here', code: false }]);
+  });
+
+  test('backticks mark code pieces', () => {
+    expect(splitInlineCode('call `edit_file` now')).toEqual([
+      { text: 'call ', code: false },
+      { text: 'edit_file', code: true },
+      { text: ' now', code: false },
+    ]);
+  });
+
+  test('keeps a leading or trailing code piece without empty neighbours', () => {
+    expect(splitInlineCode('`a` and `b`')).toEqual([
+      { text: 'a', code: true },
+      { text: ' and ', code: false },
+      { text: 'b', code: true },
+    ]);
+  });
+
+  test('rejects an unclosed backtick', () => {
+    expect(() => splitInlineCode('oops `unclosed')).toThrow(/backtick/);
+  });
+});
+
+describe('inlineCodeHtml', () => {
+  test('wraps code pieces in <code>', () => {
+    expect(inlineCodeHtml('a `b` c')).toBe('a <code>b</code> c');
+  });
+
+  test('escapes HTML in text and in code', () => {
+    expect(inlineCodeHtml('x < y & `a<b>`')).toBe('x &lt; y &amp; <code>a&lt;b&gt;</code>');
   });
 });

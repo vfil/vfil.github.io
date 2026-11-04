@@ -225,3 +225,56 @@ export function readingTime(body: string): number {
 export function formatDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
+
+/** A multiple-choice quiz as authored in a Post (see `Quiz.astro`). */
+export interface QuizSpec {
+  question: string;
+  options: string[];
+  /** Index into `options` of the right answer. */
+  correct: number;
+  /** Shown after a right pick. */
+  right: string;
+  /** Shown after a wrong pick. */
+  wrong: string;
+}
+
+/** Throws, naming the question, if a quiz is malformed, so a broken quiz never reaches readers. */
+export function checkQuiz(quiz: QuizSpec): void {
+  const fail = (problem: string): never => {
+    throw new Error(`Quiz "${quiz.question}": ${problem}`);
+  };
+  if (quiz.question.trim() === '') fail('the question is empty');
+  if (quiz.options.length < 2) fail('needs at least two options');
+  if (quiz.options.some((option) => option.trim() === '')) fail('an option is empty');
+  if (!Number.isInteger(quiz.correct) || quiz.correct < 0 || quiz.correct >= quiz.options.length) {
+    fail(`correct must be an index from 0 to ${quiz.options.length - 1}, got ${quiz.correct}`);
+  }
+  if (quiz.right.trim() === '') fail('the right message is empty');
+  if (quiz.wrong.trim() === '') fail('the wrong message is empty');
+}
+
+export interface TextPiece {
+  text: string;
+  code: boolean;
+}
+
+/** Splits `call \`edit_file\` now` into text and code pieces, so quiz text can contain inline code. */
+export function splitInlineCode(text: string): TextPiece[] {
+  const parts = text.split('`');
+  if (parts.length % 2 === 0) throw new Error(`Unclosed backtick in: ${text}`);
+  return parts
+    .map((part, i) => ({ text: part, code: i % 2 === 1 }))
+    .filter((piece) => piece.text !== '');
+}
+
+const escapeHtml = (text: string) =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** Quiz text as safe HTML: escaped, with `backticked` parts in <code>. */
+export function inlineCodeHtml(text: string): string {
+  return splitInlineCode(text)
+    .map((piece) =>
+      piece.code ? `<code>${escapeHtml(piece.text)}</code>` : escapeHtml(piece.text),
+    )
+    .join('');
+}
