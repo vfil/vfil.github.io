@@ -1,6 +1,6 @@
 /**
  * The Palette recipe: three numbers (hue, chroma, tint) → every colour token, in both Modes.
- * Pure, no DOM. Ported from the reference implementation in specs/mockups/home.html.
+ * Pure, no DOM.
  */
 
 export type Palette = { hue: number; chroma: number; tint: number };
