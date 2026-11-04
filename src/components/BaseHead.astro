@@ -1,6 +1,7 @@
 ---
 import { Font } from 'astro:assets';
 import { SITE } from '../site';
+import { DEFAULT_PALETTE, paletteCss, storedPaletteScript } from '../lib/palette';
 import '../styles/global.css';
 
 interface Props {
@@ -14,6 +15,16 @@ interface Props {
 const { title, description = SITE.description, type = 'website' } = Astro.props;
 const fullTitle = title ? `${title} · ${SITE.shortTitle}` : SITE.title;
 const canonical = new URL(Astro.url.pathname, Astro.site);
+const defaultPaletteCss = paletteCss(DEFAULT_PALETTE);
+
+// Runs before first paint, so there is no flash of the wrong Mode or of the Default Palette.
+// Plain ES5 with no imports: it is inlined as-is.
+const firstPaintScript = `try {
+  document.documentElement.classList.add('js');
+  var mode = localStorage.getItem('mode');
+  if (mode === 'dark' || mode === 'light') document.documentElement.setAttribute('data-theme', mode);
+} catch (e) {}
+${storedPaletteScript}`;
 ---
 
 <meta charset="utf-8" />
@@ -32,15 +43,11 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 <meta property="og:site_name" content={SITE.shortTitle} />
 <meta name="twitter:card" content="summary" />
 
+<!-- Colour tokens, generated at build time from the Default Palette. -->
+<style is:inline set:html={defaultPaletteCss} />
+
 <!-- Preload only what the first screen needs; other weights and subsets load on demand. -->
 <Font cssVariable="--font-mono" preload={[{ weight: 400, style: 'normal', subset: 'latin' }]} />
 <Font cssVariable="--font-sans" preload={[{ weight: 400, style: 'normal', subset: 'latin' }]} />
 
-<script is:inline>
-  // Apply the reader's saved Mode before first paint (no flash of the wrong Mode).
-  try {
-    var mode = localStorage.getItem('mode');
-    if (mode === 'dark' || mode === 'light')
-      document.documentElement.setAttribute('data-theme', mode);
-  } catch (e) {}
-</script>
+<script is:inline set:html={firstPaintScript} />

@@ -1,6 +1,6 @@
 # 0002 · Reader Palette picker
 
-Status: ready for implementation, **after spec 0001 is fully implemented**
+Status: implemented (2026-11-04)
 Date: 2026-11-03
 
 **Read first:** [GLOSSARY.md](../GLOSSARY.md) (especially Mode, Palette, Default Palette, Custom Palette), [ADR 0001](../docs/adr/0001-astro-over-react-frameworks.md), [spec 0001](./0001-blog-foundation.md), and the visual + behavioural reference [mockups/home.html](./mockups/home.html).
@@ -74,8 +74,11 @@ export function pointerToPolar(
 export function nearestHandle(p: Palette, dx: number, dy: number, radiusPx: number): 0 | 1 | 2;
 export function isDefault(p: Palette): boolean;
 export function serialize(p: Palette): string; // JSON { v: RECIPE_VERSION, hue, chroma, tint, tokens }
-export function parseStored(raw: string | null): Palette | null; // null if missing, malformed, out of range or wrong v
+export function parseStored(raw: string | null): Palette | null; // null if missing, malformed, out of range or wrong v (including any token that isn't #rrggbb)
 export function contrast(a: string, b: string): number; // WCAG ratio of two hex colours
+export function wheelRgb(hue: number, chroma: number): [number, number, number]; // wheel pixel as 0–255 sRGB (added in step 1: the controller paints the wheel with it)
+export const PALETTE_STORAGE_KEY = 'palette'; // localStorage key (added in review)
+export const storedPaletteScript: string; // ES5 source of step 3 below, inlined by BaseHead; accepts exactly what parseStored accepts (added in review)
 ```
 
 Internal helpers are not exported: OKLCH→linear sRGB, gamut mapping by binary search on chroma, sRGB encode, hex.
@@ -100,6 +103,7 @@ Any colour outside sRGB has its chroma reduced until it fits. **Contrast guard:*
 - `BaseHead` emits the colour tokens as an inline `<style>` built at build time from `paletteCss(DEFAULT_PALETTE)`: dark on bare `:root`, light under `@media (prefers-color-scheme: light) :root:not([data-theme="dark"])` and under `:root[data-theme="light"]`.
 - Remove the colour hex values that spec 0001 put in the global stylesheet. Non-colour tokens (fonts, steps, measure) stay there.
 - The global stylesheet gains the three `:root[data-palette="custom"]` blocks from the mockup, mapping `--x` to `var(--d-x)` / `var(--l-x)`.
+- Colours that never follow the Palette (shadows, the white guides and handle rims drawn over the wheel image) are fixed tokens in the global stylesheet's `:root` (`--shadow`, `--shadow-edge`, `--on-wheel`), so components still use tokens only.
 
 ### Before-first-paint script (inline in `<head>`, extends spec 0001's Mode script)
 
@@ -107,7 +111,7 @@ Any colour outside sRGB has its chroma reduced until it fits. **Contrast guard:*
 2. Apply `localStorage.mode`, as in 0001.
 3. Read `localStorage.palette`. If it parses and `v === RECIPE_VERSION`, write each `tokens.dark[t]` to `--d-t` and `tokens.light[t]` to `--l-t` on `<html>`, and set `data-palette="custom"`. Otherwise remove the key.
 
-Everything is wrapped in try/catch. `RECIPE_VERSION` is injected at build time (`define:vars` or string interpolation); the script has no imports. Storing the computed tokens is what keeps this script tiny: it never runs the colour maths.
+The palette part is `storedPaletteScript` from `palette.ts`, so a test can hold it to the same rules as `parseStored`. Everything is wrapped in try/catch. `RECIPE_VERSION` is injected at build time (`define:vars` or string interpolation); the script has no imports. Storing the computed tokens is what keeps this script tiny: it never runs the colour maths.
 
 ### `PalettePicker` component
 

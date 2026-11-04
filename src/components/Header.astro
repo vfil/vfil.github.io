@@ -1,4 +1,5 @@
 ---
+import PalettePicker from './PalettePicker.astro';
 import { CATEGORIES } from '../lib/categories';
 
 export type Section = (typeof CATEGORIES)[number]['slug'] | 'series' | 'about';
@@ -32,7 +33,8 @@ const items: Array<{ id: Section; href: string; label: string }> = [
         </li>
       ))}
     </ul>
-    <span class="tools">
+    <div class="tools">
+      <PalettePicker />
       <button
         class="icon-btn"
         id="mode-toggle"
@@ -58,7 +60,7 @@ const items: Array<{ id: Section; href: string; label: string }> = [
           ></path>
         </svg>
       </button>
-    </span>
+    </div>
   </nav>
 </header>
 
@@ -143,7 +145,8 @@ const items: Array<{ id: Section; href: string; label: string }> = [
     margin-left: 0.35rem;
   }
 
-  .icon-btn {
+  /* :global so the PalettePicker's button shares the look. */
+  .tools :global(.icon-btn) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -157,12 +160,13 @@ const items: Array<{ id: Section; href: string; label: string }> = [
     cursor: pointer;
   }
 
-  .icon-btn:hover {
+  .tools :global(.icon-btn:hover),
+  .tools :global(.icon-btn[aria-expanded='true']) {
     color: var(--accent);
     border-color: var(--accent);
   }
 
-  .icon-btn svg {
+  .tools :global(.icon-btn svg) {
     width: 0.95rem;
     height: 0.95rem;
   }
