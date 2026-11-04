@@ -1,6 +1,6 @@
 # 0006 · Part 2 of the agent Series: "The roadmap"
 
-Status: planned
+Status: implemented (2026-11-04), as a Draft until Vlad has read it
 
 Product spec only. The Post will be `src/content/posts/2026-11-04-the-roadmap.mdx` (renamed to the real date when published) in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md) for how Part 1 was ported.
 
@@ -22,11 +22,9 @@ A faithful port of the lesson as one Post, lightly edited for the blog. It stays
 - **Sources**: the lesson's "Primary source" (Anthropic's _Scaling Managed Agents_) joins the Sources list at the bottom, marked as the one to read first.
 - **Cut**: the lesson-pack scaffolding (navigation, glossary and reference links), and the "swap modules" paragraph, which shrinks to one sentence: the map is a plan, not a contract.
 
-### Claims checked before publishing
+### Claims
 
-- The "~8 tokens/s on a 16 GB M1" figure is not backed by any measurement in the Series, so the Post keeps the point qualitatively (a non-streaming reply can sit silent for tens of seconds on a small laptop) unless Vlad has a measurement to cite.
-- OpenCode references (file paths, the quoted `AGENTS.md` rule about "no in-memory tool loop", the `Effect.fork` → `forkChild` rename) link to GitHub at the same pinned commit as Part 1 (`863ea41364`), and each path and quote is checked to exist there. If one does not, the Post moves to a newer commit and says so.
-- The five Stage A titles and Part numbers match the Series file exactly.
+The Post states only what was checked: OpenCode links and quotations at the same pinned commit as Part 1, the Managed Agents article's three-part split, and the Stage A titles and Part numbers against the Series file. The unmeasured tokens-per-second figure from the lesson is gone; the point stays qualitative.
 
 ## User stories
 

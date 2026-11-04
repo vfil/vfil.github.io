@@ -1,0 +1,204 @@
+---
+title: 'The roadmap'
+description: 'My Part 1 agent works and breaks in five ways. This is the map of the Series: which Part fixes which failure, and in what order.'
+pubDate: 2026-11-04
+category: agentic-ai
+tags: [agents, architecture, opencode]
+series: building-an-agent-from-scratch
+part: 2
+draft: true
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+The agent from [Part 1](/posts/the-loop/) is a real agent, and it has five specific weaknesses. Each of the next Parts addresses one of them. This Part gives the order and the reasoning, so that when a later topic seems unmotivated you can see which failure it is there to fix.
+
+This Part has no code of its own. In Part 1 you got your hands dirty and ran into the limits of a naive loop. Now it's time to plan a more robust agent.
+
+## Start from what breaks
+
+The loop built in Part 1 has limits. Before the map, here are the five ways it fails:
+
+1. **Its capabilities are limited.** Three tools: `list_files`, `read_file` and `edit_file`. If one of them throws, for example on a path that doesn't exist, the program crashes instead of telling the model what went wrong.
+2. **You can't test it.** Every run needs a live model: seconds per step locally, money per step on Claude, and a different answer each time. Errors are invisible in the types: nothing tells you `list_files` can fail.
+3. **It forgets everything.** Your `messages` array lives in memory. Press Ctrl-C and the conversation is gone.
+4. **It has no guardrails.** Add a `bash` tool and the model can run any command it proposes. Nothing stands between the proposal and the execution.
+5. **It speaks one protocol per file.** Your local loop and your Claude loop are two near-copies. Every fix has to be made twice, and a fourth provider would mean a third copy.
+
+## Three parts of an agent
+
+Anthropic's [_Scaling Managed Agents: Decoupling the brain from the hands_](https://www.anthropic.com/research/managed-agents) splits an agent into three parts. That split is the basis of this roadmap:
+
+- **Harness**: the loop. It calls the model, reads its tool calls and routes each one to the right tool. Your Part 1 code is a harness.
+- **Session**: the durable record of what happened, stored outside the model's context window and outside your process, so it survives crashes.
+- **Sandbox**: where tools actually touch the world (files, shell), with guardrails on what is allowed.
+
+The article's core argument is that these should be _separate_: a crashed harness resumes from the session, and a sandbox can be replaced without losing history. (This "session" is agent vocabulary, unrelated to a Series on this blog.)
+
+Failures 1, 2 and 5 above are harness problems, failure 3 is a session problem, and failure 4 is a sandbox problem.
+
+## The vocabulary
+
+Part 1 defined _provider_, _protocol_ and _model_. The map needs three more words, which OpenCode uses consistently across its source:
+
+- A **route** binds a protocol to one provider's endpoint and auth. Ollama and llama.cpp are two routes on one protocol, which matches OpenCode's `Route.make` ([route/protocol.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/route/protocol.ts)).
+- A **step** is exactly one model call, from request to response: your loop's body, once ([AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/AGENTS.md)).
+- A **turn** is all the steps from a user prompt until the agent goes idle. Part 1's "the loop stops when the model replies with text" is the end of a turn.
+
+One rule from the same file will reshape your agent in the Session stage: _"Each step is one explicit `llm.stream` call that continues from reloaded history. Do not add an in-memory tool loop."_ The Part 1 loop is an in-memory tool loop of the kind that rule forbids. It stays as it is until then, and that stage covers _why_ OpenCode forbids it.
+
+## The map
+
+Three stages, one per part of an agent. Each says which failures it fixes.
+
+### Stage A · Harness
+
+Fixes failures 1, 2 and 5: a capable loop, one interface for every provider, and a loop you can test without a live model.
+
+- **Part 1, _The agent loop_.** Prompt → tool call → run it → tool result → repeat, on Ollama, llama.cpp and Claude. You end with a three-tool agent in plain TypeScript.
+- **Part 3, _Tools as data_.** A tool registry: name, description, input schema and executor in one object. Tool failures return to the model as results instead of crashing the loop. You end with five tools in one registry: `list_files`, `read_file`, `edit_file`, `write_file` and `bash`. In OpenCode: [packages/core/src/tool.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool.ts) and [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md) ("each tool carries its name, options, schemas, and executable behavior in one object").
+- **Part 4, _Providers behind one interface_.** Your agent gets its own message type: a tool call is `{ type: "tool-call", id, name, input }`, a tool result is `{ type: "tool-result", id, name, result }`, and an error is a kind of result, not a flag. Each protocol translates to and from it, so the loop stops knowing which provider it talks to. You end with one loop that runs on Ollama, llama.cpp or Claude by configuration; adding a provider means adding a route. In OpenCode: [ai/src/schema/messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/messages.ts) (`ToolCallPart`, `ToolResultPart`) and [protocols/openai-compatible-chat.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/openai-compatible-chat.ts) (24 lines: one protocol, many routes).
+- **Part 5, _Why Effect: errors as values_.** Plain TypeScript hides failure: a function's type doesn't say it throws. Effect puts the error in the type ([Why Effect?](https://effect.website/docs/getting-started/why-effect/)). You rewrite your loop with `Effect.gen` and typed tool errors, and end with the same agent in which every failure is visible in a type.
+- **Part 6, _Services and layers_.** The model client and tools become services your loop _asks for_ instead of imports, so swapping a real model for a scripted fake is a one-line change. You end with a test that runs your whole loop against a fake model: no API key, no cost. In OpenCode: `Tool.Service`, `Permission.Service` and its [Effect skill](https://github.com/anomalyco/opencode/blob/863ea41364/.opencode/skills/effect/SKILL.md).
+- **Part 7, _Streaming_.** Text arrives token by token instead of all at once, carried by Effect's `Stream`. Both protocols stream as server-sent events, but in different event shapes, so each protocol needs its own decoder into your common type. Locally this matters most: a small model on a laptop is slow enough that a non-streaming reply can sit silent for a long time. You end with output that appears in your terminal as the model writes it, on every provider. In OpenCode: [packages/ai/src/llm.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/llm.ts); `LLM.stream` runs exactly one model call ([ai/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/AGENTS.md)).
+
+### Stage B · Session
+
+Fixes failure 3: memory that outlives the process. These are not scheduled as Parts yet; they join the Series when Stage A is nearly done.
+
+- **The session as an event log.** Append every fact (prompt received, step finished, tool result) to SQLite. Before each step, reload history from the log instead of trusting an in-memory array. This is the "no in-memory tool loop" rule made concrete. Kill your agent mid-task, restart it and watch it continue. In OpenCode: [session/runner/step.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/session/runner/step.ts) and [session/history.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/session/history.ts). Tool: [`bun:sqlite`](https://bun.com/docs/runtime/sqlite).
+- **Inbox vs. execution.** Saving a prompt and running the model become two separate acts. A prompt is durable the moment it is accepted, even if the process dies before the model sees it, so a queued prompt survives a crash and runs on restart. In OpenCode: [session/inbox.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/session/inbox.ts), [session/execution.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/session/execution.ts) and [execution/restart.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/session/execution/restart.ts).
+- **Context limits and compaction.** Long sessions outgrow the model's context window. Older history gets summarized while the full log stays in the session. Local models hit this first: Ollama's 4k default overflows within a few steps (which is why Part 1 starts it at 32k), and even 32k fills in a long task. Claude's much larger window delays the problem; it doesn't remove it. The goal is a long session that keeps working instead of erroring. In OpenCode: [session/compaction.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/session/compaction.ts).
+
+### Stage C · Sandbox
+
+Fixes failure 4: the model proposes, a policy decides, and only then does your code act. Also not scheduled as Parts yet.
+
+- **Permissions.** Ask before risky tools run. A "no" goes back to the model as a result it can react to, not as a crash. You end with a y/n prompt before `write_file` and `bash`, and denials the model adapts to. In OpenCode: [packages/core/src/permission.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/permission.ts), and the decline handling described in [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md).
+- **Interruption.** Ctrl-C stops the current step cleanly, without corrupting the session log. Effect's interruption model handles this. Interrupt mid-tool-call, restart, and find a consistent session.
+
+### Capstone: defend your design
+
+Read OpenCode's session runner end to end and write, in your own words, where your agent agrees with it, where it is simpler, and what that simplicity costs. This is the final exercise of the Series.
+
+> **Safety note for right now.** If you add a `bash` tool before the Sandbox stage, put a simple `confirm()`-style y/n prompt in front of it from the start. The full permission system can come later. Running arbitrary shell commands proposed by a model should not wait for it.
+
+> **Effect v4.** OpenCode uses Effect v4. Most tutorials, blog posts and much of the [docs site](https://effect.website/docs) show v3, and some APIs were renamed (for example `Effect.fork` became `Effect.forkChild`, which you'll see in OpenCode's source). When an example doesn't compile, the official [v3 → v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md) is the first place to check.
+
+The map is a plan, not a contract: the Parts are independent enough to reorder.
+
+## Check yourself
+
+Try each question before moving on. First, two from Part 1: answer from memory, because recalling the answer is the point.
+
+<Quiz
+  question="On both protocols your agent uses, what ties a tool's result to its request?"
+  options={[
+    'The order the tools appear in your array',
+    'The tool name repeated in the next prompt',
+    'The id the model attached to its tool call',
+    'A timestamp your code attaches to each result',
+  ]}
+  correct={2}
+  right="Right. `tool_call_id` on OpenAI, `tool_use_id` on Anthropic. Ollama's native protocol has no id and matches by tool name, one reason your agent doesn't use it."
+  wrong="Not quite. It's the call id: `tool_call_id` on the OpenAI protocol, `tool_use_id` on Anthropic. It matters once the model makes several calls in one reply."
+/>
+
+<Quiz
+  question="Why does each tool definition carry a JSON Schema (`parameters` on OpenAI, `input_schema` on Anthropic)?"
+  options={[
+    'So the model knows which arguments to send',
+    'So the API can run the tool remotely',
+    'So your code can skip validating its input',
+    'So the results get cached between calls',
+  ]}
+  correct={0}
+  right="Right. The schema is the model's contract for proposing a call. Your code still owns execution."
+  wrong="Not quite. The schema tells the model what arguments it may propose. The API never runs your client tools."
+/>
+
+Now sort each piece of agent code into Harness, Session or Sandbox.
+
+<Quiz
+  question="The `while` loop that calls the model and reads its reply."
+  options={['Session', 'Harness', 'Sandbox']}
+  correct={1}
+  right="Right. That loop is the harness."
+  wrong="It's the harness: the loop that calls the model and routes its tool calls."
+/>
+
+<Quiz
+  question="A SQLite table recording every prompt, step and tool result."
+  options={['Session', 'Harness', 'Sandbox']}
+  correct={0}
+  right="Right. A durable record outside the process is the session."
+  wrong="It's the session: the durable log of what happened."
+/>
+
+<Quiz
+  question="Keeping your API key out of reach of commands the model runs."
+  options={['Session', 'Harness', 'Sandbox']}
+  correct={2}
+  right="Right. The Managed Agents article keeps credentials out of the sandbox for this reason: untrusted code the model generated runs there."
+  wrong="It's the sandbox: the guarded place where tools touch the world, with no credentials inside it."
+/>
+
+<Quiz
+  question="After a crash, rebuilding the conversation so the next step can continue."
+  options={['Session', 'Harness', 'Sandbox']}
+  correct={0}
+  right="Right. The harness resumes from what the session recorded."
+  wrong="It's the session. The harness can only resume because the session kept the history."
+/>
+
+Last, match each failure to the stage that fixes it.
+
+<Quiz
+  question="The model proposes `rm -rf ~` and your loop runs it."
+  options={['Stage A: Harness', 'Stage B: Session', 'Stage C: Sandbox']}
+  correct={2}
+  right="Right. Permissions sit between the proposal and the execution."
+  wrong="Stage C. Permissions are the guardrail between what the model proposes and what your code does."
+/>
+
+<Quiz
+  question="You can't test your loop without a live model answering every step."
+  options={['Stage A: Harness', 'Stage B: Session', 'Stage C: Sandbox']}
+  correct={0}
+  right="Right. Making the model a service lets a test swap in a fake one."
+  wrong="Stage A. Turning the model client into a service is what lets a test swap in a fake."
+/>
+
+<Quiz
+  question="A fix to your Ollama loop has to be copied into your Claude loop by hand."
+  options={['Stage A: Harness', 'Stage B: Session', 'Stage C: Sandbox']}
+  correct={0}
+  right="Right. Providers behind one interface: the loop talks to your own message type, and protocols translate."
+  wrong="Stage A. The provider interface puts one message type in the loop and moves protocol differences into translators."
+/>
+
+## While you build: three predictions
+
+Write your answers in a notes file next to your agent _before_ you reach the matching Part. A guess first, even a wrong one, helps you remember more than reading the answer directly.
+
+1. Point `list_files` at a directory that doesn't exist. What does your loop do? What _should_ it do? (Claude's [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) page shows how Anthropic's protocol reports a failed tool. Does the OpenAI protocol have the same thing?)
+2. Press Ctrl-C halfway through a multi-tool task. Which data was lost, and what is the smallest thing you'd need to write to disk to get it back?
+3. OpenCode reloads history before _every_ step instead of keeping it in memory. That's slower. What does it buy them?
+
+> **Result.** You can now look at any piece of agent code, in your agent or in OpenCode, and say which of the three parts it belongs to and which failure it prevents. The rest of the Series uses this framing.
+
+## Sources
+
+If you read only one, read the first: with this map in hand, look for where each stage of the roadmap shows up in Anthropic's design.
+
+- [Anthropic Engineering: Scaling Managed Agents: Decoupling the brain from the hands](https://www.anthropic.com/research/managed-agents)
+- [Effect docs: Why Effect?](https://effect.website/docs/getting-started/why-effect/)
+- [Effect v3 → v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md)
+- [Bun docs: SQLite](https://bun.com/docs/runtime/sqlite)
+- [Claude docs: Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)
+- [OpenCode's AGENTS.md (Session Core section)](https://github.com/anomalyco/opencode/blob/863ea41364/AGENTS.md)
+- OpenCode's [ai/src/route/protocol.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/route/protocol.ts) and [ai/src/schema/messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/messages.ts)
+
+Checked: every OpenCode link and quotation above against commit `863ea41364`, and the Managed Agents article's three-part split and its credentials-outside-the-sandbox design, on 2026-11-04.
