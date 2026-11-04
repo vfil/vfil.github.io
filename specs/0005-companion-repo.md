@@ -1,8 +1,8 @@
 # 0005 · Companion repo and Snapshots
 
-Status: planned
+Status: implemented (2026-11-04)
 
-Terms: see [GLOSSARY.md](../GLOSSARY.md) for Series, Part, Companion repo and Snapshot. Spec [0003](0003-agent-loop-post.md) is the Post this first applies to.
+Product spec only. How it works lives in the code (`companionRepo` in `src/lib/model.ts`, `CompanionNote.astro`, `CompanionFooter.astro`) and the README's "Write a Series" section; see [GLOSSARY.md](../GLOSSARY.md) for Series, Part, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md) for the Post this first applies to.
 
 ## Problem statement
 
@@ -28,15 +28,6 @@ Code in the Posts stays inline and unlinked: readers skim the code as they read 
 4. As a reader on the Series page, I want to see the repo before deciding to read the Series.
 5. As the author, I want to write the repo URL once per Series and one Snapshot name per Part, and have every page derive its links from them.
 6. As the author, I want a Series without a repo (or a Part without a Snapshot) to still build and look right.
-
-## Implementation
-
-One step per commit; run `bun run format && bun run check && bun run test && bun run build` before each.
-
-1. **Model and data.** Add optional `repo` (a URL) to the Series collection schema in `src/content.config.ts`, and optional `snapshot` (non-empty string) to Posts. Carry them through `SeriesRecord` / `PostRecord` and `src/lib/content.ts`. Add a pure helper in `src/lib/model.ts`, `companionRepo(repoUrl, snapshot?)`, returning `{ name, url, snapshot?: { name, url } }`: `name` is `owner/repo` from a GitHub URL, the Snapshot URL is `<repo>/tree/<snapshot>`. Tests cover: no Snapshot, a Snapshot, trailing slash and `.git` on the URL, a Snapshot with characters that need encoding.
-2. **Part pages.** New `CompanionNote.astro` (the line under the Series box) and `CompanionFooter.astro` (the block above `SeriesNav`), both rendered by `PostLayout.astro` only when the Part's Series has a `repo`. External links get `rel="noopener"` and a visible ↗. Style with Palette tokens only.
-3. **Series page and content.** Show the repo in the meta line of `src/pages/series/[slug]/index.astro`. Add `repo: https://github.com/vfil/sigma-agent` to `building-an-agent-from-scratch.md` with an intro sentence ("I build the same agent in parallel in the Companion repo, vfil/sigma-agent, and tag a Snapshot for each Part so you can explore the code as you read."), and `snapshot: Part1_the_loop` to Part 1.
-4. **Docs.** README: `repo` under "Write a Series", `snapshot` under the Post frontmatter, and the rule "push the tag before you publish the Part". Trim this spec to product intent and mark it implemented.
 
 ## Out of scope
 

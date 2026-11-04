@@ -39,6 +39,7 @@ tags: [agents, tool-use] # optional; lowercase words joined by hyphens
 draft: true # optional; Drafts show in `bun run dev` only
 series: building-an-agent-from-scratch # optional, see below
 part: 2 # required together with `series`
+snapshot: Part2_tools # optional: Git tag in the Series' Companion repo, see below
 ---
 ```
 
@@ -57,6 +58,7 @@ A Series is an ordered sequence of Posts. Create it once in `src/content/series/
 title: 'Building an agent from scratch'
 description: 'One line shown in lists.'
 status: ongoing # or: complete
+repo: https://github.com/vfil/sigma-agent # optional: the Companion repo built alongside
 planned: ['Memory', 'Evals'] # titles of Parts not written yet, in order
 ---
 Introduction shown on the Series page.
@@ -69,6 +71,8 @@ Rules (the build enforces them):
 - Parts are numbered 1, 2, 3… with no gaps and no duplicates.
 - A Part can't be published while an earlier Part is still a Draft.
 - Planned Parts come after the written ones. Readers see their titles, greyed out, but can't open them.
+
+**Companion repo.** If you build the code in a public repo alongside the Series, set `repo` on the Series. Every Part then shows it at the top (under the Series box) and at the bottom, and the Series page shows it under the title. Give each Part a `snapshot`, the name of a Git tag in that repo (e.g. `Part2_tools`), and those links point to the code as it stood for that Part; a Part without one links to the repo's front page. Push the tag before you publish the Part: the build does not check that it exists, so a typo is a 404 for readers. The Series introduction is ordinary Markdown, so mention the repo there too.
 
 **Starting a planned Part:** remove its title from `planned` and create the Post with the next `part` number and `draft: true`. Until you publish it, readers still see it as a Planned Part, so "part 2 of 4" stays stable while you write.
 
