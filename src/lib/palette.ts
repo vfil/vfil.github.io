@@ -4,8 +4,17 @@
  */
 
 export type Palette = { hue: number; chroma: number; tint: number };
-export type TokenName =
-  'bg' | 'surface' | 'line' | 'muted' | 'fg' | 'accent' | 'accent-2' | 'accent-fg';
+export const TOKEN_NAMES = [
+  'bg',
+  'surface',
+  'line',
+  'muted',
+  'fg',
+  'accent',
+  'accent-2',
+  'accent-fg',
+] as const;
+export type TokenName = (typeof TOKEN_NAMES)[number];
 export type Tokens = Record<TokenName, string>;
 
 export const DEFAULT_PALETTE: Palette = { hue: 359, chroma: 0.211, tint: 10 };
@@ -261,6 +270,16 @@ function isObject(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);
 }
 
+const HEX = /^#[0-9a-f]{6}$/;
+const HEX_SOURCE = String(HEX); // the same regex, written into storedPaletteScript
+
+/** Every token present as #rrggbb, so nothing broken or injected ever reaches the page. */
+function isTokens(x: unknown): boolean {
+  return (
+    isObject(x) && TOKEN_NAMES.every((name) => typeof x[name] === 'string' && HEX.test(x[name]))
+  );
+}
+
 /** A stored Custom Palette, or null if it's missing, malformed, out of range or from another recipe. */
 export function parseStored(raw: string | null): Palette | null {
   if (!raw) return null;
@@ -272,7 +291,7 @@ export function parseStored(raw: string | null): Palette | null {
   }
   if (!isObject(data) || data.v !== RECIPE_VERSION) return null;
   const { hue, chroma, tint, tokens } = data;
-  if (!isObject(tokens) || !isObject(tokens.dark) || !isObject(tokens.light)) return null;
+  if (!isObject(tokens) || !isTokens(tokens.dark) || !isTokens(tokens.light)) return null;
   if (!Number.isInteger(hue) || (hue as number) < 0 || (hue as number) > 359) return null;
   if (typeof chroma !== 'number' || !(chroma >= 0 && chroma <= CHROMA_MAX)) return null;
   if (!Number.isInteger(tint) || (tint as number) < 0 || (tint as number) > 100) return null;
@@ -287,20 +306,31 @@ export function parseStored(raw: string | null): Palette | null {
 export const storedPaletteScript = `(function () {
   try {
     var key = ${JSON.stringify(PALETTE_STORAGE_KEY)};
+    var names = ${JSON.stringify(TOKEN_NAMES)};
     var raw = localStorage.getItem(key);
     if (raw === null) return;
     var p = null;
     try { p = JSON.parse(raw); } catch (e) {}
-    var obj = function (x) { return typeof x === 'object' && x !== null && !Array.isArray(x); };
-    var int = function (x, max) { return typeof x === 'number' && x % 1 === 0 && x >= 0 && x <= max; };
-    var ok = obj(p) && p.v === ${RECIPE_VERSION} &&
-      obj(p.tokens) && obj(p.tokens.dark) && obj(p.tokens.light) &&
-      int(p.hue, 359) && typeof p.chroma === 'number' && p.chroma >= 0 && p.chroma <= ${CHROMA_MAX} &&
-      int(p.tint, 100);
+    var isObject = function (x) { return typeof x === 'object' && x !== null && !Array.isArray(x); };
+    var isWholeUpTo = function (x, max) { return typeof x === 'number' && x % 1 === 0 && x >= 0 && x <= max; };
+    var isTokens = function (x) {
+      if (!isObject(x)) return false;
+      for (var i = 0; i < names.length; i++) {
+        if (typeof x[names[i]] !== 'string' || !${HEX_SOURCE}.test(x[names[i]])) return false;
+      }
+      return true;
+    };
+    var ok = isObject(p) && p.v === ${RECIPE_VERSION} &&
+      isObject(p.tokens) && isTokens(p.tokens.dark) && isTokens(p.tokens.light) &&
+      isWholeUpTo(p.hue, 359) &&
+      typeof p.chroma === 'number' && p.chroma >= 0 && p.chroma <= ${CHROMA_MAX} &&
+      isWholeUpTo(p.tint, 100);
     if (!ok) { localStorage.removeItem(key); return; }
     var root = document.documentElement;
-    for (var t in p.tokens.dark) root.style.setProperty('--d-' + t, p.tokens.dark[t]);
-    for (var u in p.tokens.light) root.style.setProperty('--l-' + u, p.tokens.light[u]);
+    for (var j = 0; j < names.length; j++) {
+      root.style.setProperty('--d-' + names[j], p.tokens.dark[names[j]]);
+      root.style.setProperty('--l-' + names[j], p.tokens.light[names[j]]);
+    }
     root.setAttribute('data-palette', 'custom');
   } catch (e) {}
 })();`;

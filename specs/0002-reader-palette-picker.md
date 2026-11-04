@@ -74,7 +74,7 @@ export function pointerToPolar(
 export function nearestHandle(p: Palette, dx: number, dy: number, radiusPx: number): 0 | 1 | 2;
 export function isDefault(p: Palette): boolean;
 export function serialize(p: Palette): string; // JSON { v: RECIPE_VERSION, hue, chroma, tint, tokens }
-export function parseStored(raw: string | null): Palette | null; // null if missing, malformed, out of range or wrong v
+export function parseStored(raw: string | null): Palette | null; // null if missing, malformed, out of range or wrong v (including any token that isn't #rrggbb)
 export function contrast(a: string, b: string): number; // WCAG ratio of two hex colours
 export function wheelRgb(hue: number, chroma: number): [number, number, number]; // wheel pixel as 0–255 sRGB (added in step 1: the controller paints the wheel with it)
 export const PALETTE_STORAGE_KEY = 'palette'; // localStorage key (added in review)

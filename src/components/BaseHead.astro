@@ -19,8 +19,8 @@ const defaultPaletteCss = paletteCss(DEFAULT_PALETTE);
 
 // Runs before first paint, so there is no flash of the wrong Mode or of the Default Palette.
 // Plain ES5 with no imports: it is inlined as-is.
-const firstPaintScript = `document.documentElement.classList.add('js');
-try {
+const firstPaintScript = `try {
+  document.documentElement.classList.add('js');
   var mode = localStorage.getItem('mode');
   if (mode === 'dark' || mode === 'light') document.documentElement.setAttribute('data-theme', mode);
 } catch (e) {}

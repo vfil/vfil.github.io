@@ -211,6 +211,19 @@ describe('isDefault', () => {
 const custom: Palette = { hue: 200, chroma: 0.15, tint: 40 };
 const stored = (fields: Record<string, unknown>) =>
   JSON.stringify({ ...JSON.parse(serialize(custom)), ...fields });
+const tokensOf = (p: Palette) => paletteTokens(p);
+const storedTokens = (tokens: Record<string, unknown>) =>
+  JSON.stringify({ ...JSON.parse(serialize(custom)), tokens: { ...tokensOf(custom), ...tokens } });
+const { accent: _omitted, ...lightWithoutAccent } = tokensOf(custom).light;
+
+/** Stored values that parseStored accepts; storedPaletteScript must apply exactly these. */
+const VALID: Palette[] = [
+  custom,
+  { hue: 0, chroma: 0, tint: 0 },
+  { hue: 359, chroma: CHROMA_MAX, tint: 100 },
+  { hue: 120, chroma: 0.001, tint: 1 },
+];
+
 const INVALID: Array<[string, string | null]> = [
   ['nothing stored', null],
   ['empty string', ''],
@@ -226,16 +239,27 @@ const INVALID: Array<[string, string | null]> = [
   ['chroma above CHROMA_MAX', stored({ chroma: 0.3 })],
   ['tint above 100', stored({ tint: 101 })],
   ['tint as a string', stored({ tint: '40' })],
+  ['missing chroma', stored({ chroma: undefined })],
+  ['missing tint', stored({ tint: undefined })],
+  ['negative hue', stored({ hue: -1 })],
+  ['negative tint', stored({ tint: -1 })],
+  ['chroma as a string', stored({ chroma: '0.1' })],
+  ['dark tokens not an object', storedTokens({ dark: '#000000' })],
+  ['no dark tokens', storedTokens({ dark: {} })],
+  ['a light token missing', storedTokens({ light: lightWithoutAccent })],
+  [
+    'a token that is not #rrggbb',
+    storedTokens({ light: { ...tokensOf(custom).light, bg: 'red' } }),
+  ],
+  [
+    'a token smuggling extra CSS',
+    storedTokens({ dark: { ...tokensOf(custom).dark, fg: '#ffffff; color: red' } }),
+  ],
 ];
 
 describe('stored Custom Palette', () => {
-  it('round-trips through serialize and parseStored', () => {
-    expect(parseStored(serialize(custom))).toEqual(custom);
-    expect(parseStored(serialize({ hue: 0, chroma: 0, tint: 0 }))).toEqual({
-      hue: 0,
-      chroma: 0,
-      tint: 0,
-    });
+  it.each(VALID)('round-trips %o through serialize and parseStored', (p) => {
+    expect(parseStored(serialize(p))).toEqual(p);
   });
 
   it('stores the recipe version and the computed tokens, so the head script needs no colour maths', () => {
@@ -274,14 +298,25 @@ describe('storedPaletteScript (inlined in <head>, runs before first paint)', () 
     };
   }
 
-  it('applies a stored Custom Palette: its tokens as --d-*/--l-*, and data-palette="custom"', () => {
-    const result = run(serialize(custom));
-    const tokens = paletteTokens(custom);
+  it.each(VALID)(
+    'applies a stored Custom Palette %o: its tokens as --d-*/--l-*, and data-palette="custom"',
+    (p) => {
+      const result = run(serialize(p));
+      const { dark, light } = paletteTokens(p);
+      const expected = Object.fromEntries([
+        ...Object.entries(dark).map(([name, value]) => [`--d-${name}`, value]),
+        ...Object.entries(light).map(([name, value]) => [`--l-${name}`, value]),
+      ]);
+      expect(result.custom).toBe(true);
+      expect(result.kept).toBe(true);
+      expect(result.vars).toEqual(expected);
+    },
+  );
+
+  it('sets only the known tokens, ignoring extra names', () => {
+    const result = run(storedTokens({ dark: { ...tokensOf(custom).dark, extra: '#000000' } }));
     expect(result.custom).toBe(true);
-    expect(result.kept).toBe(true);
-    expect(result.vars['--d-bg']).toBe(tokens.dark.bg);
-    expect(result.vars['--d-accent-2']).toBe(tokens.dark['accent-2']);
-    expect(result.vars['--l-fg']).toBe(tokens.light.fg);
+    expect(result.vars).not.toHaveProperty('--d-extra');
     expect(Object.keys(result.vars)).toHaveLength(16);
   });
 
