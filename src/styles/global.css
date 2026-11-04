@@ -97,6 +97,20 @@ a:hover {
   text-decoration-color: currentColor;
 }
 
+/* Links inside written text (Posts, Series intro, `.text-link`): the accent calmed with --muted,
+   underlined in the same colour; hover brings the full accent. */
+.prose a,
+.text-link {
+  color: color-mix(in srgb, var(--accent) 70%, var(--muted));
+  text-decoration-color: currentColor;
+  text-decoration-thickness: 1px;
+}
+
+.prose a:hover,
+.text-link:hover {
+  color: var(--accent);
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
