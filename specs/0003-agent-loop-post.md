@@ -14,7 +14,7 @@ A faithful port of the lesson as one Post: same content, code, transcripts and s
 
 - The lesson-pack scaffolding (navigation, reference and glossary links, "ask Claude" paragraph) is gone. References to later lessons are "Part N" with the Planned Part title in italics.
 - llama.cpp and Claude stay in the Post, marked optional. Both test environments (the build machine and the earlier wire-capture machine) are stated.
-- The three "Check yourself" quizzes are currently collapsible answers (a stopgap, from over-reading "minimal JavaScript"); [spec 0004](0004-quiz-component.md) replaces them with the lesson's interactive quiz.
+- The three "Check yourself" quizzes are interactive, like the lesson's: one attempt, right and wrong marked, a message after answering ([spec 0004](0004-quiz-component.md)).
 - Agent vocabulary (provider, protocol, step, turn…) is defined inline in the Post; `GLOSSARY.md` covers the blog's domain only.
 - The Series introduction says "no agent framework" and names OpenCode as the reference. Its Planned Parts are the Stage A roadmap: The roadmap; Tools as data; Providers behind one interface; Why Effect: errors as values; Services and layers; Streaming. Stage B (Session) and Stage C (Sandbox) Parts are added when Stage A is nearly done.
 - Code in Post `.md` files is never reformatted by Prettier, because readers type it.

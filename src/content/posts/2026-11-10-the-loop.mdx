@@ -9,6 +9,8 @@ series: building-an-agent-from-scratch
 part: 1
 ---
 
+import Quiz from '../../components/Quiz.astro';
+
 The rest of this Series (persistence, permissions, tool registries) builds around one small loop. This Part covers that loop first, on a model running on your own machine.
 
 ## The claim
@@ -77,49 +79,46 @@ This is the full exchange. The agent is a `while` loop around it, plus functions
 
 ## Check yourself
 
-Try each question before opening the answer.
+Try each question before moving on.
 
-**The model's reply asks to call `edit_file`. What happens next?**
+<Quiz
+  question="The model's reply asks to call `edit_file`. What happens next?"
+  options={[
+    'The model edits the file directly on the server.',
+    'Your code runs the edit, then returns its result.',
+    'The loop ends immediately once any tool is requested.',
+    'The conversation restarts again from the very first message.',
+  ]}
+  correct={1}
+  right="Right. The model only proposes; your code always executes."
+  wrong="Not quite. The model never executes anything. It proposes a call, your code runs it and reports back."
+/>
 
-- The model edits the file directly on the server.
-- Your code runs the edit, then returns its result.
-- The loop ends immediately once any tool is requested.
-- The conversation restarts again from the very first message.
+<Quiz
+  question="When does the loop for a single turn stop?"
+  options={[
+    'After exactly one tool call, no matter the task.',
+    'When the prompt runs out of room for tokens.',
+    'When the model replies with text, not tool calls.',
+    'As soon as any tool returns an error result.',
+  ]}
+  correct={2}
+  right="Exactly. The model deciding it's done ends the loop, not a fixed step count."
+  wrong="Not quite. The loop keeps feeding results back until the model chooses to reply with text only."
+/>
 
-<details>
-<summary>Answer</summary>
-
-Your code runs the edit, then returns its result. The model never executes anything. It proposes a call, your code runs it and reports back.
-
-</details>
-
-**When does the loop for a single turn stop?**
-
-- After exactly one tool call, no matter the task.
-- When the prompt runs out of room for tokens.
-- When the model replies with text, not tool calls.
-- As soon as any tool returns an error result.
-
-<details>
-<summary>Answer</summary>
-
-When the model replies with text, not tool calls. The model deciding it's done ends the loop, not a fixed step count; the loop keeps feeding results back until the model chooses to reply with text only.
-
-</details>
-
-**On the OpenAI protocol (Ollama, llama.cpp), how do you hand a tool's output back?**
-
-- A role tool message with the `tool_call_id`
-- A `tool_result` block inside the next user message
-- A system message that repeats the tool name
-- Nothing; the server runs the tool for you
-
-<details>
-<summary>Answer</summary>
-
-A message with role `"tool"` and the call's `tool_call_id`. A `tool_result` block inside a user message is the Anthropic protocol's version, which you'll meet in the Claude section.
-
-</details>
+<Quiz
+  question="On the OpenAI protocol (Ollama, llama.cpp), how do you hand a tool's output back?"
+  options={[
+    'A message with role `tool` and the `tool_call_id`',
+    'A `tool_result` block inside the next user message',
+    'A system message that repeats the tool name',
+    'Nothing; the server runs the tool for you',
+  ]}
+  correct={0}
+  right="Right. A `tool_result` block inside a user message is the Anthropic protocol's version, which you'll meet in the Claude section."
+  wrong="It's a message with role `tool` and the call's `tool_call_id`. The `tool_result` block is Anthropic's protocol, not OpenAI's."
+/>
 
 ## Your turn: build the loop
 
