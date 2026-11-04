@@ -42,7 +42,7 @@ part: 2 # required together with `series`
 ---
 ```
 
-Then write the body in Markdown. Code blocks are highlighted and get a copy button. Images go in `src/assets/` and are referenced relatively, e.g. `![Alt text](../../assets/diagram.svg)`.
+Then write the body in Markdown. Code blocks are highlighted and get a copy button. Prettier leaves fenced code in Post `.md` files exactly as written (so code a reader types is never reformatted), but it still formats `.mdx` Posts. `<details><summary>…</summary>…</details>` works for collapsible blocks (leave a blank line after `</summary>` to write Markdown inside). Images go in `src/assets/` and are referenced relatively, e.g. `![Alt text](../../assets/diagram.svg)`.
 
 To publish, set `draft: false` (or remove the line), commit and push to `main`.
 
