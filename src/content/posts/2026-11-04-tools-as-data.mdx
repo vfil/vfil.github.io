@@ -1,0 +1,1038 @@
+---
+title: 'Tools as data'
+description: 'My Part 1 agent crashes when a tool throws. I turn its tools into data in one registry, so a failing tool becomes a result the model can act on.'
+pubDate: 2026-11-04
+category: agentic-ai
+tags: [agents, tools, typescript, ollama]
+series: building-an-agent-from-scratch
+part: 3
+snapshot: Part3_tools_as_data
+draft: true
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+This Part takes the three-tool array you built in [Part 1](/posts/the-loop/) to a registry of five tools that both of your protocols can use, where a failing tool becomes information the model can act on instead of a crash. It is the first Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+
+The code for this Part is available as the [`Part3_tools_as_data` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part3_tools_as_data), the repo where I build this agent in parallel.
+
+## First: your prediction
+
+In [Part 2](/posts/the-roadmap/) you predicted what your loop does when `list_files` gets a path that doesn't exist, and whether the OpenAI protocol reports failures the way Anthropic's does. Recall your answer before opening this.
+
+<details>
+<summary>What it should do, on each protocol</summary>
+
+It should not crash, and it should not hide the failure. It should send back a normal tool result that says what went wrong. How you mark it as a failure depends on the protocol:
+
+- **Anthropic Messages (Claude)** has a flag: `"is_error": true` on the `tool_result` ([Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)).
+- **OpenAI Chat Completions (Ollama, llama.cpp)** has no such flag. A `role: "tool"` message is just text, so _the text is the only signal_. OpenCode does the same: on this protocol an error result is simply written out as the message content ([protocols/shared.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/shared.ts)).
+
+This works on small local models too. In my tests, both Ollama and llama.cpp running `qwen3.5:9b` received `"Error: directory not found: . (try listing 'src' instead)"` and immediately called `list_files` again with `"src"`. A clear error message is the mechanism involved, so the wording of the message matters.
+
+</details>
+
+## A tool is one object
+
+Agents commonly end up with the same shape. A tool is a single value holding four things: a **name**, a **description**, an **input schema**, and an **executor** (the function that does the work). Compare Thorsten Ball's Go agent with OpenCode's `read` tool:
+
+```go
+// Thorsten Ball (Go)
+type ToolDefinition struct {
+  Name        string
+  Description string
+  InputSchema ToolInputSchemaParam
+  Function    func(input json.RawMessage)
+                (string, error)
+}
+```
+
+```ts
+// OpenCode read tool (TS + Effect)
+editor.add({
+  name,             // "read"
+  description: "Read the contents of…",
+  input: Input,     // Effect Schema
+  output: Output,
+  execute: (input, context) => …,
+})
+```
+
+Sources: [How to Build an Agent](https://ampcode.com/how-to-build-an-agent); [packages/core/src/tool/plugin/read.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/read.ts). OpenCode's [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md) makes this a rule: "Each tool carries its name, options, schemas, and executable behavior in one object."
+
+Notice that neither object mentions a protocol. A tool is provider-neutral. Keeping it that way is what makes tools _data_:
+
+1. **Each protocol's tool list is derived from the registry.** One small function turns a tool into `{ type: "function", function: { name, description, parameters } }` for OpenAI; another turns it into `{ name, description, input_schema }` for Anthropic. Same JSON Schema, different wrapping. You never write a definition twice.
+2. **Dispatch is a lookup by name.** When a tool call arrives, find the tool with that name and run its executor. A tool the model asks for that you don't have isn't a crash either: Ball's agent replies `"tool not found"` as an error result.
+
+Add a fifth tool and you add one object. Neither loop changes, and neither does any protocol code. This is the main result of this Part.
+
+## Three rules for tools the model can use well
+
+### 1. Descriptions matter most
+
+Claude's docs call detailed descriptions ["by far the most important factor in tool performance"](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools) and recommend at least 3–4 sentences: what the tool does, when to use it (and when not to), what each parameter means, and its limits. OpenCode's `read` description is seven sentences long, and it tells the model how to read large files ("Use offset and limit…") and when to use a different tool ("use grep to find specific content"). Anthropic's tool-design post gives a useful test: describe the tool [as you would to a new hire](https://www.anthropic.com/engineering/writing-tools-for-agents). The advice comes from Anthropic, but it matters _more_ for a 9B local model, which has less ability to guess what you meant.
+
+### 2. Errors should say what to do next
+
+The docs: "Instead of generic errors such as `"failed"`, include what went wrong and what Claude should try next." Here is OpenCode doing it. When a file is missing, the `read` tool doesn't return "not found". It looks for similar names:
+
+```text
+File not found: docs/README
+
+Did you mean one of these?
+docs/README.md
+```
+
+Its truncation notice works the same way: `[Output truncated. Continue reading with offset: 2001]`. The model gets the exact next call to make. On your local providers, where there's no error flag, this text is everything.
+
+### 3. Model input is untrusted
+
+The schema tells the model what to send, but nothing forces it to comply. Claude's docs say that when input is invalid and you reply with an error result, "Claude will retry 2–3 times with corrections before apologizing to the user." Local models make this mistake more often, and the OpenAI protocol adds one more way to fail: `arguments` arrives as a JSON _string_, so `JSON.parse` itself can throw on a malformed reply. Treat a parse failure like any other bad input: an instructive error result, never a crash. OpenCode's registry validates model input at runtime for every tool ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), Registration). In Part 5 (_Why Effect: errors as values_), `Schema` will do this for you. For now, check it by hand.
+
+## Tools on each provider
+
+### Ollama and llama.cpp (OpenAI protocol)
+
+| What       | Shape                                                                              |
+| ---------- | ---------------------------------------------------------------------------------- |
+| Definition | `{ type: "function", function: { name, description, parameters } }`                |
+| Call       | `message.tool_calls[i]`: `id`, `function.name`, `function.arguments` (JSON string) |
+| Result     | `{ role: "tool", tool_call_id, content }`, one message per call                    |
+| Failure    | No flag. Start the content with `Error:` and say what to try next.                 |
+
+- **Keep the tool list short.** Every definition costs context on every step, and a 32k window is small. Anthropic's tool-design advice ("more tools don't always lead to better outcomes") applies even more strongly here.
+- **llama.cpp picks a tool-call format from the model's chat template.** When it doesn't recognize the template it falls back to a generic format that "may consume more tokens and be less efficient" ([function-calling.md](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)). If tool calls misbehave on llama.cpp but not Ollama, check the chat format in the server's startup log.
+- **Ollama's OpenAI endpoint doesn't support `tool_choice`**, so you can't force a tool call there ([OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)). Steer with the prompt and descriptions instead.
+
+### Claude (Anthropic protocol)
+
+| What       | Shape                                                                                          |
+| ---------- | ---------------------------------------------------------------------------------------------- |
+| Definition | `{ name, description, input_schema }`                                                          |
+| Call       | `content[i]` with `type: "tool_use"`: `id`, `name`, `input` (an object)                        |
+| Result     | One user message whose content starts with every `tool_result` block: `tool_use_id`, `content` |
+| Failure    | `is_error: true`, plus the same instructive text                                               |
+
+Two Claude-only extras: `strict: true` on a tool definition makes Claude's calls always match your schema ([Define tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools)), and Claude is your reference. When a local model keeps calling a tool wrong, run the same prompt and tools against Claude. If Claude gets it right, improve the description or accept the model's limit. If Claude gets it wrong too, the problem is probably your definition or your dispatch.
+
+## Check yourself
+
+Try each question before moving on.
+
+<Quiz
+  question="`list_files` is called with a path that doesn't exist. What should your executor produce?"
+  options={[
+    'Throw the error and let the program exit',
+    'Return an empty listing so the loop continues',
+    'Return an error result saying what to try',
+    'Retry the tool silently until it finally works',
+  ]}
+  correct={2}
+  right="Right. An accurate, instructive error result lets the model recover, on any provider."
+  wrong="Not quite. A crash ends the conversation and an empty result misreports the failure. Return an error result the model can act on."
+/>
+
+<Quiz
+  question="On the OpenAI protocol (Ollama, llama.cpp), how does the model learn that a tool failed?"
+  options={[
+    'From the `is_error` flag set on the result',
+    'Only from the text of the tool message',
+    'From the HTTP status code of the request',
+    'From a separate error role in the history',
+  ]}
+  correct={1}
+  right="Right. No flag exists on this protocol, so the message text has to make the failure obvious."
+  wrong={'Only the text. `is_error` belongs to Anthropic\'s protocol; a `role: "tool"` message has nothing but content.'}
+/>
+
+<Quiz
+  question="The model calls `delete_everything`, a tool you never defined. What does your loop do?"
+  options={[
+    'Reply with an error result naming the tool',
+    'Crash, because the model broke the API contract',
+    'Skip it and send the next user prompt',
+    'Run the closest matching tool name you have',
+  ]}
+  correct={0}
+  right="Right. Every tool call still needs a result, even a failed one."
+  wrong={'Not quite. Every tool call needs a matching result. For an unknown tool, that\'s an error result, as in Ball\'s "tool not found".'}
+/>
+
+<Quiz
+  question="According to Claude's docs, which part of a tool definition matters most for performance?"
+  options={['Its name', 'Its schema', 'Its description', 'Its executor']}
+  correct={2}
+  right='Right. "By far the most important factor in tool performance."'
+  wrong={'It\'s the description: "by far the most important factor in tool performance," at least 3–4 sentences.'}
+/>
+
+<Quiz
+  question="In OpenCode, what does the model receive when `read` can't find a file?"
+  options={[
+    'A crash report with a full stack trace',
+    'An empty file so the step keeps going',
+    'Nothing at all, since OpenCode retries the read',
+    'A failure listing similar filenames it could try',
+  ]}
+  correct={3}
+  right='Right. "Did you mean one of these?" turns a dead end into a next step.'
+  wrong='It returns a failure with suggestions: "File not found: … Did you mean one of these?"'
+/>
+
+From [Part 2](/posts/the-roadmap/): a tool object spans two of the three parts. Which part does each piece belong to?
+
+<Quiz
+  question="Finding which executor handles a tool call, by name."
+  options={['Session', 'Harness', 'Sandbox']}
+  correct={1}
+  right="Right. Routing tool calls is the harness's job."
+  wrong="It's the harness: the loop that routes each tool call to a tool."
+/>
+
+<Quiz
+  question="The `bash` executor actually spawning a shell process."
+  options={['Session', 'Harness', 'Sandbox']}
+  correct={2}
+  right="Right. The definition and dispatch are harness; the work happens in the sandbox. That's why permissions (Stage C) attach to execution."
+  wrong="It's the sandbox: the place where tools touch the world. Definitions and dispatch are harness; execution is sandbox."
+/>
+
+## Your turn: build the registry
+
+Work in the `my-agent` folder from Part 1, on Ollama first. It is still one `index.ts`, plain TypeScript and `fetch`; Effect comes after the provider part. Each step edits that file and ends with something to run or check. The complete file is at the end of the Ollama steps, and the Claude changes follow as a separate section with their own complete file.
+
+Test environment: the transcripts in this section were recorded in the Part 1 environment (MacBook Pro with Apple M4 Max, 36 GB of memory, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) on 4 November 2026. The model's wording will differ.
+
+### Ollama: the main path
+
+#### Step 1: Make `execute` take `unknown`
+
+Part 1 left `execute` taking `any`, which lets code read fields of the model's input without checking them. With `unknown` the compiler rejects that. Replace the `Tool` type:
+
+```ts
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, shared by both protocols
+  execute: (input: unknown) => Promise<string>
+}
+```
+
+Bun runs a file without type checking, so use the compiler to see the effect:
+
+```bash
+bunx --package typescript tsc --noEmit
+```
+
+It reports three errors, one per tool, each saying that `unknown` is not assignable to the destructured parameter, for example `Type 'unknown' is not assignable to type '{ path: any; }'`. The three `execute` functions destructure fields out of input they have not checked. Step 2 fixes them.
+
+#### Step 2: Check input by hand
+
+Every tool needs the same check: is the field there, and is it a string? One helper does it and writes the error message the model will read. Add it above `listFiles`:
+
+```ts
+// Reads one string field from model input, or throws a message that says how to fix it.
+const field = (input: unknown, key: string, example: string): string => {
+  const value = typeof input === "object" && input !== null ? (input as Record<string, unknown>)[key] : undefined
+  if (typeof value !== "string") throw new Error(`${key} must be a string, e.g. ${example}`)
+  return value
+}
+```
+
+The third argument is an example that ends up in the message, for instance `path must be a string, e.g. src/index.ts`. Now make each tool read its fields through `field`. In the `list_files` entry, replace the `execute` line:
+
+```ts
+    execute: (input) => listFiles(field(input, "path", "'.' or 'src'")),
+```
+
+In `read_file`:
+
+```ts
+    execute: (input) => readFile(field(input, "path", "src/index.ts"), "utf8"),
+```
+
+And in `edit_file`, where `execute` now spans several lines:
+
+```ts
+    execute: (input) =>
+      editFile(
+        field(input, "path", "src/index.ts"),
+        field(input, "old_str", "const a = 1 (or an empty string to create a file)"),
+        field(input, "new_str", "const a = 2"),
+      ),
+```
+
+Run the compiler again. It prints nothing. These hand-written checks are the code that `Schema` replaces in Part 5 (_Why Effect: errors as values_).
+
+#### Step 3: One function that never throws
+
+`runTool(name, rawArguments)` is the single place where a tool call turns into a result. It takes the tool name and the arguments exactly as the model sent them (on the OpenAI protocol, a JSON string) and always returns `{ content, isError }`. An unknown tool, invalid JSON, invalid input and an executor that throws all come back as an error result instead of ending the program. Add it below the `tools` array and above `toOpenAITool`:
+
+```ts
+type ToolResult = { content: string; isError: boolean }
+
+// Never throws: every failure becomes a result the model can read.
+const runTool = async (name: string, rawArguments: string): Promise<ToolResult> => {
+  try {
+    const tool = tools.find((tool) => tool.name === name)
+    if (!tool) throw new Error(`Unknown tool: ${name}. Available tools: ${tools.map((tool) => tool.name).join(", ")}`)
+
+    let input: unknown
+    try {
+      input = JSON.parse(rawArguments)
+    } catch {
+      throw new Error(`The arguments are not valid JSON: ${rawArguments}`)
+    }
+
+    return { content: await tool.execute(input), isError: false }
+  } catch (error) {
+    return { content: error instanceof Error ? error.message : String(error), isError: true }
+  }
+}
+```
+
+Then replace the four lines in the loop that looked up the tool, threw for an unknown one and ran it. This is also where the `Error:` prefix is added, because this protocol has no error flag and the text is the only signal:
+
+Replace this:
+
+```ts
+      const tool = tools.find((tool) => tool.name === call.function.name)
+      if (!tool) throw new Error(`The model asked for an unknown tool: ${call.function.name}`)
+      const content = await tool.execute(JSON.parse(call.function.arguments))
+      messages.push({ role: "tool", tool_call_id: call.id, content })
+```
+
+With this:
+
+```ts
+      const { content, isError } = await runTool(call.function.name, call.function.arguments)
+      if (isError) console.log(`[error] ${content}`)
+      messages.push({ role: "tool", tool_call_id: call.id, content: isError ? `Error: ${content}` : content })
+```
+
+The `[error]` line is only for your terminal; the model receives the `Error:` message. Ask for a file that doesn't exist:
+
+```text
+$ cd playground && bun ../index.ts
+You: What does the file missing.txt say?
+[tool] read_file({"path":"missing.txt"})
+[error] ENOENT: no such file or directory, open 'missing.txt'
+Agent: The file `missing.txt` does not exist. If it's supposed to be in the current directory, please check if it was created correctly or confirm its path.
+```
+
+The read failed, `runTool` caught the exception, and the model was told and answered. In Part 1 the same situation ended the program. The message here is Node's own wording and names no next step. The messages written by hand in step 2 do.
+
+#### Step 4: Add `write_file` and `bash`
+
+First the import, added at the top of the file with the others:
+
+```ts
+import { execFile } from "node:child_process"
+```
+
+Then two functions, placed above the `tools` array:
+
+```ts
+const saveFile = async (path: string, content: string) => {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, content)
+  return `Wrote ${content.length} characters to ${path}`
+}
+
+const TIMEOUT_MS = 30_000
+const MAX_OUTPUT = 10_000
+
+const runBash = (command: string) =>
+  new Promise<string>((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: TIMEOUT_MS, maxBuffer: 10_000_000 }, (error, stdout, stderr) => {
+      if (error?.killed) return reject(new Error(`The command ran longer than ${TIMEOUT_MS} ms and was stopped. Try a faster command.`))
+      if (error && typeof error.code !== "number") return reject(error)
+      const output = `${stdout}${stderr}`
+      const shown =
+        output.length > MAX_OUTPUT
+          ? `${output.slice(0, MAX_OUTPUT)}\n[Output truncated after ${MAX_OUTPUT} characters. Filter it with head, tail or grep.]`
+          : output
+      resolve(`Exit code: ${error ? error.code : 0}\n${shown}`)
+    })
+  })
+```
+
+`runBash` makes four decisions that determine what the model sees:
+
+- The result starts with `Exit code: N`, so cutting long output cannot hide it.
+- A non-zero exit is an ordinary result, not an error result. `grep` exits with 1 when nothing matches, and the model can read the code itself. OpenCode's [shell tool](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/shell.ts) also returns output normally and records the exit code alongside it.
+- A command that runs past 30 seconds is stopped and reported as an error result that says so. A failure to start `bash` is an error result too.
+- Output beyond 10,000 characters is cut, with a notice that says how to filter it.
+
+Then add two entries at the end of the `tools` array, after `edit_file`:
+
+```ts
+  {
+    name: "write_file",
+    description:
+      "Write a complete text file, replacing it if it already exists and creating missing folders. Use it to create a new file or to rewrite a file entirely. For a small change to an existing file, use edit_file instead, because it sends only the part that changes. The content you pass becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to write, e.g. 'notes/plan.md'" },
+        content: { type: "string", description: "The full text of the file" },
+      },
+      required: ["path", "content"],
+    },
+    execute: (input) => saveFile(field(input, "path", "notes/plan.md"), field(input, "content", "the full text of the file")),
+  },
+```
+
+```ts
+  {
+    name: "bash",
+    description:
+      "Run a shell command with bash in the current directory and return its output and exit code. Use it for things the other tools cannot do, such as running a script, a test or git. Commands stop after 30 seconds and long output is cut off, so filter it with head, tail or grep when you expect a lot. Prefer read_file and list_files for reading, because they are cheaper and safer.",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", description: "The command to run, e.g. 'ls -la' or 'bun test'" } },
+      required: ["command"],
+    },
+    execute: (input) => runBash(field(input, "command", "ls -la")),
+  },
+```
+
+All five descriptions now have at least three sentences. `write_file` and `edit_file` overlap (both can create a file), so each description says when to use the other one.
+
+#### Step 5: Ask before anything changes
+
+This is the confirmation from [Part 2](/posts/the-roadmap/)'s safety note, and it lives in the tool object like everything else about a tool. Add an optional `confirm` field to the type, a function that describes the action. A tool without it runs immediately. Replace the type:
+
+```ts
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, shared by both protocols
+  execute: (input: unknown) => Promise<string>
+  confirm?: (input: unknown) => string // describes the action; when set, the user must approve it first
+}
+```
+
+`runTool` asks through the same `readline` interface the main loop reads from; a second interface on `stdin` would compete with it for input. That interface is currently created below `chat()`. Delete this line from there:
+
+```ts
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+```
+
+and add it above the `tools` array instead (below `runBash`), so that `runTool` can use it:
+
+```ts
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+```
+
+Then, in `runTool`, replace the last line of the `try` block (`return { content: await tool.execute(input), isError: false }`) with:
+
+```ts
+    if (tool.confirm) {
+      const answer = await rl.question(`Allow: ${tool.confirm(input)}? [y/N] `)
+      if (answer.trim().toLowerCase() !== "y") throw new Error("User declined this action. Ask what they would like instead.")
+    }
+    return { content: await tool.execute(input), isError: false }
+```
+
+The check comes after the arguments are parsed. Declining returns an error result like any other failure, which gives the model a chance to react. Last, mark the three tools that change things by adding one line to each entry. In `edit_file`:
+
+```ts
+    confirm: (input) => `edit ${field(input, "path", "src/index.ts")}`,
+```
+
+In `write_file`:
+
+```ts
+    confirm: (input) => `write ${field(input, "path", "notes/plan.md")}`,
+```
+
+In `bash`:
+
+```ts
+    confirm: (input) => `run: ${field(input, "command", "ls -la")}`,
+```
+
+`confirm` reads the input through `field`, so invalid input fails before the prompt appears and nobody is asked to approve a call that cannot run. `list_files` and `read_file` stay unprompted. The prompt shows the action; it does not restrict it. An approved command runs with your permissions, and file paths are not limited to the playground folder. Restricting that is the permission work in Stage C.
+
+#### Step 6: Check it works
+
+Ask for something that needs a write, and answer `n`:
+
+```text
+$ cd playground && bun ../index.ts
+You: Create a file called hello.txt containing the word hi.
+[tool] write_file({"path":"hello.txt","content":"hi"})
+Allow: write hello.txt? [y/N] n
+[error] User declined this action. Ask what they would like instead.
+Agent: It looks like you requested me to create a file called `hello.txt` with the content "hi". However, the action was declined.
+
+Would you like me to proceed with creating this file? Or perhaps there's something else you'd like help with instead?
+```
+
+Run it again and answer `y` twice, for a prompt that needs both new tools:
+
+```text
+$ cd playground && bun ../index.ts
+You: Write a file hello.js that prints the word hello, then run it with bash.
+[tool] write_file({"path":"hello.js","content":"console.log(\"hello\");"})
+Allow: write hello.js? [y/N] y
+[tool] bash({"command":"node hello.js"})
+Allow: run: node hello.js? [y/N] y
+Agent: I've created the file `hello.js` which prints "hello" and successfully ran it with Node.js. The output shows "hello".
+```
+
+Some failures are hard to get a model to produce on request: a tool it was never given, arguments that are not valid JSON, and a field of the wrong type. Test them by calling `runTool` directly. Add these lines temporarily above `const messages`, run the agent, then remove them:
+
+```ts
+console.log(await runTool("delete_everything", "{}"))
+console.log(await runTool("read_file", '{"path": '))
+console.log(await runTool("read_file", '{"path": 42}'))
+process.exit(0)
+```
+
+```text
+$ cd playground && bun ../index.ts
+{
+  content: "Unknown tool: delete_everything. Available tools: list_files, read_file, edit_file, write_file, bash",
+  isError: true,
+}
+{
+  content: "The arguments are not valid JSON: {\"path\": ",
+  isError: true,
+}
+{
+  content: "path must be a string, e.g. src/index.ts",
+  isError: true,
+}
+```
+
+Three different failures, and each one is a value the loop can send back. Last, run the same missing-file prompt with `BASE_URL` pointed at llama.cpp (`cd playground && BASE_URL=http://127.0.0.1:9931/v1 bun ../index.ts`). In my runs, it and the `bash` prompt behaved the same as on Ollama.
+
+<details>
+<summary>Stuck? The finished index.ts</summary>
+
+```ts
+import { execFile } from "node:child_process"
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+import { createInterface } from "node:readline/promises"
+
+const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:11434/v1"
+const MODEL = process.env.MODEL ?? "qwen3.5:9b"
+
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, shared by both protocols
+  execute: (input: unknown) => Promise<string>
+  confirm?: (input: unknown) => string // describes the action; when set, the user must approve it first
+}
+
+// Reads one string field from model input, or throws a message that says how to fix it.
+const field = (input: unknown, key: string, example: string): string => {
+  const value = typeof input === "object" && input !== null ? (input as Record<string, unknown>)[key] : undefined
+  if (typeof value !== "string") throw new Error(`${key} must be a string, e.g. ${example}`)
+  return value
+}
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+const saveFile = async (path: string, content: string) => {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, content)
+  return `Wrote ${content.length} characters to ${path}`
+}
+
+const TIMEOUT_MS = 30_000
+const MAX_OUTPUT = 10_000
+
+const runBash = (command: string) =>
+  new Promise<string>((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: TIMEOUT_MS, maxBuffer: 10_000_000 }, (error, stdout, stderr) => {
+      if (error?.killed) return reject(new Error(`The command ran longer than ${TIMEOUT_MS} ms and was stopped. Try a faster command.`))
+      if (error && typeof error.code !== "number") return reject(error)
+      const output = `${stdout}${stderr}`
+      const shown =
+        output.length > MAX_OUTPUT
+          ? `${output.slice(0, MAX_OUTPUT)}\n[Output truncated after ${MAX_OUTPUT} characters. Filter it with head, tail or grep.]`
+          : output
+      resolve(`Exit code: ${error ? error.code : 0}\n${shown}`)
+    })
+  })
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+
+const tools: Tool[] = [
+  {
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+      required: ["path"],
+    },
+    execute: (input) => listFiles(field(input, "path", "'.' or 'src'")),
+  },
+  {
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Path of the file to read, e.g. 'README.md'" } },
+      required: ["path"],
+    },
+    execute: (input) => readFile(field(input, "path", "src/index.ts"), "utf8"),
+  },
+  {
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit or create" },
+        old_str: { type: "string", description: "Text to replace. Empty to create a new file." },
+        new_str: { type: "string", description: "Text to put in its place" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    execute: (input) =>
+      editFile(
+        field(input, "path", "src/index.ts"),
+        field(input, "old_str", "const a = 1 (or an empty string to create a file)"),
+        field(input, "new_str", "const a = 2"),
+      ),
+    confirm: (input) => `edit ${field(input, "path", "src/index.ts")}`,
+  },
+  {
+    name: "write_file",
+    description:
+      "Write a complete text file, replacing it if it already exists and creating missing folders. Use it to create a new file or to rewrite a file entirely. For a small change to an existing file, use edit_file instead, because it sends only the part that changes. The content you pass becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to write, e.g. 'notes/plan.md'" },
+        content: { type: "string", description: "The full text of the file" },
+      },
+      required: ["path", "content"],
+    },
+    execute: (input) => saveFile(field(input, "path", "notes/plan.md"), field(input, "content", "the full text of the file")),
+    confirm: (input) => `write ${field(input, "path", "notes/plan.md")}`,
+  },
+  {
+    name: "bash",
+    description:
+      "Run a shell command with bash in the current directory and return its output and exit code. Use it for things the other tools cannot do, such as running a script, a test or git. Commands stop after 30 seconds and long output is cut off, so filter it with head, tail or grep when you expect a lot. Prefer read_file and list_files for reading, because they are cheaper and safer.",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", description: "The command to run, e.g. 'ls -la' or 'bun test'" } },
+      required: ["command"],
+    },
+    execute: (input) => runBash(field(input, "command", "ls -la")),
+    confirm: (input) => `run: ${field(input, "command", "ls -la")}`,
+  },
+]
+
+type ToolResult = { content: string; isError: boolean }
+
+// Never throws: every failure becomes a result the model can read.
+const runTool = async (name: string, rawArguments: string): Promise<ToolResult> => {
+  try {
+    const tool = tools.find((tool) => tool.name === name)
+    if (!tool) throw new Error(`Unknown tool: ${name}. Available tools: ${tools.map((tool) => tool.name).join(", ")}`)
+
+    let input: unknown
+    try {
+      input = JSON.parse(rawArguments)
+    } catch {
+      throw new Error(`The arguments are not valid JSON: ${rawArguments}`)
+    }
+
+    if (tool.confirm) {
+      const answer = await rl.question(`Allow: ${tool.confirm(input)}? [y/N] `)
+      if (answer.trim().toLowerCase() !== "y") throw new Error("User declined this action. Ask what they would like instead.")
+    }
+    return { content: await tool.execute(input), isError: false }
+  } catch (error) {
+    return { content: error instanceof Error ? error.message : String(error), isError: true }
+  }
+}
+
+// The OpenAI protocol's wrapping of a tool. Only this function knows about the wire format.
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+
+type ToolCall = { id: string; function: { name: string; arguments: string } }
+type Message = { role: string; content: string | null; tool_calls?: ToolCall[] }
+type ChatResponse = { choices: { message: Message }[] }
+
+const chat = async (messages: unknown[]): Promise<Message> => {
+  const response = await fetch(`${BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: MODEL, messages, reasoning_effort: "none", tools: tools.map(toOpenAITool) }),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  const data = (await response.json()) as ChatResponse
+  const message = data.choices[0]?.message
+  if (!message) throw new Error("No choices returned from model")
+  return message
+}
+
+const messages: unknown[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  messages.push({ role: "user", content: input })
+
+  while (true) {
+    const message = await chat(messages)
+    messages.push(message)
+    if (message.content) console.log(`Agent: ${message.content}`)
+    if (!message.tool_calls?.length) break
+
+    for (const call of message.tool_calls) {
+      console.log(`[tool] ${call.function.name}(${call.function.arguments})`)
+      const { content, isError } = await runTool(call.function.name, call.function.arguments)
+      if (isError) console.log(`[error] ${content}`)
+      messages.push({ role: "tool", tool_call_id: call.id, content: isError ? `Error: ${content}` : content })
+    }
+  }
+}
+```
+
+</details>
+
+### Claude: the same changes (optional)
+
+`claude.ts` from Part 1 is a copy of the old `index.ts`, so it still has the three-tool code and a loop that throws for an unknown tool. These steps bring it level with `index.ts`. The Anthropic-specific parts (the config, `toAnthropicTool`, `chat()` and the reply handling) stay as they are. Run them after the Ollama steps, with `index.ts` open next to it.
+
+#### Claude step 1: Copy the tool code across
+
+Three edits in `claude.ts`. First, add the import at the top with the others:
+
+```ts
+import { execFile } from "node:child_process"
+```
+
+Second, replace everything from the line `type Tool = {` down to the line before `// The Anthropic protocol's wrapping of a tool` with the same region of `index.ts`: from `type Tool = {` down to the line before `// The OpenAI protocol's wrapping of a tool`. That region holds the `Tool` type, `field`, the four executor functions, the `readline` interface, the five tools and `runTool`, none of which mention a protocol. Third, the region now contains the `rl` line, so delete the second one just above `const messages`:
+
+```ts
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+```
+
+#### Claude step 2: Send results through `runTool`
+
+In the loop, replace the four lines that looked up the tool and ran it. Anthropic delivers `input` as an object, while `runTool` takes the text form, so the call passes `JSON.stringify(call.input)` and the same function serves both protocols. The failure is marked with the protocol's own flag, `is_error`, and the content needs no `Error:` prefix:
+
+Replace this:
+
+```ts
+      const tool = tools.find((tool) => tool.name === call.name)
+      if (!tool) throw new Error(`The model asked for an unknown tool: ${call.name}`)
+      const content = await tool.execute(call.input)
+      results.push({ type: "tool_result", tool_use_id: call.id, content })
+```
+
+With this:
+
+```ts
+      const { content, isError } = await runTool(call.name, JSON.stringify(call.input))
+      if (isError) console.log(`[error] ${content}`)
+      results.push({ type: "tool_result", tool_use_id: call.id, content, is_error: isError })
+```
+
+#### Claude step 3: Run it
+
+Run `cd playground && bun ../claude.ts` with the missing-file prompt from step 3 and the write-and-run prompt from step 6. Claude reads the failure and replies without the program ending, and the `write_file` and `bash` prompts appear before anything runs. The `[error]` line appears for the missing file, and the result Claude receives has `is_error: true`. If a reply contains several tool calls, each is prompted in turn and all the results still go back in one user message.
+
+Then compare the files again with `diff index.ts claude.ts`. With the tool code copied over, the differences are the config, `toAnthropicTool`, `chat()` and the loop. The five tools, `runTool` and the confirmation exist twice. Part 4 (_Providers behind one interface_) addresses that duplication.
+
+<details>
+<summary>Stuck? The finished claude.ts</summary>
+
+```ts
+import { execFile } from "node:child_process"
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+import { createInterface } from "node:readline/promises"
+
+const BASE_URL = process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com"
+const API_KEY = process.env.ANTHROPIC_API_KEY
+const MODEL = process.env.MODEL ?? "claude-sonnet-5-5"
+
+if (!API_KEY) throw new Error("Set ANTHROPIC_API_KEY first")
+
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, shared by both protocols
+  execute: (input: unknown) => Promise<string>
+  confirm?: (input: unknown) => string // describes the action; when set, the user must approve it first
+}
+
+// Reads one string field from model input, or throws a message that says how to fix it.
+const field = (input: unknown, key: string, example: string): string => {
+  const value = typeof input === "object" && input !== null ? (input as Record<string, unknown>)[key] : undefined
+  if (typeof value !== "string") throw new Error(`${key} must be a string, e.g. ${example}`)
+  return value
+}
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+const saveFile = async (path: string, content: string) => {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, content)
+  return `Wrote ${content.length} characters to ${path}`
+}
+
+const TIMEOUT_MS = 30_000
+const MAX_OUTPUT = 10_000
+
+const runBash = (command: string) =>
+  new Promise<string>((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: TIMEOUT_MS, maxBuffer: 10_000_000 }, (error, stdout, stderr) => {
+      if (error?.killed) return reject(new Error(`The command ran longer than ${TIMEOUT_MS} ms and was stopped. Try a faster command.`))
+      if (error && typeof error.code !== "number") return reject(error)
+      const output = `${stdout}${stderr}`
+      const shown =
+        output.length > MAX_OUTPUT
+          ? `${output.slice(0, MAX_OUTPUT)}\n[Output truncated after ${MAX_OUTPUT} characters. Filter it with head, tail or grep.]`
+          : output
+      resolve(`Exit code: ${error ? error.code : 0}\n${shown}`)
+    })
+  })
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+
+const tools: Tool[] = [
+  {
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+      required: ["path"],
+    },
+    execute: (input) => listFiles(field(input, "path", "'.' or 'src'")),
+  },
+  {
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Path of the file to read, e.g. 'README.md'" } },
+      required: ["path"],
+    },
+    execute: (input) => readFile(field(input, "path", "src/index.ts"), "utf8"),
+  },
+  {
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit or create" },
+        old_str: { type: "string", description: "Text to replace. Empty to create a new file." },
+        new_str: { type: "string", description: "Text to put in its place" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    execute: (input) =>
+      editFile(
+        field(input, "path", "src/index.ts"),
+        field(input, "old_str", "const a = 1 (or an empty string to create a file)"),
+        field(input, "new_str", "const a = 2"),
+      ),
+    confirm: (input) => `edit ${field(input, "path", "src/index.ts")}`,
+  },
+  {
+    name: "write_file",
+    description:
+      "Write a complete text file, replacing it if it already exists and creating missing folders. Use it to create a new file or to rewrite a file entirely. For a small change to an existing file, use edit_file instead, because it sends only the part that changes. The content you pass becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to write, e.g. 'notes/plan.md'" },
+        content: { type: "string", description: "The full text of the file" },
+      },
+      required: ["path", "content"],
+    },
+    execute: (input) => saveFile(field(input, "path", "notes/plan.md"), field(input, "content", "the full text of the file")),
+    confirm: (input) => `write ${field(input, "path", "notes/plan.md")}`,
+  },
+  {
+    name: "bash",
+    description:
+      "Run a shell command with bash in the current directory and return its output and exit code. Use it for things the other tools cannot do, such as running a script, a test or git. Commands stop after 30 seconds and long output is cut off, so filter it with head, tail or grep when you expect a lot. Prefer read_file and list_files for reading, because they are cheaper and safer.",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", description: "The command to run, e.g. 'ls -la' or 'bun test'" } },
+      required: ["command"],
+    },
+    execute: (input) => runBash(field(input, "command", "ls -la")),
+    confirm: (input) => `run: ${field(input, "command", "ls -la")}`,
+  },
+]
+
+type ToolResult = { content: string; isError: boolean }
+
+// Never throws: every failure becomes a result the model can read.
+const runTool = async (name: string, rawArguments: string): Promise<ToolResult> => {
+  try {
+    const tool = tools.find((tool) => tool.name === name)
+    if (!tool) throw new Error(`Unknown tool: ${name}. Available tools: ${tools.map((tool) => tool.name).join(", ")}`)
+
+    let input: unknown
+    try {
+      input = JSON.parse(rawArguments)
+    } catch {
+      throw new Error(`The arguments are not valid JSON: ${rawArguments}`)
+    }
+
+    if (tool.confirm) {
+      const answer = await rl.question(`Allow: ${tool.confirm(input)}? [y/N] `)
+      if (answer.trim().toLowerCase() !== "y") throw new Error("User declined this action. Ask what they would like instead.")
+    }
+    return { content: await tool.execute(input), isError: false }
+  } catch (error) {
+    return { content: error instanceof Error ? error.message : String(error), isError: true }
+  }
+}
+
+// The Anthropic protocol's wrapping of a tool. Same name and description, but the schema is called input_schema.
+const toAnthropicTool = (tool: Tool) => ({
+  name: tool.name,
+  description: tool.description,
+  input_schema: tool.parameters,
+})
+
+type TextBlock = { type: "text"; text: string }
+type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown }
+type Block = TextBlock | ToolUseBlock | { type: string } // e.g. thinking blocks: we pass them back untouched
+type ChatResponse = { content: Block[]; stop_reason: string }
+
+const isText = (block: Block): block is TextBlock => block.type === "text"
+const isToolUse = (block: Block): block is ToolUseBlock => block.type === "tool_use"
+
+const chat = async (messages: unknown[]): Promise<ChatResponse> => {
+  const response = await fetch(`${BASE_URL}/v1/messages`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": API_KEY,
+      "anthropic-version": "2026-10-21",
+    },
+    body: JSON.stringify({ model: MODEL, max_tokens: 16000, messages, tools: tools.map(toAnthropicTool) }),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return (await response.json()) as ChatResponse
+}
+
+const messages: unknown[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  messages.push({ role: "user", content: input })
+
+  while (true) {
+    const reply = await chat(messages)
+    messages.push({ role: "assistant", content: reply.content })
+    for (const block of reply.content) {
+      if (isText(block) && block.text) console.log(`Agent: ${block.text}`)
+    }
+    if (reply.stop_reason === "refusal") break
+
+    const calls = reply.content.filter(isToolUse)
+    if (calls.length === 0) break
+
+    const results = []
+    for (const call of calls) {
+      console.log(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const { content, isError } = await runTool(call.name, JSON.stringify(call.input))
+      if (isError) console.log(`[error] ${content}`)
+      results.push({ type: "tool_result", tool_use_id: call.id, content, is_error: isError })
+    }
+    messages.push({ role: "user", content: results })
+  }
+}
+```
+
+</details>
+
+> **Watch for this.** With five tools, a model may request several tools in one reply. Every call needs its own result. On the OpenAI protocol that's one `role: "tool"` message per call, right after the assistant message. On Anthropic it's one user message whose content [starts with all the `tool_result` blocks](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls). A 400 error mentioning "tool_use ids were found without tool_result blocks" indicates the results were not formatted as above.
+
+> **If you have 32 GB or more of memory.** A larger local model tends to make fewer malformed calls, and can serve as a free second reference before using Claude. Keep building against `qwen3.5:9b`: code that handles a small model's mistakes also handles larger models'.
+
+> **Result.** Adding a tool now means adding one object, and it works on every provider at once. Your tools no longer depend on your loops, and that independence is what lets OpenCode accept tools from plugins and MCP servers it has never seen.
+
+## Sources
+
+If you read only one, read the first, then do this: after building your five tools, rewrite one description using its "new hire" test, and measure whether `qwen3.5:9b` calls the tool correctly more often with the new description.
+
+- [Anthropic Engineering: Writing effective tools for agents](https://www.anthropic.com/engineering/writing-tools-for-agents)
+- [Claude docs: Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) (`is_error`, ordering, retries)
+- [Claude docs: Define tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools) (descriptions, `strict`)
+- [Ollama docs: OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)
+- [llama.cpp: function-calling.md](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
+- [Thorsten Ball: How to Build an Agent](https://ampcode.com/how-to-build-an-agent) (`ToolDefinition`, "tool not found")
+- OpenCode's [tool/plugin/read.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/read.ts), [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), [tool/plugin/shell.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/shell.ts) and [ai/src/protocols/shared.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/shared.ts)
+
+Measured: the Ollama and llama.cpp steps in "Your turn" were run on 4 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b` with thinking off); `runBash`'s exit code, 30-second timeout and output cut-off were checked by calling `runTool` directly. Error-result round trips were also measured on Ollama 0.40.13 and llama.cpp b11669 with `qwen3.5:9b` (2026-10-31).
+
+Not measured against the live API: `claude.ts` was type-checked and run against a local stand-in for the Messages API that checks the request rules and that a failed tool call comes back as a `tool_result` with `is_error: true`. No Claude output is recorded in this Part.
