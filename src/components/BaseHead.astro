@@ -1,7 +1,7 @@
 ---
 import { Font } from 'astro:assets';
 import { SITE } from '../site';
-import { DEFAULT_PALETTE, PALETTE_STORAGE_KEY, paletteCss, RECIPE_VERSION } from '../lib/palette';
+import { DEFAULT_PALETTE, paletteCss, storedPaletteScript } from '../lib/palette';
 import '../styles/global.css';
 
 interface Props {
@@ -17,28 +17,14 @@ const fullTitle = title ? `${title} · ${SITE.shortTitle}` : SITE.title;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 const defaultPaletteCss = paletteCss(DEFAULT_PALETTE);
 
-// Runs before first paint, so no flash of the wrong Mode or of the Default Palette. A stored Custom
-// Palette carries its computed tokens, so this script never runs the colour maths. Plain ES5, no
-// imports: it is inlined as-is.
-const firstPaintScript = `(function () {
-  var root = document.documentElement;
-  root.classList.add('js');
-  try {
-    var mode = localStorage.getItem('mode');
-    if (mode === 'dark' || mode === 'light') root.setAttribute('data-theme', mode);
-    var raw = localStorage.getItem(${JSON.stringify(PALETTE_STORAGE_KEY)});
-    if (!raw) return;
-    var p = null;
-    try { p = JSON.parse(raw); } catch (e) {}
-    if (p && p.v === ${RECIPE_VERSION} && p.tokens && p.tokens.dark && p.tokens.light) {
-      for (var t in p.tokens.dark) root.style.setProperty('--d-' + t, p.tokens.dark[t]);
-      for (var u in p.tokens.light) root.style.setProperty('--l-' + u, p.tokens.light[u]);
-      root.setAttribute('data-palette', 'custom');
-    } else {
-      localStorage.removeItem(${JSON.stringify(PALETTE_STORAGE_KEY)});
-    }
-  } catch (e) {}
-})();`;
+// Runs before first paint, so there is no flash of the wrong Mode or of the Default Palette.
+// Plain ES5 with no imports: it is inlined as-is.
+const firstPaintScript = `document.documentElement.classList.add('js');
+try {
+  var mode = localStorage.getItem('mode');
+  if (mode === 'dark' || mode === 'light') document.documentElement.setAttribute('data-theme', mode);
+} catch (e) {}
+${storedPaletteScript}`;
 ---
 
 <meta charset="utf-8" />

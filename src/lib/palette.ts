@@ -279,6 +279,32 @@ export function parseStored(raw: string | null): Palette | null {
   return { hue: hue as number, chroma, tint: tint as number };
 }
 
+/**
+ * ES5 source, inlined in <head>, that applies the stored Custom Palette before first paint. It
+ * accepts exactly what parseStored accepts (the tests hold them together) and removes anything
+ * else. It writes the stored tokens as-is, so no colour maths runs before paint.
+ */
+export const storedPaletteScript = `(function () {
+  try {
+    var key = ${JSON.stringify(PALETTE_STORAGE_KEY)};
+    var raw = localStorage.getItem(key);
+    if (raw === null) return;
+    var p = null;
+    try { p = JSON.parse(raw); } catch (e) {}
+    var obj = function (x) { return typeof x === 'object' && x !== null && !Array.isArray(x); };
+    var int = function (x, max) { return typeof x === 'number' && x % 1 === 0 && x >= 0 && x <= max; };
+    var ok = obj(p) && p.v === ${RECIPE_VERSION} &&
+      obj(p.tokens) && obj(p.tokens.dark) && obj(p.tokens.light) &&
+      int(p.hue, 359) && typeof p.chroma === 'number' && p.chroma >= 0 && p.chroma <= ${CHROMA_MAX} &&
+      int(p.tint, 100);
+    if (!ok) { localStorage.removeItem(key); return; }
+    var root = document.documentElement;
+    for (var t in p.tokens.dark) root.style.setProperty('--d-' + t, p.tokens.dark[t]);
+    for (var u in p.tokens.light) root.style.setProperty('--l-' + u, p.tokens.light[u]);
+    root.setAttribute('data-palette', 'custom');
+  } catch (e) {}
+})();`;
+
 function declarations(tokens: Tokens, scheme: 'dark' | 'light'): string {
   const vars = Object.entries(tokens).map(([name, value]) => `--${name}:${value};`);
   return vars.join('') + `color-scheme:${scheme}`;

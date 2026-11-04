@@ -10,10 +10,12 @@ import {
   paletteCss,
   paletteTokens,
   parseStored,
+  PALETTE_STORAGE_KEY,
   pointerToPolar,
   RECIPE_VERSION,
   rotateTo,
   serialize,
+  storedPaletteScript,
   wheelRgb,
   type Palette,
   type TokenName,
@@ -206,11 +208,27 @@ describe('isDefault', () => {
   });
 });
 
-describe('stored Custom Palette', () => {
-  const custom: Palette = { hue: 200, chroma: 0.15, tint: 40 };
-  const stored = (fields: Record<string, unknown>) =>
-    JSON.stringify({ ...JSON.parse(serialize(custom)), ...fields });
+const custom: Palette = { hue: 200, chroma: 0.15, tint: 40 };
+const stored = (fields: Record<string, unknown>) =>
+  JSON.stringify({ ...JSON.parse(serialize(custom)), ...fields });
+const INVALID: Array<[string, string | null]> = [
+  ['nothing stored', null],
+  ['empty string', ''],
+  ['malformed JSON', '{"v":1,'],
+  ['not an object', '[1,2,3]'],
+  ['JSON null', 'null'],
+  ['another recipe version', stored({ v: RECIPE_VERSION + 1 })],
+  ['missing hue', stored({ hue: undefined })],
+  ['missing tokens', stored({ tokens: undefined })],
+  ['hue 360', stored({ hue: 360 })],
+  ['fractional hue', stored({ hue: 12.5 })],
+  ['negative chroma', stored({ chroma: -0.01 })],
+  ['chroma above CHROMA_MAX', stored({ chroma: 0.3 })],
+  ['tint above 100', stored({ tint: 101 })],
+  ['tint as a string', stored({ tint: '40' })],
+];
 
+describe('stored Custom Palette', () => {
   it('round-trips through serialize and parseStored', () => {
     expect(parseStored(serialize(custom))).toEqual(custom);
     expect(parseStored(serialize({ hue: 0, chroma: 0, tint: 0 }))).toEqual({
@@ -226,23 +244,64 @@ describe('stored Custom Palette', () => {
     expect(data.tokens).toEqual(paletteTokens(custom));
   });
 
-  it.each([
-    ['nothing stored', null],
-    ['empty string', ''],
-    ['malformed JSON', '{"v":1,'],
-    ['not an object', '[1,2,3]'],
-    ['JSON null', 'null'],
-    ['another recipe version', stored({ v: RECIPE_VERSION + 1 })],
-    ['missing hue', stored({ hue: undefined })],
-    ['missing tokens', stored({ tokens: undefined })],
-    ['hue 360', stored({ hue: 360 })],
-    ['fractional hue', stored({ hue: 12.5 })],
-    ['negative chroma', stored({ chroma: -0.01 })],
-    ['chroma above CHROMA_MAX', stored({ chroma: 0.3 })],
-    ['tint above 100', stored({ tint: 101 })],
-    ['tint as a string', stored({ tint: '40' })],
-  ])('rejects %s', (_, raw) => {
+  it.each(INVALID)('rejects %s', (_, raw) => {
     expect(parseStored(raw)).toBeNull();
+  });
+});
+
+describe('storedPaletteScript (inlined in <head>, runs before first paint)', () => {
+  /** Runs the script against a fake <html> and localStorage holding `raw`. */
+  function run(raw: string | null) {
+    const storage = new Map<string, string>();
+    if (raw !== null) storage.set(PALETTE_STORAGE_KEY, raw);
+    const vars: Record<string, string> = {};
+    const attrs: Record<string, string> = {};
+    const document = {
+      documentElement: {
+        style: { setProperty: (name: string, value: string) => (vars[name] = value) },
+        setAttribute: (name: string, value: string) => (attrs[name] = value),
+      },
+    };
+    const localStorage = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      removeItem: (key: string) => storage.delete(key),
+    };
+    new Function('document', 'localStorage', storedPaletteScript)(document, localStorage);
+    return {
+      custom: attrs['data-palette'] === 'custom',
+      vars,
+      kept: storage.has(PALETTE_STORAGE_KEY),
+    };
+  }
+
+  it('applies a stored Custom Palette: its tokens as --d-*/--l-*, and data-palette="custom"', () => {
+    const result = run(serialize(custom));
+    const tokens = paletteTokens(custom);
+    expect(result.custom).toBe(true);
+    expect(result.kept).toBe(true);
+    expect(result.vars['--d-bg']).toBe(tokens.dark.bg);
+    expect(result.vars['--d-accent-2']).toBe(tokens.dark['accent-2']);
+    expect(result.vars['--l-fg']).toBe(tokens.light.fg);
+    expect(Object.keys(result.vars)).toHaveLength(16);
+  });
+
+  it.each(INVALID)('ignores and removes what parseStored rejects: %s', (_, raw) => {
+    const result = run(raw);
+    expect(result.custom).toBe(false);
+    expect(result.vars).toEqual({});
+    expect(result.kept).toBe(false);
+  });
+
+  it('survives storage that throws (e.g. blocked cookies)', () => {
+    const document = { documentElement: { style: { setProperty() {} }, setAttribute() {} } };
+    const localStorage = {
+      getItem: () => {
+        throw new Error('SecurityError');
+      },
+    };
+    expect(() =>
+      new Function('document', 'localStorage', storedPaletteScript)(document, localStorage),
+    ).not.toThrow();
   });
 });
 
