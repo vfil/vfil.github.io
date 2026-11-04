@@ -1,6 +1,6 @@
 # 0002 · Reader Palette picker
 
-Status: ready for implementation, **after spec 0001 is fully implemented**
+Status: implemented (2026-11-04)
 Date: 2026-11-03
 
 **Read first:** [GLOSSARY.md](../GLOSSARY.md) (especially Mode, Palette, Default Palette, Custom Palette), [ADR 0001](../docs/adr/0001-astro-over-react-frameworks.md), [spec 0001](./0001-blog-foundation.md), and the visual + behavioural reference [mockups/home.html](./mockups/home.html).

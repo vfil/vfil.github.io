@@ -78,6 +78,24 @@ A Series appears on the site once it has at least one published Part. While it's
 
 The Categories and their descriptions live in `src/lib/categories.ts`. They form the site menu.
 
+## Colours
+
+**For readers.** The colours button (three dots, top right, next to the dark/light Mode toggle) opens a colour wheel with three dots 120° apart. Dragging any dot turns all three together, and dragging towards the centre makes the colours calmer. The slider tints the background. The choice works in both Modes, is saved in that browser, and "Reset to default" brings back the Default Palette. Text colours are adjusted automatically so they always keep at least 4.5:1 contrast. The picker's code downloads only when someone first opens it.
+
+**Changing the Default Palette.** Every site colour is generated from three numbers in `src/lib/palette.ts`:
+
+```ts
+export const DEFAULT_PALETTE: Palette = { hue: 359, chroma: 0.211, tint: 10 };
+```
+
+1. Find the numbers you like with the picker; its readout shows `hue° · chroma · tint%`.
+2. Put them in `DEFAULT_PALETTE`. The tests will now fail on purpose. They pin the exact colours so the palette never changes by accident.
+3. Update the expected values in `src/lib/palette.test.ts`, and the token table in `specs/0001-blog-foundation.md`, to the new output (`bun -e "import {paletteTokens, DEFAULT_PALETTE} from './src/lib/palette.ts'; console.log(paletteTokens(DEFAULT_PALETTE))"` prints it).
+
+If you change the recipe itself (how the tokens are computed from the three numbers), also bump `RECIPE_VERSION`.
+
+**Why readers' palettes are stored computed.** A reader's choice is saved as the three numbers plus all the token colours it produced, tagged with `RECIPE_VERSION`. That lets the tiny script in `<head>` apply it before the first paint without loading any colour maths. The downside is that stored colours go stale if the recipe changes. Bumping `RECIPE_VERSION` makes every browser discard its saved palette and fall back to the default, instead of showing colours from an old recipe.
+
 ## Deploy
 
 Every push runs CI (format, typecheck, tests, build). Pushes to `main` also deploy to GitHub Pages via `.github/workflows/deploy.yml`.
