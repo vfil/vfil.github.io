@@ -76,6 +76,7 @@ export function isDefault(p: Palette): boolean;
 export function serialize(p: Palette): string; // JSON { v: RECIPE_VERSION, hue, chroma, tint, tokens }
 export function parseStored(raw: string | null): Palette | null; // null if missing, malformed, out of range or wrong v
 export function contrast(a: string, b: string): number; // WCAG ratio of two hex colours
+export function wheelRgb(hue: number, chroma: number): [number, number, number]; // wheel pixel as 0–255 sRGB (added in step 1: the controller paints the wheel with it)
 ```
 
 Internal helpers are not exported: OKLCH→linear sRGB, gamut mapping by binary search on chroma, sRGB encode, hex.
