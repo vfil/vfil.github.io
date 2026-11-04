@@ -32,6 +32,14 @@ _Avoid_: Chapter, episode, installment
 A Part announced in a Series but not yet published: either a title listed in the Series, or a Draft that belongs to the Series. Readers see its title but cannot open it.
 _Avoid_: Upcoming post, stub, placeholder post
 
+**Companion repo**:
+The code repository the author builds in parallel with a Series; every Part of that Series points to it.
+_Avoid_: Reference implementation (OpenCode is the reference), source repo, project
+
+**Snapshot**:
+The state of the Companion repo as it stood when a Part was written, so readers can explore that Part's code as they read.
+_Avoid_: Tag (a Tag is a keyword on a Post), release, version, branch
+
 **Ongoing** / **Complete**:
 A Series' status: Ongoing while more Parts are expected, Complete once the author declares it finished.
 _Avoid_: Active, open, closed, finished
