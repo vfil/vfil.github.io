@@ -14,6 +14,10 @@ _Avoid_: Article, entry, blog (as a noun for one piece)
 A Post marked as not ready; visible while writing locally, never published.
 _Avoid_: Unpublished post, WIP
 
+**Quiz**:
+A multiple-choice question inside a Post. The reader answers once and immediately sees whether they were right, and why.
+_Avoid_: Poll, test, exercise
+
 ### Series
 
 **Series**:

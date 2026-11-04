@@ -1,6 +1,7 @@
 /**
- * The content model: pure functions over plain Post and Series records.
- * No `astro:*` imports, so it can be unit-tested; `content.ts` adapts Astro collections to it.
+ * The content model: pure functions over plain Post and Series records, plus the rules and text
+ * helpers for a Post's Quizzes (at the end). No `astro:*` imports, so it can be unit-tested;
+ * `content.ts` adapts Astro collections to it.
  */
 import type { CategorySlug } from './categories';
 

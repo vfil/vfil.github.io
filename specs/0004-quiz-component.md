@@ -10,7 +10,7 @@ The original lesson had a "Check yourself" quiz that Vlad liked: pick an answer,
 
 ## Solution
 
-A quiz block that any `.mdx` Post can use. A reader sees a question and its options. Clicking an option is one attempt: every option locks, the right one is marked, a wrong pick is marked too, and a message explains the answer. There is no "try again". The marks are the Palette's `--accent-2` (right) and `--accent` (wrong) plus a ✓ or ✗, so they stay readable in any Custom Palette and never rely on colour alone. For readers without JavaScript the options are plain text and the answer is shown directly, so no control is dead. The quiz's script loads only on Posts that contain a quiz.
+A quiz block that any `.mdx` Post can use. A reader sees a question and its options. Clicking an option is one attempt: every option locks, the right one is marked, a wrong pick is marked too, and a message explains the answer. There is no "try again". The marks use the site's own accent colours plus a ✓ or ✗, so they stay readable in any Custom Palette and never rely on colour alone. For readers without JavaScript the options are a plain list and the answer is shown directly, so no control is dead. The quiz's script loads only on Posts that contain a quiz.
 
 ## User stories
 

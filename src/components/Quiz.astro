@@ -2,7 +2,7 @@
 /**
  * A multiple-choice quiz for `.mdx` Posts. One attempt: the first pick locks the quiz, marks the
  * right option (and a wrong pick) and shows the matching message. Text may contain `inline code`.
- * Without JavaScript the options are plain text and the answer is printed instead.
+ * Without JavaScript the options are a plain list and the answer is printed instead.
  */
 import { checkQuiz, inlineCodeHtml, type QuizSpec } from '../lib/model';
 
@@ -19,14 +19,24 @@ checkQuiz(quiz);
     </legend>
     <div class="quiz-options">
       {quiz.options.map((option) => (
-        <button class="quiz-option" type="button" disabled>
+        <button class="quiz-option" type="button">
           <span class="quiz-mark" aria-hidden="true" />
           <span>
             <Fragment set:html={inlineCodeHtml(option)} />
           </span>
+          <span class="quiz-state visually-hidden" />
         </button>
       ))}
     </div>
+    <noscript>
+      <ul class="quiz-plain">
+        {quiz.options.map((option) => (
+          <li>
+            <Fragment set:html={inlineCodeHtml(option)} />
+          </li>
+        ))}
+      </ul>
+    </noscript>
   </fieldset>
   <p class="quiz-answer">
     <span>
@@ -38,15 +48,9 @@ checkQuiz(quiz);
   </p>
   <p class="quiz-feedback" aria-live="polite">
     <span class="quiz-right" hidden>
-      <span class="quiz-glyph" aria-hidden="true">
-        ✓
-      </span>
       <Fragment set:html={inlineCodeHtml(quiz.right)} />
     </span>
     <span class="quiz-wrong" hidden>
-      <span class="quiz-glyph" aria-hidden="true">
-        ✗
-      </span>
       <Fragment set:html={inlineCodeHtml(quiz.wrong)} />
     </span>
   </p>
@@ -60,22 +64,23 @@ checkQuiz(quiz);
     const right = quiz.querySelector<HTMLElement>('.quiz-right');
     const wrong = quiz.querySelector<HTMLElement>('.quiz-wrong');
 
+    // The mark (✓ or ✗) comes from CSS; the hidden text tells screen readers the same thing.
+    const setState = (option: HTMLButtonElement | undefined, state: string, label: string) => {
+      if (!option) return;
+      option.dataset.state = state;
+      const hidden = option.querySelector('.quiz-state');
+      if (hidden) hidden.textContent = label;
+    };
+
     options.forEach((button, index) => {
-      button.disabled = false;
       button.addEventListener('click', () => {
         if (quiz.dataset.answered !== undefined) return;
         quiz.dataset.answered = '';
 
         const isRight = index === correct;
-        options[correct]?.setAttribute('data-state', 'right');
-        if (!isRight) button.setAttribute('data-state', 'wrong');
-        for (const option of options) {
-          const mark = option.querySelector('.quiz-mark');
-          if (mark) {
-            mark.textContent =
-              option.dataset.state === 'right' ? '✓' : option.dataset.state === 'wrong' ? '✗' : '';
-          }
-        }
+        setState(options[correct], 'right', ' (right answer)');
+        if (!isRight) setState(button, 'wrong', ' (your answer, not right)');
+        for (const option of options) option.setAttribute('aria-disabled', 'true');
         if (right) right.hidden = !isRight;
         if (wrong) wrong.hidden = isRight;
       });
@@ -139,6 +144,14 @@ checkQuiz(quiz);
     text-align: center;
   }
 
+  .quiz-option[data-state='right'] .quiz-mark::before {
+    content: '✓';
+  }
+
+  .quiz-option[data-state='wrong'] .quiz-mark::before {
+    content: '✗';
+  }
+
   .quiz-option code {
     background: var(--surface);
   }
@@ -178,18 +191,21 @@ checkQuiz(quiz);
     margin-top: 0.75rem;
   }
 
-  .quiz-right .quiz-glyph {
-    color: var(--accent-2);
-  }
-
-  .quiz-wrong .quiz-glyph {
-    color: var(--accent);
-  }
-
-  .quiz-glyph {
+  .quiz-right::before,
+  .quiz-wrong::before {
     margin-right: 0.4em;
     font-family: var(--font-mono);
     font-weight: 600;
+  }
+
+  .quiz-right::before {
+    content: '✓';
+    color: var(--accent-2);
+  }
+
+  .quiz-wrong::before {
+    content: '✗';
+    color: var(--accent);
   }
 
   .quiz-answer span {
@@ -202,16 +218,14 @@ checkQuiz(quiz);
     display: none;
   }
 
-  /* Without JavaScript the options are plain text, not buttons that do nothing. */
-  :global(html:not(.js)) .quiz-mark {
+  /* Without JavaScript the options are a plain list (in <noscript>), not buttons that do nothing. */
+  :global(html:not(.js)) .quiz-options {
     display: none;
   }
 
-  :global(html:not(.js)) .quiz-option {
-    display: block;
-    padding: 0;
-    border: 0;
-    background: none;
-    cursor: text;
+  .quiz-plain {
+    margin: 0;
+    padding-left: 1.2em;
+    font-size: 0.9375rem;
   }
 </style>

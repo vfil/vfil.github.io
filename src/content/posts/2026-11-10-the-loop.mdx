@@ -116,8 +116,8 @@ Try each question before moving on.
     'Nothing; the server runs the tool for you',
   ]}
   correct={0}
-  right="Right. A `tool_result` block inside a user message is the Anthropic protocol's version, which you'll meet in the Claude section."
-  wrong="It's a message with role `tool` and the call's `tool_call_id`. The `tool_result` block is Anthropic's protocol, not OpenAI's."
+  right="Right. The result goes back as its own message with role `tool`. A `tool_result` block inside a user message is the Anthropic protocol's version, which you'll meet in the Claude section."
+  wrong="Not quite. It's a message with role `tool` and the call's `tool_call_id`. The `tool_result` block is Anthropic's protocol, not OpenAI's."
 />
 
 ## Your turn: build the loop
