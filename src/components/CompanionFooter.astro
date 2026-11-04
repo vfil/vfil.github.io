@@ -14,7 +14,7 @@ const target = companion.snapshot ?? companion;
 <aside class="companion-foot" aria-label="Companion repo">
   <p>
     {companion.snapshot ? 'Explore the code as it stands in this Part: ' : 'Follow along in code: '}
-    <a href={target.url} rel="noopener">
+    <a class="text-link" href={target.url} rel="noopener">
       {companion.snapshot && <code>{companion.snapshot.name}</code>}
       {companion.snapshot ? ' in ' : ''}
       {companion.name} <span aria-hidden="true">↗</span>
@@ -34,15 +34,6 @@ const target = companion.snapshot ?? companion;
   p {
     margin: 0;
     overflow-wrap: anywhere;
-  }
-
-  a {
-    color: var(--accent-2);
-    text-decoration: none;
-  }
-
-  a:hover {
-    color: var(--accent);
   }
 
   code {
