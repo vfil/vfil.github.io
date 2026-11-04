@@ -10,7 +10,7 @@
       }
     },
     {
-      "files": "src/content/posts/*.md",
+      "files": "src/content/posts/*.{md,mdx}",
       "options": {
         "embeddedLanguageFormatting": "off"
       }
