@@ -19,6 +19,8 @@ export interface PostRecord {
   draft: boolean;
   series?: string | undefined;
   part?: number | undefined;
+  /** Git tag in the Series' Companion repo that matches this Part (Snapshot). */
+  snapshot?: string | undefined;
   body: string;
 }
 
@@ -30,6 +32,8 @@ export interface SeriesRecord {
   status: 'ongoing' | 'complete';
   /** Titles of Planned Parts that have no Post yet, in order. */
   planned: string[];
+  /** URL of the Companion repo, if the author builds one alongside the Series. */
+  repo?: string | undefined;
 }
 
 /** A Post as shown on the site. */
@@ -278,4 +282,25 @@ export function inlineCodeHtml(text: string): string {
       piece.code ? `<code>${escapeHtml(piece.text)}</code>` : escapeHtml(piece.text),
     )
     .join('');
+}
+
+/** Where a Companion repo lives, and where its Snapshot for one Part lives. */
+export interface CompanionRepo {
+  /** `owner/repo`, for display. */
+  name: string;
+  /** The repo's front page. */
+  url: string;
+  /** The Part's Snapshot, if it has one. */
+  snapshot?: { name: string; url: string };
+}
+
+/** Links for a Companion repo (a GitHub URL) and, optionally, a Part's Snapshot (a Git tag). */
+export function companionRepo(repoUrl: string, snapshot?: string): CompanionRepo {
+  const { origin, pathname } = new URL(repoUrl);
+  const [owner, repo] = pathname.split('/').filter(Boolean);
+  const name = `${owner}/${(repo ?? '').replace(/\.git$/, '')}`;
+  const url = `${origin}/${name}`;
+  if (!snapshot) return { name, url };
+  const path = snapshot.split('/').map(encodeURIComponent).join('/');
+  return { name, url, snapshot: { name: snapshot, url: `${url}/tree/${path}` } };
 }

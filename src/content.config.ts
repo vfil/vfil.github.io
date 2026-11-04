@@ -27,6 +27,7 @@ const posts = defineCollection({
       draft: z.boolean().default(false),
       series: reference('series').optional(),
       part: z.number().int().positive().optional(),
+      snapshot: z.string().min(1).optional(),
     })
     .refine((post) => (post.series === undefined) === (post.part === undefined), {
       message:
@@ -41,6 +42,7 @@ const series = defineCollection({
     description: z.string().min(1),
     status: z.enum(['ongoing', 'complete']),
     planned: z.array(z.string().min(1)).default([]),
+    repo: z.url().optional(),
   }),
 });
 

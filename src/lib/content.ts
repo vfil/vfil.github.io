@@ -29,6 +29,7 @@ async function load(): Promise<Site> {
     draft: data.draft,
     series: data.series?.id,
     part: data.part,
+    snapshot: data.snapshot,
     body: body ?? '',
   }));
 
@@ -38,6 +39,7 @@ async function load(): Promise<Site> {
     description: data.description,
     status: data.status,
     planned: data.planned,
+    repo: data.repo,
   }));
 
   return buildSite(posts, series, import.meta.env.DEV ? 'dev' : 'prod');
