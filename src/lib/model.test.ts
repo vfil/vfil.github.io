@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import {
   buildSite,
   checkQuiz,
+  companionRepo,
   formatDate,
   inlineCodeHtml,
   readingTime,
@@ -380,5 +381,31 @@ describe('inlineCodeHtml', () => {
 
   test('escapes HTML in text and in code', () => {
     expect(inlineCodeHtml('x < y & `a<b>`')).toBe('x &lt; y &amp; <code>a&lt;b&gt;</code>');
+  });
+});
+
+describe('companionRepo', () => {
+  const repo = 'https://github.com/vfil/sigma-agent';
+
+  test('names the repo and links to its front page', () => {
+    expect(companionRepo(repo)).toEqual({ name: 'vfil/sigma-agent', url: repo });
+  });
+
+  test('links a Snapshot to its tag', () => {
+    expect(companionRepo(repo, 'Part1_the_loop').snapshot).toEqual({
+      name: 'Part1_the_loop',
+      url: `${repo}/tree/Part1_the_loop`,
+    });
+  });
+
+  test('ignores a trailing slash and .git on the repo URL', () => {
+    expect(companionRepo(`${repo}.git`).url).toBe(repo);
+    expect(companionRepo(`${repo}/`).name).toBe('vfil/sigma-agent');
+  });
+
+  test('encodes a Snapshot name but keeps its slashes', () => {
+    expect(companionRepo(repo, 'part 1/the loop#').snapshot?.url).toBe(
+      `${repo}/tree/part%201/the%20loop%23`,
+    );
   });
 });

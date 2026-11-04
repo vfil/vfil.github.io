@@ -1,5 +1,6 @@
 ---
 import BaseLayout from './BaseLayout.astro';
+import CompanionFooter from '../components/CompanionFooter.astro';
 import SeriesBox from '../components/SeriesBox.astro';
 import SeriesNav from '../components/SeriesNav.astro';
 import TagList from '../components/TagList.astro';
@@ -11,6 +12,7 @@ interface Props {
 }
 
 const { post, place } = Astro.props;
+const repo = place?.series.repo;
 ---
 
 <BaseLayout
@@ -50,6 +52,7 @@ const { post, place } = Astro.props;
 
     <footer class="post-foot">
       <TagList tags={post.tags} />
+      {repo && <CompanionFooter repo={repo} snapshot={post.snapshot} />}
       {place && <SeriesNav place={place} />}
     </footer>
   </article>

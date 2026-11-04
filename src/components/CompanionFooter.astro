@@ -1,0 +1,51 @@
+---
+import { companionRepo } from '../lib/model';
+
+interface Props {
+  repo: string;
+  snapshot?: string | undefined;
+}
+
+const { repo, snapshot } = Astro.props;
+const companion = companionRepo(repo, snapshot);
+const target = companion.snapshot ?? companion;
+---
+
+<aside class="companion-foot" aria-label="Companion repo">
+  <p>
+    {companion.snapshot ? 'Explore the code as it stands in this Part: ' : 'Follow along in code: '}
+    <a href={target.url} rel="noopener">
+      {companion.snapshot && <code>{companion.snapshot.name}</code>}
+      {companion.snapshot ? ' in ' : ''}
+      {companion.name} <span aria-hidden="true">↗</span>
+    </a>
+  </p>
+</aside>
+
+<style>
+  .companion-foot {
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: var(--step--1);
+  }
+
+  p {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  a {
+    color: var(--accent-2);
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: var(--accent);
+  }
+
+  code {
+    font-family: var(--font-mono);
+  }
+</style>
