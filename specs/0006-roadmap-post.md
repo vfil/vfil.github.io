@@ -1,6 +1,6 @@
 # 0006 · Part 2 of the agent Series: "The roadmap"
 
-Status: implemented (2026-11-04), as a Draft until Vlad has read it
+Status: implemented (2026-11-04), published
 
 Product spec only. The Post will be `src/content/posts/2026-11-04-the-roadmap.mdx` (renamed to the real date when published) in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md) for how Part 1 was ported.
 
