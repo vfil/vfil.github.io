@@ -75,7 +75,7 @@ Fixes failure 3: memory that outlives the process. These are not scheduled as Pa
 
 Fixes failure 4: the model proposes, a policy decides, and only then does your code act. Also not scheduled as Parts yet.
 
-- **Permissions.** Ask before risky tools run. A "no" goes back to the model as a result it can react to, not as a crash. You end with a y/n prompt before `write_file` and `bash`, and denials the model adapts to. In OpenCode: [packages/core/src/permission.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/permission.ts), and the decline handling described in [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md).
+- **Permissions.** Ask before risky tools run. A "no" goes back to the model as a result it can react to, not as a crash. Part 3 already asks y/n before every call that changes something; here that blanket prompt becomes rules about what may run, and you end with denials the model adapts to. In OpenCode: [packages/core/src/permission.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/permission.ts), and the decline handling described in [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md).
 - **Interruption.** Ctrl-C stops the current step cleanly, without corrupting the session log. Effect's interruption model handles this. Interrupt mid-tool-call, restart, and find a consistent session.
 
 ### Capstone: defend your design
