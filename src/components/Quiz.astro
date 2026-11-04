@@ -1,0 +1,231 @@
+---
+/**
+ * A multiple-choice quiz for `.mdx` Posts. One attempt: the first pick locks the quiz, marks the
+ * right option (and a wrong pick) and shows the matching message. Text may contain `inline code`.
+ * Without JavaScript the options are a plain list and the answer is printed instead.
+ */
+import { checkQuiz, inlineCodeHtml, type QuizSpec } from '../lib/model';
+
+type Props = QuizSpec;
+
+const quiz = Astro.props;
+checkQuiz(quiz);
+---
+
+<div class="quiz" data-correct={quiz.correct}>
+  <fieldset>
+    <legend class="quiz-question">
+      <Fragment set:html={inlineCodeHtml(quiz.question)} />
+    </legend>
+    <div class="quiz-options">
+      {quiz.options.map((option) => (
+        <button class="quiz-option" type="button">
+          <span class="quiz-mark" aria-hidden="true" />
+          <span>
+            <Fragment set:html={inlineCodeHtml(option)} />
+          </span>
+          <span class="quiz-state visually-hidden" />
+        </button>
+      ))}
+    </div>
+    <noscript>
+      <ul class="quiz-plain">
+        {quiz.options.map((option) => (
+          <li>
+            <Fragment set:html={inlineCodeHtml(option)} />
+          </li>
+        ))}
+      </ul>
+    </noscript>
+  </fieldset>
+  <p class="quiz-answer">
+    <span>
+      Answer: <Fragment set:html={inlineCodeHtml(quiz.options[quiz.correct] ?? '')} />
+    </span>
+    <span>
+      <Fragment set:html={inlineCodeHtml(quiz.right)} />
+    </span>
+  </p>
+  <p class="quiz-feedback" aria-live="polite">
+    <span class="quiz-right" hidden>
+      <Fragment set:html={inlineCodeHtml(quiz.right)} />
+    </span>
+    <span class="quiz-wrong" hidden>
+      <Fragment set:html={inlineCodeHtml(quiz.wrong)} />
+    </span>
+  </p>
+</div>
+
+<script>
+  // Plain TypeScript, no library. Astro adds this to pages that contain a Quiz, and only those.
+  for (const quiz of document.querySelectorAll<HTMLElement>('.quiz')) {
+    const correct = Number(quiz.dataset.correct);
+    const options = [...quiz.querySelectorAll<HTMLButtonElement>('.quiz-option')];
+    const right = quiz.querySelector<HTMLElement>('.quiz-right');
+    const wrong = quiz.querySelector<HTMLElement>('.quiz-wrong');
+
+    // The mark (✓ or ✗) comes from CSS; the hidden text tells screen readers the same thing.
+    const setState = (option: HTMLButtonElement | undefined, state: string, label: string) => {
+      if (!option) return;
+      option.dataset.state = state;
+      const hidden = option.querySelector('.quiz-state');
+      if (hidden) hidden.textContent = label;
+    };
+
+    options.forEach((button, index) => {
+      button.addEventListener('click', () => {
+        if (quiz.dataset.answered !== undefined) return;
+        quiz.dataset.answered = '';
+
+        const isRight = index === correct;
+        setState(options[correct], 'right', ' (right answer)');
+        if (!isRight) setState(button, 'wrong', ' (your answer, not right)');
+        for (const option of options) option.setAttribute('aria-disabled', 'true');
+        if (right) right.hidden = !isRight;
+        if (wrong) wrong.hidden = isRight;
+      });
+    });
+  }
+</script>
+
+<style>
+  .quiz {
+    padding: 1rem;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--surface);
+  }
+
+  fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .quiz-question {
+    float: left; /* A legend inside a fieldset ignores margins; floating it makes it a normal block. */
+    width: 100%;
+    margin-bottom: 0.75rem;
+    padding: 0;
+    font-weight: 600;
+  }
+
+  .quiz-options {
+    clear: both;
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .quiz-option {
+    display: grid;
+    grid-template-columns: 1.25em 1fr;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.55em 0.9em;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.9375rem;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .quiz:not([data-answered]) .quiz-option:hover,
+  .quiz-option:focus-visible {
+    border-color: var(--fg);
+  }
+
+  .quiz-mark {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .quiz-option[data-state='right'] .quiz-mark::before {
+    content: '✓';
+  }
+
+  .quiz-option[data-state='wrong'] .quiz-mark::before {
+    content: '✗';
+  }
+
+  .quiz-option code {
+    background: var(--surface);
+  }
+
+  /* After the first pick the quiz is locked. */
+  .quiz[data-answered] .quiz-option {
+    cursor: default;
+  }
+
+  .quiz-option[data-state='right'] {
+    border-color: var(--accent-2);
+    background: color-mix(in srgb, var(--accent-2) 14%, var(--bg));
+  }
+
+  .quiz-option[data-state='right'] .quiz-mark {
+    color: var(--accent-2);
+  }
+
+  .quiz-option[data-state='wrong'] {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  }
+
+  .quiz-option[data-state='wrong'] .quiz-mark {
+    color: var(--accent);
+  }
+
+  .quiz-feedback,
+  .quiz-answer {
+    margin: 0;
+    font-size: 0.9375rem;
+  }
+
+  /* The live region stays in the layout (so screen readers announce it) but takes no space until filled. */
+  .quiz[data-answered] .quiz-feedback,
+  .quiz-answer {
+    margin-top: 0.75rem;
+  }
+
+  .quiz-right::before,
+  .quiz-wrong::before {
+    margin-right: 0.4em;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+
+  .quiz-right::before {
+    content: '✓';
+    color: var(--accent-2);
+  }
+
+  .quiz-wrong::before {
+    content: '✗';
+    color: var(--accent);
+  }
+
+  .quiz-answer span {
+    display: block;
+  }
+
+  /* With JavaScript the message appears after answering; without it the answer is printed. */
+  :global(html.js) .quiz-answer,
+  :global(html:not(.js)) .quiz-feedback {
+    display: none;
+  }
+
+  /* Without JavaScript the options are a plain list (in <noscript>), not buttons that do nothing. */
+  :global(html:not(.js)) .quiz-options {
+    display: none;
+  }
+
+  .quiz-plain {
+    margin: 0;
+    padding-left: 1.2em;
+    font-size: 0.9375rem;
+  }
+</style>

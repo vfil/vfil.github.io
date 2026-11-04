@@ -10,7 +10,7 @@ Vlad wants a personal blog on GitHub Pages (`vfil.github.io`) where he can publi
 
 ## Solution
 
-A static site deployed automatically on every push to `main`. Posts and Series are Markdown/MDX files in the repo, validated at build time. The design is an "engineer's notebook": monospace chrome, readable sans-serif text, amber accent, dark by default with a light toggle. Pages ship almost no JavaScript.
+A static site deployed automatically on every push to `main`. Posts and Series are Markdown/MDX files in the repo, validated at build time. The design is an "engineer's notebook": monospace chrome, readable sans-serif text, amber accent, dark by default with a light toggle. Pages ship JavaScript only where it earns its place, and only on the pages that need it.
 
 ## User stories
 

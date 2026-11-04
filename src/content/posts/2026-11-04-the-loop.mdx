@@ -1,0 +1,1036 @@
+---
+title: 'The agent loop'
+description: 'An AI coding agent is a short loop around a model. I build one in plain TypeScript and run it on Ollama, llama.cpp and Claude.'
+pubDate: 2026-11-04
+category: agentic-ai
+tags: [agents, agent-loop, typescript, ollama]
+series: building-an-agent-from-scratch
+part: 1
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+An "AI coding agent" can seem to need a lot of machinery. At its core, it is a short loop. Thorsten Ball built a working one that reads, lists, and edits files in about [400 lines, mostly boilerplate](https://ampcode.com/how-to-build-an-agent). The loop itself is maybe 20 of those lines.
+
+Everything the AI agentic software adds on top (durable sessions, permission prompts, many providers, retries) exists to make this loop _safe_ and _durable_, not to replace it.
+
+The rest of this Series (persistence, permissions, tool registries) builds around one small loop. This Part covers that loop first, on a model running on your own machine.
+
+## The loop itself
+
+1. You send the model the conversation so far, plus a list of **tools** it may use. Each tool is a name, a description, and a JSON Schema for its arguments.
+2. The model replies. Sometimes that's just text. Sometimes it's a request to call one or more tools: structured data naming each tool and the arguments to call it with.
+3. If it's a tool request, **your code** runs the tool (reads the file, lists the directory). The model never executes anything itself.
+4. You append the tool's result to the conversation and go back to step 2.
+5. Eventually the model replies with text and no tool request. That ends the turn.
+
+> **Why this shape.** The model can only _propose_ actions; your code is always the thing that _does_ them. That boundary is where an agent's safety checks attach, and it is why OpenCode has a permission system.
+
+Anthropic's ["Building effective agents"](https://www.anthropic.com/research/building-effective-agents) makes a related point: the teams that succeeded mostly used this loop directly, not elaborate frameworks. (The page itself notes that its tooling details are dated; the loop it describes still applies.)
+
+## Three words before you start
+
+You'll run this loop against three sources of models, so the three terms below are used consistently:
+
+- A **provider** serves models over HTTP: Ollama, a llama.cpp server, or Anthropic.
+- A **protocol** is the wire format of a request and its response. Ollama and llama.cpp both speak _OpenAI Chat Completions_; Claude speaks _Anthropic Messages_.
+- A **model** is a specific set of weights, like `qwen3.5:9b`.
+
+One provider can speak several protocols, and several providers can share one. Your agent uses two protocols for three providers. That's also how OpenCode reaches local models: its Ollama support only discovers models, and every call goes through its generic OpenAI-compatible protocol ([plugin/provider/local.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/plugin/provider/local.ts)).
+
+## What a tool call looks like on the wire
+
+Here is the OpenAI Chat Completions version, which you'll use for both local providers. These shapes were captured from Ollama 0.40.13 and llama.cpp b11669 running `qwen3.5:9b`:
+
+```ts
+// You POST to {base}/v1/chat/completions:
+{
+  model: "qwen3.5:9b",
+  messages: [{ role: "user", content: "What files are in this directory?" }],
+  tools: [{
+    type: "function",
+    function: {
+      name: "list_files",
+      description: "List the files in a directory…",
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
+    }
+  }]
+}
+
+// The reply's choices[0].message:
+{
+  role: "assistant",
+  content: "",
+  tool_calls: [{
+    id: "call_0mnjckd1",
+    type: "function",
+    function: { name: "list_files", arguments: "{\"path\":\".\"}" }   // a JSON *string*
+  }]
+}
+
+// You append that message, run list_files("."), then append:
+{ role: "tool", tool_call_id: "call_0mnjckd1", content: "README.md\nsrc\n…" }
+```
+
+This is the full exchange. The agent is a `while` loop around it, plus functions that implement `list_files`. Note that `arguments` arrives as a JSON string and needs `JSON.parse`.
+
+## Check yourself
+
+Try each question before moving on.
+
+<Quiz
+  question="The model's reply asks to call `edit_file`. What happens next?"
+  options={[
+    'The model edits the file directly on the server.',
+    'Your code runs the edit, then returns its result.',
+    'The loop ends immediately once any tool is requested.',
+    'The conversation restarts again from the very first message.',
+  ]}
+  correct={1}
+  right="Right. The model only proposes; your code always executes."
+  wrong="Not quite. The model never executes anything. It proposes a call, your code runs it and reports back."
+/>
+
+<Quiz
+  question="When does the loop for a single turn stop?"
+  options={[
+    'After exactly one tool call, no matter the task.',
+    'When the prompt runs out of room for tokens.',
+    'When the model replies with text, not tool calls.',
+    'As soon as any tool returns an error result.',
+  ]}
+  correct={2}
+  right="Exactly. The model deciding it's done ends the loop, not a fixed step count."
+  wrong="Not quite. The loop keeps feeding results back until the model chooses to reply with text only."
+/>
+
+<Quiz
+  question="On the OpenAI protocol (Ollama, llama.cpp), how do you hand a tool's output back?"
+  options={[
+    'A message with role `tool` and the `tool_call_id`',
+    'A `tool_result` block inside the next user message',
+    'A system message that repeats the tool name',
+    'Nothing; the server runs the tool for you',
+  ]}
+  correct={0}
+  right="Right. The result goes back as its own message with role `tool`. A `tool_result` block inside a user message is the Anthropic protocol's version, which you'll meet in the Claude section."
+  wrong="Not quite. It's a message with role `tool` and the call's `tool_call_id`. The `tool_result` block is Anthropic's protocol, not OpenAI's."
+/>
+
+## Your turn: build the loop
+
+Do this in its own new folder: it's the seed of the agent you'll grow through the rest of the Series. Plain TypeScript and plain `fetch`, no SDKs and no Effect yet, so every byte on the wire is visible to you.
+
+You'll build a small chat agent in eight steps, the way Thorsten Ball builds his Go one: each step adds one thing, ends with something you run, and shows what you should see. The code is short enough to type by hand. The finished file is about 123 lines.
+
+Ollama is the main path. The llama.cpp and Claude sections at the end are optional, though the Claude section is what makes the duplication that _Providers behind one interface_ (Part 4) removes visible.
+
+Test environment: the build steps and transcripts in this Part were run on a MacBook Pro (Apple M4 Max, 36 GB of memory, macOS 15.7) with Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830 and the model `qwen3.5:9b`, on 3 November 2026. The raw wire shapes above were captured a few days earlier on a MacBook with an Apple M1 and 16 GB of memory (Ollama 0.40.13, llama.cpp b11669). Timings will differ on your hardware, and so will the model's wording.
+
+> **Not a sandbox.** From step 7 your agent can overwrite files. There is no permission step until a much later Part. You'll run it from inside a scratch folder so the model's default "this directory" is harmless, but that is a convention, not a restriction: a model can still ask for `../index.ts`. Avoid pointing the agent at anything that can't be recovered.
+
+### Setup
+
+1. Check `bun --version`. If it isn't installed: `curl -fsSL https://bun.com/install | bash`, then open a new terminal ([Bun docs](https://bun.com/docs/installation)).
+2. `mkdir my-agent && cd my-agent && bun init -y`. This creates an `index.ts`; you'll replace its contents.
+3. Create the scratch folder the agent will work in, with something to find:
+
+   ```bash
+   mkdir -p playground/notes
+   printf '# Playground\n\nA scratch folder for testing the agent.\n' > playground/README.md
+   printf '%s\n' "I have keys but no locks. I have space but no room. You can enter, but you can't go outside. What am I?" > playground/secret-file.txt
+   printf -- '- buy milk\n- water the plants\n' > playground/notes/todo.txt
+   ```
+
+### Ollama: the main path
+
+1. Start Ollama with a 32k context. Its default is only **4k** tokens on machines with under 24 GiB of VRAM, and Ollama itself says agents need far more ([context length docs](https://docs.ollama.com/context-length)). An agent's history and tool results overflow 4k within a few steps. Quit the Ollama app first, then:
+
+   ```bash
+   OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+   ```
+
+2. In another terminal: `ollama pull qwen3.5:9b` (about 7 GB, with tool support).
+
+Your transcripts will differ in wording from the ones below, because a model never answers the same way twice. What must match is the _shape_: which lines start with `[tool]`, and in what order.
+
+#### Step 1: One request, one reply
+
+Start with no loop and no tools: send one message and print the answer. This is the entire HTTP contract. Replace everything in `index.ts`:
+
+```ts
+const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:11434/v1"
+const MODEL = process.env.MODEL ?? "qwen3.5:9b"
+
+type Message = { role: string; content: string | null }
+type ChatResponse = { choices: { message: Message }[] }
+
+const chat = async (messages: unknown[]): Promise<Message> => {
+  const response = await fetch(`${BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: MODEL, messages, reasoning_effort: "none" }),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  const data = (await response.json()) as ChatResponse
+  const message = data.choices[0]?.message
+  if (!message) throw new Error("No choices returned from model")
+  return message
+}
+
+const reply = await chat([{ role: "user", content: "Say hello in five words." }])
+console.log(reply.content)
+```
+
+Run it:
+
+```text
+$ bun index.ts
+Hello, how are you today?
+```
+
+`chat()` returns the reply's `message`. The two types describe only the fields you use, and `response.json()` gives you `unknown`, so you assert the shape once, here, and check that a message really came back. Try `console.log(reply)` once to see the whole object.
+
+> **Why the request says `reasoning_effort: "none"`.** `qwen3.5` thinks before it answers. Without that field, this five-word greeting took 40 to 46 seconds on Ollama, nearly all of it reasoning text that is never displayed, and it can look like a hung program. With `reasoning_effort: "none"` the same request took 0.3 seconds. Ollama honors the field; llama.cpp ignores it (93 seconds in my test), so you'll turn thinking off on that server instead, with a flag (see the llama.cpp section). Thinking can help on harder problems. This Part turns it off so each step returns quickly, which trades some answer quality for speed, and every transcript below was recorded with it off.
+
+#### Step 2: A conversation
+
+The API is stateless: it remembers nothing between requests. A "conversation" is just an array you keep and resend in full every time. Add an import at the top, and replace the last two lines (`const reply…` and the `console.log`) with a loop:
+
+```ts
+import { createInterface } from "node:readline/promises"
+
+// …BASE_URL, MODEL and chat() stay as they are…
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+const messages: unknown[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  messages.push({ role: "user", content: input })
+  const message = await chat(messages)
+  messages.push(message)
+  console.log(`Agent: ${message.content}`)
+}
+```
+
+Run it, tell it your name, then ask for it back. Stop with Ctrl-C.
+
+```text
+$ bun index.ts
+You: My name is Vlad.
+Agent: Nice to meet you, Vlad! How can I help you today?
+You: What is my name?
+Agent: Your name is **Vlad**.
+```
+
+#### Step 3: A tool, with no model involved
+
+A tool is a function. Write `list_files` as one, and prove it works before the model ever sees it. Add the import and the function above `chat()`, then two temporary lines under it:
+
+```ts
+import { readdir } from "node:fs/promises"
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+console.log(await listFiles("."))   // temporary
+process.exit()                      // temporary
+```
+
+From now on you run the agent _from inside the playground_, so that `.` means the playground:
+
+```text
+$ cd playground && bun ../index.ts
+secret-file.txt
+README.md
+notes/
+```
+
+The order may differ. Directories end in a slash because the model will read this text, and a trailing slash marks which names are folders. The output format is a design choice, and smaller models benefit from a format that is explicit. Now delete the two temporary lines.
+
+#### Step 4: Tell the model the tool exists
+
+Describe the tool the way the wire protocol wants it: a name, a description, and a JSON Schema for the arguments. Add this above `chat()`, add `tools` to the request body, teach the `Message` type about tool calls, and make the loop print what comes back:
+
+```ts
+const tools = [
+  {
+    type: "function",
+    function: {
+      name: "list_files",
+      description:
+        "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+        required: ["path"],
+      },
+    },
+  },
+]
+
+// replace the Message type, so a message can carry tool calls:
+type ToolCall = { id: string; function: { name: string; arguments: string } }
+type Message = { role: string; content: string | null; tool_calls?: ToolCall[] }
+
+// in chat():
+    body: JSON.stringify({ model: MODEL, messages, reasoning_effort: "none", tools }),
+
+// in the loop, replace the console.log line with these two:
+  console.log(`Agent: ${message.content}`)
+  console.log("Tool calls:", JSON.stringify(message.tool_calls))
+```
+
+```text
+$ cd playground && bun ../index.ts
+You: What files are in this directory?
+Agent:
+Tool calls: [{"id":"call_qh06r377","index":0,"type":"function","function":{"name":"list_files","arguments":"{\"path\":\".\"}"}}]
+```
+
+The model did not answer. It sent back an empty `content` and a **tool call**: a name, an id, and `arguments` as a JSON _string_. Nothing ran, because nothing in your code runs tools yet. Stop it with Ctrl-C. The conversation is now broken, since a tool call is waiting for a result that never comes.
+
+#### Step 5: Run the tool and report back
+
+Now close the loop. Wrap the model call in an inner `while`: call the model, and if it asked for tools, run them, append a `role: "tool"` message per call carrying that call's `id`, and call the model _again_. Stop when it answers without tool calls. Replace the whole outer loop:
+
+```ts
+while (true) {
+  const input = await rl.question("You: ")
+  messages.push({ role: "user", content: input })
+
+  while (true) {
+    const message = await chat(messages)
+    messages.push(message)
+    if (message.content) console.log(`Agent: ${message.content}`)
+    if (!message.tool_calls?.length) break
+
+    for (const call of message.tool_calls) {
+      console.log(`[tool] ${call.function.name}(${call.function.arguments})`)
+      const args = JSON.parse(call.function.arguments)
+      const content = await listFiles(args.path)
+      messages.push({ role: "tool", tool_call_id: call.id, content })
+    }
+  }
+}
+```
+
+```text
+$ cd playground && bun ../index.ts
+You: What files are in this directory?
+[tool] list_files({"path":"."})
+Agent: This directory contains the following files and folders:
+
+- `secret-file.txt` (File)
+- `README.md` (File)
+- `notes/` (Directory)
+You: Is there a notes directory? What's in it?
+Agent: Yes, there is a `notes/` directory. I will check its contents for you.
+[tool] list_files({"path":"notes"})
+Agent: The `notes/` directory contains one file:
+- `todo.txt`
+```
+
+This is the complete agent. The `[tool]` lines show that _your_ function ran, rather than the model guessing. In OpenCode's vocabulary, each `chat()` call is one **step**, and the inner `while` is one **turn**: all the steps from the prompt until the model answers in plain text. The outer loop is only the chat around it.
+
+One simplification so far: the loop assumes every tool call is `list_files`. That holds with one tool, and the next step adds a second.
+
+#### Step 6: A second tool, and a shape for tools
+
+Add `read_file`. One option is to copy the `tools` entry and add an `if` on the name, which repeats for every further tool. This step instead gives a tool a shape: a name, a description, a schema, and the function that does the work. Then the model-facing list is _derived_ from those objects, and the loop finds the right one by name. Two changes, shown below: the `node:fs/promises` import gains `readFile`, and the `const tools = […]` block is replaced.
+
+```ts
+// at the top of the file, replace the existing import:
+import { readdir, readFile } from "node:fs/promises"
+
+// replace the whole `const tools = [...]` block with:
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema
+  execute: (input: any) => Promise<string>
+}
+
+const tools: Tool[] = [
+  {
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+      required: ["path"],
+    },
+    execute: ({ path }) => listFiles(path),
+  },
+  {
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Path of the file to read, e.g. 'README.md'" } },
+      required: ["path"],
+    },
+    execute: ({ path }) => readFile(path, "utf8"),
+  },
+]
+
+// The OpenAI protocol's wrapping of a tool. Only this function knows about the wire format.
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+```
+
+Then use it in two places. In `chat()`, send the derived list; in the loop, look the tool up by name:
+
+```ts
+// in chat():
+    body: JSON.stringify({ model: MODEL, messages, reasoning_effort: "none", tools: tools.map(toOpenAITool) }),
+
+// in the for loop, replacing the args / content lines:
+      const tool = tools.find((tool) => tool.name === call.function.name)
+      if (!tool) throw new Error(`The model asked for an unknown tool: ${call.function.name}`)
+      const content = await tool.execute(JSON.parse(call.function.arguments))
+```
+
+Ask something only `read_file` can answer:
+
+```text
+$ cd playground && bun ../index.ts
+You: Read secret-file.txt and solve the riddle in it.
+[tool] read_file({"path":"secret-file.txt"})
+Agent: The answer to the riddle is a **keyboard**.
+
+- It has **keys** (the buttons), but no physical locks.
+- It has **space** (the spacebar), but no physical room.
+- You can **"enter"** data on it, but you cannot walk inside it.
+```
+
+You never told the model to open a file. It read the tool descriptions and chose. _Tools as data_ (Part 3) returns to this shape and makes it provider-neutral.
+
+#### Step 7: A tool that changes things
+
+With `edit_file` the agent can change files as well as read them. It uses string replacement, like Ball's: replace `old_str` with `new_str`, and an empty `old_str` on a path that doesn't exist creates the file. Two rules limit what it can do: `old_str` must match exactly _once_, and an existing file is never silently overwritten. Add the imports, the function above `tools`, and a third entry in the array:
+
+```ts
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+// …and the third entry in `tools`:
+  {
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit or create" },
+        old_str: { type: "string", description: "Text to replace. Empty to create a new file." },
+        new_str: { type: "string", description: "Text to put in its place" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    execute: ({ path, old_str, new_str }) => editFile(path, old_str, new_str),
+  },
+```
+
+`() => newStr` in `replace` is deliberate: a plain string would treat `$&` and similar in the model's code as replacement patterns. Now create a file, edit it in the same conversation, and check the result yourself:
+
+```text
+$ cd playground && bun ../index.ts
+You: Create a fizzbuzz.js that prints fizzbuzz for 1 to 20.
+[tool] edit_file({"path":"fizzbuzz.js","old_str":"","new_str":"for (let i = 1; i \u003c= 20; i++) {\n  if (i % 15 === 0) {…"})
+Agent: I've created the `fizzbuzz.js` file with a solution that prints numbers from 1 to 20, replacing multiples of 3 with "Fizz", multiples of 5 with "Buzz", and multiples of both with "FizzBuzz".
+You: Edit fizzbuzz.js so that it stops at 15 instead.
+[tool] edit_file({"path":"fizzbuzz.js","old_str":"for (let i = 1; i \u003c= 20; i++) {","new_str":"for (let i = 1; i \u003c= 15; i++) {"})
+Agent: Done! The file now stops at 15.
+^C
+$ bun fizzbuzz.js | tr '\n' ' '
+1 2 Fizz 4 Buzz Fizz 7 8 Fizz Buzz 11 Fizz 13 14 FizzBuzz
+```
+
+(`\u003c` is just how Ollama writes `<` inside a JSON string; `JSON.parse` turns it back. Long lines are shortened here with `…`.) Notice the second edit: the model sent only the one line that changes. It could do that because your tool replaces a snippet instead of rewriting the file. That is why the schema asks for `old_str` and not a whole new file.
+
+#### Step 8: Let it chain tools
+
+You never wrote code that says "list, then read". Describe a goal without naming a file and watch the model do it:
+
+```text
+You: There is a text file in this directory with a riddle in it. What's the answer to the riddle?
+[tool] list_files({"path":"."})
+[tool] read_file({"path":"secret-file.txt"})
+Agent: The answer to the riddle is **a keyboard**.
+…
+```
+
+The model picked `list_files`, saw the names, then picked `read_file`. That is two steps in one turn, with the loop only relaying calls and results. Try Ball's last demo too: _"Create congrats.js that decodes the ROT13 string 'Pbatenghyngvbaf ba ohvyqvat n pbqr-rqvgvat ntrag!' and prints it."_ Then run `bun congrats.js` yourself. When I ran it, the model's summary said the script would print "Congratulations on holidays and code-editing!", but the file it wrote printed the right sentence: `Congratulations on building a code-editing agent!`. **Run the file to check it; the model's description of it can be wrong.**
+
+Last, break it on purpose. Ask for a directory that doesn't exist:
+
+```text
+You: What files are in the directory called missing?
+[tool] list_files({"path":"missing"})
+ 17 |   const entries = await readdir(path, { withFileTypes: true })
+                             ^
+ENOENT: no such file or directory, scandir 'missing'
+```
+
+The whole agent crashes. The model asked for a reasonable path, the tool threw, and the model was never told what happened. What _should_ happen instead is where _The roadmap_ (Part 2) starts, and _Tools as data_ (Part 3) fixes it. The same applies to a tool the model invents and to an `edit_file` whose `old_str` doesn't match.
+
+<details>
+<summary>Stuck? The finished index.ts</summary>
+
+```ts
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+import { createInterface } from "node:readline/promises"
+
+const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:11434/v1"
+const MODEL = process.env.MODEL ?? "qwen3.5:9b"
+
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema
+  execute: (input: any) => Promise<string>
+}
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+const tools: Tool[] = [
+  {
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+      required: ["path"],
+    },
+    execute: ({ path }) => listFiles(path),
+  },
+  {
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Path of the file to read, e.g. 'README.md'" } },
+      required: ["path"],
+    },
+    execute: ({ path }) => readFile(path, "utf8"),
+  },
+  {
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit or create" },
+        old_str: { type: "string", description: "Text to replace. Empty to create a new file." },
+        new_str: { type: "string", description: "Text to put in its place" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    execute: ({ path, old_str, new_str }) => editFile(path, old_str, new_str),
+  },
+]
+
+// The OpenAI protocol's wrapping of a tool. Only this function knows about the wire format.
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+
+type ToolCall = { id: string; function: { name: string; arguments: string } }
+type Message = { role: string; content: string | null; tool_calls?: ToolCall[] }
+type ChatResponse = { choices: { message: Message }[] }
+
+const chat = async (messages: unknown[]): Promise<Message> => {
+  const response = await fetch(`${BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: MODEL, messages, reasoning_effort: "none", tools: tools.map(toOpenAITool) }),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  const data = (await response.json()) as ChatResponse
+  const message = data.choices[0]?.message
+  if (!message) throw new Error("No choices returned from model")
+  return message
+}
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+const messages: unknown[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  messages.push({ role: "user", content: input })
+
+  while (true) {
+    const message = await chat(messages)
+    messages.push(message)
+    if (message.content) console.log(`Agent: ${message.content}`)
+    if (!message.tool_calls?.length) break
+
+    for (const call of message.tool_calls) {
+      console.log(`[tool] ${call.function.name}(${call.function.arguments})`)
+      const tool = tools.find((tool) => tool.name === call.function.name)
+      if (!tool) throw new Error(`The model asked for an unknown tool: ${call.function.name}`)
+      const content = await tool.execute(JSON.parse(call.function.arguments))
+      messages.push({ role: "tool", tool_call_id: call.id, content })
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary>Under the hood: Ollama's own protocol</summary>
+
+Ollama also speaks a native protocol at `/api/chat` ([tool calling docs](https://docs.ollama.com/capabilities/tool-calling)). It is shown here to illustrate that these details are protocol choices:
+
+- `arguments` arrives as an **object**, not a JSON string.
+- Tool calls have **no id**. You return results as `{ role: "tool", tool_name: "list_files", content }`, matched by name, which gets ambiguous when the model calls the same tool twice in one reply.
+- It streams by default.
+
+Your agent won't use it: the OpenAI-compatible protocol already covers both local servers, and a third protocol would mean a third set of translation code to maintain. OpenCode doesn't use it either: it uses `/api/tags` and `/api/show` only to discover models.
+
+</details>
+
+### llama.cpp: same protocol, one layer lower (optional)
+
+llama.cpp is the inference engine; Ollama wraps an engine with a model registry, background process management, and its own API. With llama.cpp you choose the model file and the flags yourself.
+
+1. `brew install llama.cpp`.
+2. Start the server. It downloads the same model as a GGUF file from Hugging Face on first run:
+
+   ```bash
+   llama-server -hf unsloth/Qwen3.5-9B-GGUF:Q4_K_M --no-mmproj -c 32768 --port 9931 --reasoning off
+   ```
+
+   `-c 32768` sets the context (the default reads it from the model file). `--no-mmproj` skips the vision component, which this agent doesn't use. 9931 is the default port ([server README](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)). `--reasoning off` turns thinking off for the whole server, because llama.cpp ignores the `reasoning_effort` field your agent sends. Without the flag, the five-word greeting took 93 seconds.
+
+3. Run your _unchanged_ agent, all three tools included, with `cd playground && BASE_URL=http://127.0.0.1:9931/v1 bun ../index.ts`.
+
+It runs without changes, which illustrates the point: **same protocol, different provider**. In my runs, the riddle chain (`list_files` then `read_file`), creating `fizzbuzz.js` and editing it to stop at 15 all worked on llama.cpp with no code change. What differs, as measured in the test environment above:
+
+|                      | Ollama `/v1`                               | llama.cpp `/v1`                                                          |
+| -------------------- | ------------------------------------------ | ------------------------------------------------------------------------ |
+| Model selection      | By the `model` field                       | Fixed at startup; one model per server                                   |
+| Turning thinking off | `reasoning_effort: "none"` in each request | `--reasoning off` when starting the server; the request field is ignored |
+| Reasoning text field | `reasoning`                                | `reasoning_content`                                                      |
+| Tool-call ids        | Short (`call_0mnjckd1`)                    | 32-character random strings                                              |
+
+The reasoning field is one example of "OpenAI-compatible" not meaning identical. Your loop ignores it, so it doesn't break, but an agent that displays the model's thinking would need to handle both.
+
+### Claude: the reference provider (optional, costs money)
+
+Claude is your reference. When a local model gets something wrong, replay the same prompt here: if Claude succeeds, the local model is the likely cause; if Claude fails too, the harness is the likely cause. Use Claude Sonnet 5.5 (`claude-sonnet-5-5`). It speaks a different protocol, Anthropic Messages, so it needs its own request and loop code. The differences are:
+
+**OpenAI Chat Completions (local)**
+
+```text
+POST {base}/v1/chat/completions
+tools: [{ type: "function",
+  function: { name, description,
+              parameters } }]
+
+reply.choices[0].message
+  .tool_calls[{ id, function:
+     { name, arguments: "…" } }]
+
+{ role: "tool",
+  tool_call_id, content }
+  // one message per call
+```
+
+**Anthropic Messages (Claude)**
+
+```text
+POST api.anthropic.com/v1/messages
+headers: x-api-key, anthropic-version
+body: max_tokens (required)
+tools: [{ name, description,
+          input_schema }]
+
+reply.content[{ type: "tool_use",
+  id, name, input: { … } }]
+
+{ role: "user", content: [
+  { type: "tool_result",
+    tool_use_id, content } ] }
+  // all results in one message
+```
+
+Sources: [Tool use overview](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview.md) and [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls). Send `anthropic-version: 2026-10-21`, the current API version ([Versions](https://platform.claude.com/docs/en/api/versioning)), and read your key from `ANTHROPIC_API_KEY`.
+
+You'll build it in six steps, starting from the finished local agent, so most of the file stays exactly as it is. Everything runs from the same `my-agent` folder, and the local agent in `index.ts` is left alone.
+
+#### Claude step 1: A key, and one request
+
+Create an account in the Claude Console ([platform.claude.com](https://platform.claude.com)), add a small amount of credit, set a spend limit, and create an API key. Put it in your environment rather than in a file, and never commit it:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Before writing any code, make one request by hand, the same "say hello" you sent to the local model in step 1. Look at what comes back:
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  -H "content-type: application/json" \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2026-10-21" \
+  -d '{"model":"claude-sonnet-5-5","max_tokens":200,"messages":[{"role":"user","content":"Say hello in five words."}]}'
+```
+
+You get one JSON object. The parts to notice are `content`, a _list of blocks_ where the local reply had a single string, and `stop_reason`:
+
+```text
+{"id":"msg_…","type":"message","role":"assistant","model":"claude-sonnet-5-5",
+ "content":[{"type":"text","text":"…"}],
+ "stop_reason":"end_turn","usage":{…}}
+```
+
+Claude may put a `thinking` block before the text block, and the code needs to handle that. A `401` means the key is wrong or missing, and a `400` comes with a message that says which field it disliked. Claude is billed per token, and this agent resends its whole history on every step, so a long conversation costs more than a short one.
+
+#### Claude step 2: Copy the agent and change the request
+
+Start from the finished local agent: `cp index.ts claude.ts`. Replace the two config lines at the top with these, and stop early if there's no key:
+
+```ts
+const BASE_URL = process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com"
+const API_KEY = process.env.ANTHROPIC_API_KEY
+const MODEL = process.env.MODEL ?? "claude-sonnet-5-5"
+
+if (!API_KEY) throw new Error("Set ANTHROPIC_API_KEY first")
+```
+
+Now replace everything from `toOpenAITool` down to the end of `chat()`, including the three types, with the Anthropic version. Your three tool objects above it don't change at all. This works because of the `Tool` shape from step 6:
+
+```ts
+// The Anthropic protocol's wrapping of a tool. Same name and description, but the schema is called input_schema.
+const toAnthropicTool = (tool: Tool) => ({
+  name: tool.name,
+  description: tool.description,
+  input_schema: tool.parameters,
+})
+
+type TextBlock = { type: "text"; text: string }
+type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown }
+type Block = TextBlock | ToolUseBlock | { type: string } // e.g. thinking blocks: we pass them back untouched
+type ChatResponse = { content: Block[]; stop_reason: string }
+
+const isText = (block: Block): block is TextBlock => block.type === "text"
+const isToolUse = (block: Block): block is ToolUseBlock => block.type === "tool_use"
+
+const chat = async (messages: unknown[]): Promise<ChatResponse> => {
+  const response = await fetch(`${BASE_URL}/v1/messages`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": API_KEY,
+      "anthropic-version": "2026-10-21",
+    },
+    body: JSON.stringify({ model: MODEL, max_tokens: 16000, messages, tools: tools.map(toAnthropicTool) }),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return (await response.json()) as ChatResponse
+}
+```
+
+Compared with the local `chat()`:
+
+- The path is `/v1/messages`, and authentication is a header, `x-api-key`, plus the required `anthropic-version`.
+- `max_tokens` is required. The local servers apply a default; the Anthropic API requires a value.
+- `reasoning_effort` is gone. It was an Ollama field, and Claude decides for itself how much to think.
+- The reply is a list of **blocks**. You keep all of it, because the whole list goes back into the history next. A `thinking` block must be passed back unchanged, so your code never drops or edits blocks it doesn't recognize.
+
+#### Claude step 3: Change the loop
+
+The file doesn't compile until this step is done, because the loop still reads the OpenAI reply. Replace the inner `while` loop (the outer one, with `rl.question`, stays):
+
+```ts
+  while (true) {
+    const reply = await chat(messages)
+    messages.push({ role: "assistant", content: reply.content })
+    for (const block of reply.content) {
+      if (isText(block) && block.text) console.log(`Agent: ${block.text}`)
+    }
+    if (reply.stop_reason === "refusal") break
+
+    const calls = reply.content.filter(isToolUse)
+    if (calls.length === 0) break
+
+    const results = []
+    for (const call of calls) {
+      console.log(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const tool = tools.find((tool) => tool.name === call.name)
+      if (!tool) throw new Error(`The model asked for an unknown tool: ${call.name}`)
+      const content = await tool.execute(call.input)
+      results.push({ type: "tool_result", tool_use_id: call.id, content })
+    }
+    messages.push({ role: "user", content: results })
+  }
+```
+
+Four places differ from the OpenAI loop and need attention:
+
+- The assistant message you push is `{ role: "assistant", content: reply.content }`, the block list as received.
+- `input` arrives as an object. There is no `JSON.parse`, because it wasn't a string to begin with.
+- There is no `role: "tool"`. A result is a `tool_result` block inside a _user_ message, matched to its call by `tool_use_id`.
+- All the results of one reply go in **one** user message. Claude often asks for several tools at once, and sending the results as separate messages is a `400` ("tool_use ids were found without tool_result blocks immediately after").
+
+The `refusal` check handles responses where Claude's safety classifiers decline a request. These come back as a normal `200` response with `stop_reason: "refusal"`, and without the check the agent stops with no explanation.
+
+#### Claude step 4: Run it
+
+Same folder, same playground, same prompt as the local run:
+
+```text
+$ cd playground && bun ../claude.ts
+You: There is a text file in this directory with a riddle in it. What's the answer to the riddle?
+[tool] list_files({"path":"."})
+[tool] read_file({"path":"secret-file.txt"})
+Agent: …the answer is a keyboard…
+```
+
+Your wording will differ. If both `[tool]` lines appear before any `Agent:` line, Claude asked for the two tools in one reply, which is the case the single results message exists for. Then try the create-and-edit demo from step 7 and run `bun fizzbuzz.js` yourself.
+
+#### Claude step 5: Replay a local failure
+
+This step uses Claude as the reference. Take a prompt where the local model went wrong (a bad `old_str` in `edit_file`, the wrong tool, or an answer that contradicts the file) and run it unchanged through both agents:
+
+```bash
+cd playground
+bun ../index.ts     # local model
+bun ../claude.ts    # Claude
+```
+
+- **Claude succeeds, local fails:** the model is the weak part. Sharpen the tool descriptions, or try a larger local model.
+- **Both fail the same way:** suspect your harness: a tool description, a tool's output format, or how you build the history.
+- **Claude fails differently:** read the `[tool]` lines for what it asked for. Claude's mistakes can point at an unclear tool.
+
+#### Claude step 6: See what you duplicated
+
+Compare the two files:
+
+```bash
+diff index.ts claude.ts
+```
+
+The three tool objects, `listFiles`, `editFile`, and the readline loop are identical. Only the request, the reply parsing, and the history shape differ. Those differences are what _Providers behind one interface_ (Part 4) puts behind one interface, so the loop stops knowing which provider it talks to.
+
+<details>
+<summary>Stuck? The finished claude.ts</summary>
+
+```ts
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+import { createInterface } from "node:readline/promises"
+
+const BASE_URL = process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com"
+const API_KEY = process.env.ANTHROPIC_API_KEY
+const MODEL = process.env.MODEL ?? "claude-sonnet-5-5"
+
+if (!API_KEY) throw new Error("Set ANTHROPIC_API_KEY first")
+
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema
+  execute: (input: any) => Promise<string>
+}
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+const tools: Tool[] = [
+  {
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+      required: ["path"],
+    },
+    execute: ({ path }) => listFiles(path),
+  },
+  {
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Path of the file to read, e.g. 'README.md'" } },
+      required: ["path"],
+    },
+    execute: ({ path }) => readFile(path, "utf8"),
+  },
+  {
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit or create" },
+        old_str: { type: "string", description: "Text to replace. Empty to create a new file." },
+        new_str: { type: "string", description: "Text to put in its place" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    execute: ({ path, old_str, new_str }) => editFile(path, old_str, new_str),
+  },
+]
+
+// The Anthropic protocol's wrapping of a tool. Same name and description, but the schema is called input_schema.
+const toAnthropicTool = (tool: Tool) => ({
+  name: tool.name,
+  description: tool.description,
+  input_schema: tool.parameters,
+})
+
+type TextBlock = { type: "text"; text: string }
+type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown }
+type Block = TextBlock | ToolUseBlock | { type: string } // e.g. thinking blocks: we pass them back untouched
+type ChatResponse = { content: Block[]; stop_reason: string }
+
+const isText = (block: Block): block is TextBlock => block.type === "text"
+const isToolUse = (block: Block): block is ToolUseBlock => block.type === "tool_use"
+
+const chat = async (messages: unknown[]): Promise<ChatResponse> => {
+  const response = await fetch(`${BASE_URL}/v1/messages`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": API_KEY,
+      "anthropic-version": "2026-10-21",
+    },
+    body: JSON.stringify({ model: MODEL, max_tokens: 16000, messages, tools: tools.map(toAnthropicTool) }),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return (await response.json()) as ChatResponse
+}
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+const messages: unknown[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  messages.push({ role: "user", content: input })
+
+  while (true) {
+    const reply = await chat(messages)
+    messages.push({ role: "assistant", content: reply.content })
+    for (const block of reply.content) {
+      if (isText(block) && block.text) console.log(`Agent: ${block.text}`)
+    }
+    if (reply.stop_reason === "refusal") break
+
+    const calls = reply.content.filter(isToolUse)
+    if (calls.length === 0) break
+
+    const results = []
+    for (const call of calls) {
+      console.log(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const tool = tools.find((tool) => tool.name === call.name)
+      if (!tool) throw new Error(`The model asked for an unknown tool: ${call.name}`)
+      const content = await tool.execute(call.input)
+      results.push({ type: "tool_result", tool_use_id: call.id, content })
+    }
+    messages.push({ role: "user", content: results })
+  }
+}
+```
+
+</details>
+
+> **If you have 32 GB or more of memory.** Raise the context to 65536 on both servers, as Ollama recommends for agents. Keep `qwen3.5:9b` as the baseline so your results compare with the transcripts in this Part, and try a larger local model only as a free second reference.
+
+> **Result.** One small agent file, with three tools, runs against two different local providers by changing one URL. The rest of the Series addresses how to make this loop trustworthy, not what the loop is.
+
+## Sources
+
+If you read only two of these, read Ollama's tool calling docs (the provider used most here), then Thorsten Ball's article for the whole loop in a single piece.
+
+- [Ollama docs: Tool calling](https://docs.ollama.com/capabilities/tool-calling)
+- [Ollama docs: Context length](https://docs.ollama.com/context-length)
+- [llama.cpp server README](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+- [Claude docs: Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)
+- [Claude docs: Versions](https://platform.claude.com/docs/en/api/versioning)
+- [Thorsten Ball: How to Build an Agent](https://ampcode.com/how-to-build-an-agent)
+- [Anthropic: Building effective agents](https://www.anthropic.com/research/building-effective-agents)
+
+Measured: every build step and transcript above, on Ollama 0.40.14 (32k context, `reasoning_effort: "none"`) and the finished agent on llama.cpp b9830 (`--reasoning off`), with `qwen3.5:9b` on the test environment described above (2026-11-03). Greeting latency with thinking on: 40 to 46 s on Ollama, 93 s on llama.cpp; off: 0.3 s on both. Long lines in transcripts are shortened. The Claude section was also run end to end against the live API and works. The raw tool-call shapes were captured on Ollama 0.40.13 and llama.cpp b11669 on an Apple M1 with 16 GB of memory (2026-10-31).

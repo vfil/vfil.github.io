@@ -2,7 +2,7 @@
 
 Vlad Filimon's blog: learning agentic AI in public, plus notes on leadership and the occasional detour into music. Live at **https://vfil.github.io**.
 
-Built with Astro, TypeScript and plain CSS. Pages ship as static HTML with almost no JavaScript.
+Built with Astro, TypeScript and plain CSS. Pages ship as static HTML; JavaScript is used where it earns its place (copy buttons, the Palette picker, quizzes) and only on the pages that need it.
 
 ## Run it locally
 
@@ -42,7 +42,7 @@ part: 2 # required together with `series`
 ---
 ```
 
-Then write the body in Markdown. Code blocks are highlighted and get a copy button. Images go in `src/assets/` and are referenced relatively, e.g. `![Alt text](../../assets/diagram.svg)`.
+Then write the body in Markdown. Code blocks are highlighted and get a copy button. Prettier leaves fenced code in Posts (`.md` and `.mdx`) exactly as written, so code a reader types is never reformatted. `<details><summary>…</summary>…</details>` works for collapsible blocks (leave a blank line after `</summary>` to write Markdown inside). For a multiple-choice quiz, make the Post an `.mdx` file and use the Quiz component: `import Quiz from '../../components/Quiz.astro'`, then `<Quiz question="…" options={['…', '…']} correct={1} right="…" wrong="…" />` (`correct` is the index of the right option; text may contain `inline code`). The build fails if a quiz is malformed. Images go in `src/assets/` and are referenced relatively, e.g. `![Alt text](../../assets/diagram.svg)`.
 
 To publish, set `draft: false` (or remove the line), commit and push to `main`.
 
