@@ -12,11 +12,10 @@ const target = companion.snapshot ?? companion;
 ---
 
 <p class="companion">
-  <span class="label">companion repo:</span>
+  <span class="label">companion repo:</span>{' '}
   <a href={target.url} rel="noopener">
     {companion.name}
-    {companion.snapshot && <> @ {companion.snapshot.name}</>}
-    <span aria-hidden="true">↗</span>
+    {companion.snapshot && <> @ {companion.snapshot.name}</>} <span aria-hidden="true">↗</span>
   </a>
 </p>
 

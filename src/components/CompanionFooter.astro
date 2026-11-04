@@ -17,8 +17,7 @@ const target = companion.snapshot ?? companion;
     <a href={target.url} rel="noopener">
       {companion.snapshot && <code>{companion.snapshot.name}</code>}
       {companion.snapshot ? ' in ' : ''}
-      {companion.name}
-      <span aria-hidden="true">↗</span>
+      {companion.name} <span aria-hidden="true">↗</span>
     </a>
   </p>
 </aside>
