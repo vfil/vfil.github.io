@@ -7,7 +7,6 @@ tags: [agents, tools, typescript, ollama]
 series: building-an-agent-from-scratch
 part: 3
 snapshot: Part3_tools_as_data
-draft: true
 ---
 
 import Quiz from '../../components/Quiz.astro';
@@ -90,7 +89,7 @@ Its truncation notice works the same way: `[Output truncated. Continue reading w
 
 ### 3. Model input is untrusted
 
-The schema tells the model what to send, but nothing forces it to comply. Claude's docs say that when input is invalid and you reply with an error result, "Claude will retry 2–3 times with corrections before apologizing to the user." Local models make this mistake more often, and the OpenAI protocol adds one more way to fail: `arguments` arrives as a JSON _string_, so `JSON.parse` itself can throw on a malformed reply. Treat a parse failure like any other bad input: an instructive error result, never a crash. OpenCode's registry validates model input at runtime for every tool ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), Registration). In Part 5 (_Why Effect: errors as values_), `Schema` will do this for you. For now, check it by hand.
+The schema tells the model what to send, but nothing forces it to comply. Claude's docs say that when input is invalid and you reply with an error result, "Claude will retry 2–3 times with corrections before apologizing to the user." Local models make this mistake more often, and the OpenAI protocol adds one more way to fail: `arguments` arrives as a JSON _string_, so `JSON.parse` itself can throw on a malformed reply. Treat a parse failure like any other bad input: an instructive error result, never a crash. OpenCode's registry validates model input at runtime for every tool ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), Registration). In _Why Effect: errors as values_ (Part 5), `Schema` will do this for you. For now, check it by hand.
 
 ## Tools on each provider
 
@@ -265,7 +264,7 @@ And in `edit_file`, where `execute` now spans several lines:
       ),
 ```
 
-Run the compiler again. It prints nothing. These hand-written checks are the code that `Schema` replaces in Part 5 (_Why Effect: errors as values_).
+Run the compiler again. It prints nothing. These hand-written checks are the code that `Schema` replaces in _Why Effect: errors as values_ (Part 5).
 
 #### Step 3: One function that never throws
 
@@ -776,7 +775,7 @@ With this:
 
 Run `cd playground && bun ../claude.ts` with the missing-file prompt from step 3 and the write-and-run prompt from step 6. Claude reads the failure and replies without the program ending, and the `write_file` and `bash` prompts appear before anything runs. The `[error]` line appears for the missing file, and the result Claude receives has `is_error: true`. If a reply contains several tool calls, each is prompted in turn and all the results still go back in one user message.
 
-Then compare the files again with `diff index.ts claude.ts`. With the tool code copied over, the differences are the config, `toAnthropicTool`, `chat()` and the loop. The five tools, `runTool` and the confirmation exist twice. Part 4 (_Providers behind one interface_) addresses that duplication.
+Then compare the files again with `diff index.ts claude.ts`. With the tool code copied over, the differences are the config, `toAnthropicTool`, `chat()` and the loop. The five tools, `runTool` and the confirmation exist twice. _Providers behind one interface_ (Part 4) addresses that duplication.
 
 <details>
 <summary>Stuck? The finished claude.ts</summary>
@@ -1033,8 +1032,10 @@ If you read only one, read the first, then do this: after building your five too
 - [Thorsten Ball: How to Build an Agent](https://ampcode.com/how-to-build-an-agent) (`ToolDefinition`, "tool not found")
 - OpenCode's [tool/plugin/read.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/read.ts), [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), [tool/plugin/shell.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/shell.ts) and [ai/src/protocols/shared.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/shared.ts)
 
-Measured: the Ollama and llama.cpp steps in "Your turn" were run on 4 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b` with thinking off); `runBash`'s exit code, 30-second timeout and output cut-off were checked by calling `runTool` directly. Error-result round trips were also measured on Ollama 0.40.13 and llama.cpp b11669 with `qwen3.5:9b` (2026-10-31).
+Measured: the Ollama and llama.cpp steps in "Your turn" were run on 4 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b` with thinking off); `runBash`'s exit code, 30-second timeout and output cut-off were checked by calling `runTool` directly.
 
 Not measured against the live API: `claude.ts` was type-checked and run against a local stand-in for the Messages API that checks the request rules and that a failed tool call comes back as a `tool_result` with `is_error: true`. No Claude output is recorded in this Part.
 
-Checked: every OpenCode link and quotation above against commit `863ea41364`, the quotations from the Claude, Ollama and llama.cpp docs and from Anthropic's tool-design post, and every code block in "Your turn" against Part 1's finished files, on 2026-11-04. Both finished files type-check, and the three `runTool` failures print as shown. The `Part3_tools_as_data` snapshot has the same five tools and behaviour as `index.ts` here, in a different order, and its `index.ts` defaults to the llama.cpp port instead of Ollama's.
+Measured: error-result round trips on Ollama 0.40.13 and llama.cpp b11669 with `qwen3.5:9b` (2026-10-31).
+
+Checked: every OpenCode link and quotation above against commit `863ea41364`, the quotations from the Claude, Ollama and llama.cpp docs and from Anthropic's tool-design post, and every code block in "Your turn" against Part 1's finished files, on 2026-11-04. Both finished files type-check, and the three `runTool` failures print as shown.
