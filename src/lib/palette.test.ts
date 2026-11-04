@@ -25,7 +25,7 @@ const TEXT: TokenName[] = ['muted', 'fg', 'accent', 'accent-2'];
 const HUES = Array.from({ length: 24 }, (_, i) => i * 15);
 
 describe('Default Palette', () => {
-  it("generates exactly the token table in spec 0001's Design tokens section", () => {
+  it('generates the pinned token table', () => {
     expect(paletteTokens(DEFAULT_PALETTE)).toEqual({
       dark: {
         bg: '#101214',

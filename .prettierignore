@@ -3,4 +3,3 @@ dist/
 node_modules/
 bun.lock
 .claude/
-specs/mockups/

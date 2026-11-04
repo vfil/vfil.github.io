@@ -24,7 +24,7 @@ Consult these guides before working on related tasks:
 ## Project conventions
 
 - Read `GLOSSARY.md` first and use its terms (Post, Draft, Category, Tag, Series, Part, Planned Part, Mode, Palette) in code, UI copy and specs.
-- Work is spec-first: features are planned as step-by-step specs in `specs/` and implemented in a separate session. Implement one spec step per commit.
+- Work is spec-first: features are planned as step-by-step specs in `specs/` and implemented in a separate session. Implement one spec step per commit. After implementation, delete the spec's tech details, steps and mockups, keeping only product intent: the code is the single source of truth.
 - Respect the decisions in `docs/adr/`.
 - All content rules live in `src/lib/model.ts` (pure, tested in `src/lib/model.test.ts`); pages get data through `getSite()` in `src/lib/content.ts`.
 - Run `bun run format && bun run check && bun run test && bun run build` before committing.

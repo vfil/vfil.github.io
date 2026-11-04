@@ -90,7 +90,7 @@ export const DEFAULT_PALETTE: Palette = { hue: 359, chroma: 0.211, tint: 10 };
 
 1. Find the numbers you like with the picker; its readout shows `hue° · chroma · tint%`.
 2. Put them in `DEFAULT_PALETTE`. The tests will now fail on purpose. They pin the exact colours so the palette never changes by accident.
-3. Update the expected values in `src/lib/palette.test.ts`, and the token table in `specs/0001-blog-foundation.md`, to the new output (`bun -e "import {paletteTokens, DEFAULT_PALETTE} from './src/lib/palette.ts'; console.log(paletteTokens(DEFAULT_PALETTE))"` prints it).
+3. Update the expected values in `src/lib/palette.test.ts` to the new output (`bun -e "import {paletteTokens, DEFAULT_PALETTE} from './src/lib/palette.ts'; console.log(paletteTokens(DEFAULT_PALETTE))"` prints it).
 
 If you change the recipe itself (how the tokens are computed from the three numbers), also bump `RECIPE_VERSION`.
 
@@ -104,6 +104,6 @@ One-time setup: GitHub repo → Settings → Pages → Source: **GitHub Actions*
 
 ## How this repo is planned
 
-- `specs/`: every feature starts as a step-by-step product and tech spec, implemented afterwards in a separate session.
+- `specs/`: every feature starts as a step-by-step spec, implemented afterwards in a separate session. Once implemented, the spec is trimmed to product intent only (problem, solution, user stories, out of scope); the code is the source of truth for how it works.
 - `GLOSSARY.md`: the words used for things on this blog (Post, Draft, Category, Tag, Series, Part…). Code and specs use the same words.
 - `docs/adr/`: decisions that were hard to make and would be expensive to reverse.
