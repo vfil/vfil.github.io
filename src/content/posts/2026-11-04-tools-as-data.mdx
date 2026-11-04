@@ -50,7 +50,7 @@ type ToolDefinition struct {
 ```
 
 ```ts
-// OpenCode read tool (TS + Effect)
+// OpenCode read tool (TS + Effect), abridged
 editor.add({
   name,             // "read"
   description: "Read the contents of…",
@@ -73,11 +73,11 @@ Add a fifth tool and you add one object. Neither loop changes, and neither does 
 
 ### 1. Descriptions matter most
 
-Claude's docs call detailed descriptions ["by far the most important factor in tool performance"](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools) and recommend at least 3–4 sentences: what the tool does, when to use it (and when not to), what each parameter means, and its limits. OpenCode's `read` description is seven sentences long, and it tells the model how to read large files ("Use offset and limit…") and when to use a different tool ("use grep to find specific content"). Anthropic's tool-design post gives a useful test: describe the tool [as you would to a new hire](https://www.anthropic.com/engineering/writing-tools-for-agents). The advice comes from Anthropic, but it matters _more_ for a 9B local model, which has less ability to guess what you meant.
+Claude's docs call detailed descriptions ["by far the most important factor in tool performance"](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools) and recommend at least 3–4 sentences: what the tool does, when to use it (and when not to), what each parameter means, and its limits. OpenCode's `read` description is eight sentences long, and it tells the model how to read large files ("Use offset and limit…") and when to use a different tool ("use grep to find specific content"). Anthropic's tool-design post gives a useful test: describe the tool [as you would to a new hire](https://www.anthropic.com/engineering/writing-tools-for-agents). The advice comes from Anthropic, but it matters _more_ for a 9B local model, which has less ability to guess what you meant.
 
 ### 2. Errors should say what to do next
 
-The docs: "Instead of generic errors such as `"failed"`, include what went wrong and what Claude should try next." Here is OpenCode doing it. When a file is missing, the `read` tool doesn't return "not found". It looks for similar names:
+Claude's [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) docs: "Instead of generic errors such as `"failed"`, include what went wrong and what Claude should try next." Here is OpenCode doing it. When a file is missing, the `read` tool doesn't return "not found". It looks for similar names:
 
 ```text
 File not found: docs/README
@@ -1036,3 +1036,5 @@ If you read only one, read the first, then do this: after building your five too
 Measured: the Ollama and llama.cpp steps in "Your turn" were run on 4 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b` with thinking off); `runBash`'s exit code, 30-second timeout and output cut-off were checked by calling `runTool` directly. Error-result round trips were also measured on Ollama 0.40.13 and llama.cpp b11669 with `qwen3.5:9b` (2026-10-31).
 
 Not measured against the live API: `claude.ts` was type-checked and run against a local stand-in for the Messages API that checks the request rules and that a failed tool call comes back as a `tool_result` with `is_error: true`. No Claude output is recorded in this Part.
+
+Checked: every OpenCode link and quotation above against commit `863ea41364`, the quotations from the Claude, Ollama and llama.cpp docs and from Anthropic's tool-design post, and every code block in "Your turn" against Part 1's finished files, on 2026-11-04. Both finished files type-check, and the three `runTool` failures print as shown. The `Part3_tools_as_data` snapshot has the same five tools and behaviour as `index.ts` here, in a different order, and its `index.ts` defaults to the llama.cpp port instead of Ollama's.
