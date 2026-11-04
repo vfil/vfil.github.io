@@ -1,20 +1,13 @@
 /*
- * Design tokens, reset, base and prose styles.
- * Dark-first. Colour values are the Default Palette (triad hue 359° / 119° / 239°, chroma 0.211,
- * tint 10%) from specs/mockups/home.html. Components use tokens only, never literal colours.
+ * Design tokens, reset, base and prose styles. Components use tokens only, never literal colours.
+ *
+ * Colour tokens are not defined here: BaseHead generates them from DEFAULT_PALETTE
+ * (src/lib/palette.ts) as an inline <style>. A reader's Custom Palette is written as --d-* (dark)
+ * and --l-* (light) on <html> with data-palette="custom"; the blocks below map those onto the
+ * tokens for the current Mode.
  */
 
 :root {
-  --bg: #101214;
-  --surface: #171a1c;
-  --line: #2b2e31;
-  --muted: #95999c;
-  --fg: #e3e5e6;
-  --accent: #ff9abc;
-  --accent-2: #a6c000;
-  --accent-fg: #101214;
-  color-scheme: dark;
-
   --step--1: 0.8125rem;
   --step-0: 1rem;
   --step-1: 1.125rem;
@@ -24,29 +17,41 @@
   --gutter: 16px;
 }
 
+:root[data-palette='custom'] {
+  --bg: var(--d-bg);
+  --surface: var(--d-surface);
+  --line: var(--d-line);
+  --muted: var(--d-muted);
+  --fg: var(--d-fg);
+  --accent: var(--d-accent);
+  --accent-2: var(--d-accent-2);
+  --accent-fg: var(--d-accent-fg);
+  color-scheme: dark;
+}
+
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme='dark']) {
-    --bg: #f9fafb;
-    --surface: #eef0f2;
-    --line: #dcdee0;
-    --muted: #616466;
-    --fg: #191b1c;
-    --accent: #c91a6f;
-    --accent-2: #5c6c00;
-    --accent-fg: #f9fafb;
+  :root[data-palette='custom']:not([data-theme='dark']) {
+    --bg: var(--l-bg);
+    --surface: var(--l-surface);
+    --line: var(--l-line);
+    --muted: var(--l-muted);
+    --fg: var(--l-fg);
+    --accent: var(--l-accent);
+    --accent-2: var(--l-accent-2);
+    --accent-fg: var(--l-accent-fg);
     color-scheme: light;
   }
 }
 
-:root[data-theme='light'] {
-  --bg: #f9fafb;
-  --surface: #eef0f2;
-  --line: #dcdee0;
-  --muted: #616466;
-  --fg: #191b1c;
-  --accent: #c91a6f;
-  --accent-2: #5c6c00;
-  --accent-fg: #f9fafb;
+:root[data-palette='custom'][data-theme='light'] {
+  --bg: var(--l-bg);
+  --surface: var(--l-surface);
+  --line: var(--l-line);
+  --muted: var(--l-muted);
+  --fg: var(--l-fg);
+  --accent: var(--l-accent);
+  --accent-2: var(--l-accent-2);
+  --accent-fg: var(--l-accent-fg);
   color-scheme: light;
 }
 
