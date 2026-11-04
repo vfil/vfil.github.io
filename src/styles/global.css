@@ -1,8 +1,9 @@
 /*
  * Design tokens, reset, base and prose styles. Components use tokens only, never literal colours.
  *
- * Colour tokens are not defined here: BaseHead generates them from DEFAULT_PALETTE
- * (src/lib/palette.ts) as an inline <style>. A reader's Custom Palette is written as --d-* (dark)
+ * Palette colour tokens are not defined here: BaseHead generates them from DEFAULT_PALETTE
+ * (src/lib/palette.ts) as an inline <style>. The few colours that never follow the Palette
+ * (shadows, ink drawn over the colour wheel) are fixed tokens in :root below. A reader's Custom Palette is written as --d-* (dark)
  * and --l-* (light) on <html> with data-palette="custom"; the blocks below map those onto the
  * tokens for the current Mode.
  */
@@ -15,6 +16,11 @@
   --step-3: 2rem;
   --measure: 46rem;
   --gutter: 16px;
+
+  /* Fixed colours, the same in every Palette and Mode. */
+  --shadow: rgb(0 0 0 / 0.3); /* drop shadows of floating things */
+  --shadow-edge: rgb(0 0 0 / 0.45); /* hairline that separates a handle from any background */
+  --on-wheel: white; /* guides and handle rims drawn over the colour wheel image */
 }
 
 :root[data-palette='custom'] {

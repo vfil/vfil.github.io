@@ -101,6 +101,7 @@ Any colour outside sRGB has its chroma reduced until it fits. **Contrast guard:*
 - `BaseHead` emits the colour tokens as an inline `<style>` built at build time from `paletteCss(DEFAULT_PALETTE)`: dark on bare `:root`, light under `@media (prefers-color-scheme: light) :root:not([data-theme="dark"])` and under `:root[data-theme="light"]`.
 - Remove the colour hex values that spec 0001 put in the global stylesheet. Non-colour tokens (fonts, steps, measure) stay there.
 - The global stylesheet gains the three `:root[data-palette="custom"]` blocks from the mockup, mapping `--x` to `var(--d-x)` / `var(--l-x)`.
+- Colours that never follow the Palette (shadows, the white guides and handle rims drawn over the wheel image) are fixed tokens in the global stylesheet's `:root` (`--shadow`, `--shadow-edge`, `--on-wheel`), so components still use tokens only.
 
 ### Before-first-paint script (inline in `<head>`, extends spec 0001's Mode script)
 
