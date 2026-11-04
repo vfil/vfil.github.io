@@ -10,7 +10,7 @@ Vlad's first Series, _Building an agent from scratch_, had only a placeholder Dr
 
 ## Solution
 
-A faithful port of the lesson as one Post: same content, code, transcripts and sources, lightly edited for the blog. It stays a Draft until Vlad has read it and sets `draft: false`.
+A faithful port of the lesson as one Post: same content, code, transcripts and sources, lightly edited for the blog. It was a Draft until Vlad had read it, and is now published.
 
 - The lesson-pack scaffolding (navigation, reference and glossary links, "ask Claude" paragraph) is gone. References to later lessons are "Part N" with the Planned Part title in italics.
 - llama.cpp and Claude stay in the Post, marked optional. Both test environments (the build machine and the earlier wire-capture machine) are stated.
@@ -18,6 +18,7 @@ A faithful port of the lesson as one Post: same content, code, transcripts and s
 - Agent vocabulary (provider, protocol, step, turn…) is defined inline in the Post; `GLOSSARY.md` covers the blog's domain only.
 - The Series introduction says "no agent framework" and names OpenCode as the reference. Its Planned Parts are the Stage A roadmap: The roadmap; Tools as data; Providers behind one interface; Why Effect: errors as values; Services and layers; Streaming. Stage B (Session) and Stage C (Sandbox) Parts are added when Stage A is nearly done.
 - Code in Posts is never reformatted by Prettier, because readers type it.
+- The code behind the Series lives in a public Companion repo, mentioned in the Foreword and the Series introduction ([spec 0005](0005-companion-repo.md)).
 
 ## Out of scope
 
