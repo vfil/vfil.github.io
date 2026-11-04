@@ -1,7 +1,7 @@
 ---
 import { Font } from 'astro:assets';
 import { SITE } from '../site';
-import { DEFAULT_PALETTE, paletteCss } from '../lib/palette';
+import { DEFAULT_PALETTE, paletteCss, RECIPE_VERSION } from '../lib/palette';
 import '../styles/global.css';
 
 interface Props {
@@ -16,6 +16,29 @@ const { title, description = SITE.description, type = 'website' } = Astro.props;
 const fullTitle = title ? `${title} · ${SITE.shortTitle}` : SITE.title;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 const defaultPaletteCss = paletteCss(DEFAULT_PALETTE);
+
+// Runs before first paint, so no flash of the wrong Mode or of the Default Palette. A stored Custom
+// Palette carries its computed tokens, so this script never runs the colour maths. Plain ES5, no
+// imports: it is inlined as-is.
+const firstPaintScript = `(function () {
+  var root = document.documentElement;
+  root.classList.add('js');
+  try {
+    var mode = localStorage.getItem('mode');
+    if (mode === 'dark' || mode === 'light') root.setAttribute('data-theme', mode);
+    var raw = localStorage.getItem('palette');
+    if (!raw) return;
+    var p = null;
+    try { p = JSON.parse(raw); } catch (e) {}
+    if (p && p.v === ${RECIPE_VERSION} && p.tokens && p.tokens.dark && p.tokens.light) {
+      for (var t in p.tokens.dark) root.style.setProperty('--d-' + t, p.tokens.dark[t]);
+      for (var u in p.tokens.light) root.style.setProperty('--l-' + u, p.tokens.light[u]);
+      root.setAttribute('data-palette', 'custom');
+    } else {
+      localStorage.removeItem('palette');
+    }
+  } catch (e) {}
+})();`;
 ---
 
 <meta charset="utf-8" />
@@ -41,11 +64,4 @@ const defaultPaletteCss = paletteCss(DEFAULT_PALETTE);
 <Font cssVariable="--font-mono" preload={[{ weight: 400, style: 'normal', subset: 'latin' }]} />
 <Font cssVariable="--font-sans" preload={[{ weight: 400, style: 'normal', subset: 'latin' }]} />
 
-<script is:inline>
-  // Apply the reader's saved Mode before first paint (no flash of the wrong Mode).
-  try {
-    var mode = localStorage.getItem('mode');
-    if (mode === 'dark' || mode === 'light')
-      document.documentElement.setAttribute('data-theme', mode);
-  } catch (e) {}
-</script>
+<script is:inline set:html={firstPaintScript} />
