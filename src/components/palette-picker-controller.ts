@@ -10,6 +10,7 @@ import {
   nearestHandle,
   nudge,
   paletteTokens,
+  PALETTE_STORAGE_KEY,
   parseStored,
   pointerToPolar,
   rotateTo,
@@ -18,8 +19,6 @@ import {
   type Handle,
   type Palette,
 } from '../lib/palette';
-
-const STORAGE_KEY = 'palette';
 
 const HANDLE_LABELS = ['Accent colour', 'Second colour', 'Background colour'] as const;
 const KEY_HINT = 'Left and right arrows turn the colours, up and down change strength.';
@@ -59,7 +58,7 @@ const TEMPLATE = `
 
 function readStored(): Palette | null {
   try {
-    return parseStored(localStorage.getItem(STORAGE_KEY));
+    return parseStored(localStorage.getItem(PALETTE_STORAGE_KEY));
   } catch {
     return null;
   }
@@ -67,8 +66,8 @@ function readStored(): Palette | null {
 
 function writeStored(value: string | null): void {
   try {
-    if (value === null) localStorage.removeItem(STORAGE_KEY);
-    else localStorage.setItem(STORAGE_KEY, value);
+    if (value === null) localStorage.removeItem(PALETTE_STORAGE_KEY);
+    else localStorage.setItem(PALETTE_STORAGE_KEY, value);
   } catch {
     // Storage unavailable (private mode): the Palette lasts for this page only.
   }

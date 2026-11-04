@@ -15,6 +15,8 @@ export const DEFAULT_PALETTE: Palette = { hue: 359, chroma: 0.211, tint: 10 };
  * stored Custom Palettes (which hold computed tokens) are then discarded instead of misapplied.
  */
 export const RECIPE_VERSION = 1;
+/** localStorage key holding the reader's Custom Palette (written by serialize). */
+export const PALETTE_STORAGE_KEY = 'palette';
 export const CHROMA_MAX = 0.25;
 /** Hue offsets of the three handles: accent, secondary, ground. */
 export const HANDLE_OFFSETS = [0, 120, 240] as const;

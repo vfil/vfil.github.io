@@ -1,7 +1,7 @@
 ---
 import { Font } from 'astro:assets';
 import { SITE } from '../site';
-import { DEFAULT_PALETTE, paletteCss, RECIPE_VERSION } from '../lib/palette';
+import { DEFAULT_PALETTE, PALETTE_STORAGE_KEY, paletteCss, RECIPE_VERSION } from '../lib/palette';
 import '../styles/global.css';
 
 interface Props {
@@ -26,7 +26,7 @@ const firstPaintScript = `(function () {
   try {
     var mode = localStorage.getItem('mode');
     if (mode === 'dark' || mode === 'light') root.setAttribute('data-theme', mode);
-    var raw = localStorage.getItem('palette');
+    var raw = localStorage.getItem(${JSON.stringify(PALETTE_STORAGE_KEY)});
     if (!raw) return;
     var p = null;
     try { p = JSON.parse(raw); } catch (e) {}
@@ -35,7 +35,7 @@ const firstPaintScript = `(function () {
       for (var u in p.tokens.light) root.style.setProperty('--l-' + u, p.tokens.light[u]);
       root.setAttribute('data-palette', 'custom');
     } else {
-      localStorage.removeItem('palette');
+      localStorage.removeItem(${JSON.stringify(PALETTE_STORAGE_KEY)});
     }
   } catch (e) {}
 })();`;
