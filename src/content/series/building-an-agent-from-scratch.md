@@ -5,8 +5,6 @@ status: ongoing
 repo: https://github.com/vfil/sigma-agent
 planned:
   [
-    'The roadmap',
-    'Tools as data',
     'Providers behind one interface',
     'Why Effect: errors as values',
     'Services and layers',
