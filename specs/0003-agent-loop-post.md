@@ -2,7 +2,7 @@
 
 Status: implemented (2026-11-04)
 
-Product spec only. The Post is `src/content/posts/2026-11-10-the-loop.md` and the Series is `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part and Planned Part.
+Product spec only. The Post is `src/content/posts/2026-11-04-the-loop.mdx` and the Series is `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part and Planned Part.
 
 ## Problem statement
 

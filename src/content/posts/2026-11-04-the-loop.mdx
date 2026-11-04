@@ -1,23 +1,22 @@
 ---
 title: 'The agent loop'
 description: 'An AI coding agent is a short loop around a model. I build one in plain TypeScript and run it on Ollama, llama.cpp and Claude.'
-pubDate: 2026-11-10
+pubDate: 2026-11-04
 category: agentic-ai
 tags: [agents, agent-loop, typescript, ollama]
-draft: true
 series: building-an-agent-from-scratch
 part: 1
 ---
 
 import Quiz from '../../components/Quiz.astro';
 
-The rest of this Series (persistence, permissions, tool registries) builds around one small loop. This Part covers that loop first, on a model running on your own machine.
-
-## The claim
+## Foreword
 
 An "AI coding agent" can seem to need a lot of machinery. At its core, it is a short loop. Thorsten Ball built a working one that reads, lists, and edits files in about [400 lines, mostly boilerplate](https://ampcode.com/how-to-build-an-agent). The loop itself is maybe 20 of those lines.
 
-Everything OpenCode adds on top (durable sessions, permission prompts, many providers, retries) exists to make this loop _safe_ and _durable_, not to replace it.
+Everything the AI agentic software adds on top (durable sessions, permission prompts, many providers, retries) exists to make this loop _safe_ and _durable_, not to replace it.
+
+The rest of this Series (persistence, permissions, tool registries) builds around one small loop. This Part covers that loop first, on a model running on your own machine.
 
 ## The loop itself
 
