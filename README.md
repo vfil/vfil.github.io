@@ -2,7 +2,7 @@
 
 Vlad Filimon's blog: learning agentic AI in public, plus notes on leadership and the occasional detour into music. Live at **https://vfil.github.io**.
 
-Built with Astro, TypeScript and plain CSS. Pages ship as static HTML with almost no JavaScript.
+Built with Astro, TypeScript and plain CSS. Pages ship as static HTML; JavaScript is used where it earns its place (copy buttons, the Palette picker, quizzes) and only on the pages that need it.
 
 ## Run it locally
 
