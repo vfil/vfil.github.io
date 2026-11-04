@@ -3,7 +3,6 @@ import type { GetStaticPaths } from 'astro';
 import BaseLayout from '../../../layouts/BaseLayout.astro';
 import ListingHeader from '../../../components/ListingHeader.astro';
 import SeriesParts from '../../../components/SeriesParts.astro';
-import CompanionNote from '../../../components/CompanionNote.astro';
 import { getSite, renderSeries } from '../../../lib/content';
 
 export const getStaticPaths = (async () => {
@@ -23,7 +22,6 @@ const { Content } = await renderSeries(series.slug);
     <p class="meta">
       [{series.status}] · {series.readable} of {series.total} parts out
     </p>
-    {series.repo && <CompanionNote repo={series.repo} />}
     <div class="prose">
       <Content />
     </div>

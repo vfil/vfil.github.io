@@ -1,7 +1,6 @@
 ---
 import BaseLayout from './BaseLayout.astro';
 import CompanionFooter from '../components/CompanionFooter.astro';
-import CompanionNote from '../components/CompanionNote.astro';
 import SeriesBox from '../components/SeriesBox.astro';
 import SeriesNav from '../components/SeriesNav.astro';
 import TagList from '../components/TagList.astro';
@@ -45,7 +44,6 @@ const repo = place?.series.repo;
       </p>
       <h1 class="page-title">{post.title}</h1>
       {place && <SeriesBox place={place} />}
-      {repo && <CompanionNote repo={repo} snapshot={post.snapshot} />}
     </header>
 
     <div class="prose">
