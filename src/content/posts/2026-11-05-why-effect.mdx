@@ -57,7 +57,7 @@ The type of `listFiles` is `(path: string) => Promise<string>`. Nothing in it me
 
 ## What Effect adds
 
-Effect's own introduction, [Why Effect?](https://effect.website/docs/getting-started/why-effect/), makes the same observation about a plain `divide` function: "Based on the types, we have no idea that this function can throw an exception." Its core claim is that "we can use the type system to track errors and context, not only success values." The page is part of the v3 documentation, and OpenCode uses v4, so some names differ; the [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md) lists them. The snippets in this Part were run on Effect 4.1.0, the version OpenCode pins at the time of writing.
+Effect's own introduction, [Why Effect?](https://effect.website/docs/getting-started/why-effect/), makes the same observation about a plain `divide` function: "Based on the types, we have no idea that this function can throw an exception." Its core claim is that "we can use the type system to track errors and context, not only success values." The page is part of the v3 documentation, and OpenCode uses v4, so some names differ; the [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md) lists them. The snippets in this Part were run on Effect 4.1.0, the version OpenCode pins at the commit its links point to (`97be25f046`).
 
 This section covers the four ideas the rest of this Part uses. Each snippet was run on its own before it went into this Part.
 
@@ -139,6 +139,8 @@ const safe = listFiles("missing").pipe(
   Effect.catch((error) => Effect.succeed(`Could not list ${error.path}: ${error.reason}`)),
 )
 const sure: Effect.Effect<string> = safe
+
+console.log(await Effect.runPromise(safe))
 ```
 
 ```text
@@ -175,7 +177,7 @@ src/tool.ts(34,7): error TS2322: Type 'Effect<string, Declined | InvalidInput | 
 
 ### 3. Expected failures and defects are separate
 
-`runTool` handles the typed failures only. A bug inside the agent, such as a function that throws while describing a confirmation, is a defect. It is not converted into a tool result. OpenCode draws the same line. The comment on its `ToolFailure` says that handlers must map their errors to it, and that the runtime surfaces those as an error result "so the model can self-correct". It continues: "Anything thrown or yielded by a handler that is not a `ToolFailure` is treated as a defect and fails the stream" ([schema/errors.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/errors.ts)). Its tool guidelines add that interruption and defects must survive, so they do not use `catchCause` there ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md)).
+`runTool` handles the typed failures only. A bug inside the agent, such as a function that throws while describing a confirmation, is a defect. It is not converted into a tool result. OpenCode draws the same line. The comment on its `ToolFailure` says that handlers must map their errors to it, and that the runtime surfaces those as an error result "so the model can self-correct". It continues: "Anything thrown or yielded by a handler that is not a `ToolFailure` is treated as a defect and fails the stream" ([schema/errors.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/schema/errors.ts)). Its tool guidelines add that interruption and defects must survive, so they do not use `catchCause` there ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)).
 
 ### 4. Provider errors reach the user, and the turn is dropped
 
@@ -185,7 +187,7 @@ The turn that failed is removed from the history. A turn can fail after the mode
 
 ### 5. One Schema describes a tool's input
 
-In Part 4 a tool's input was described twice: a JSON Schema object for the model and `field()` calls for validation. They could drift apart. Now each tool declares one `Schema.Struct`. `Schema.decodeUnknownEffect` validates the model's arguments against it, and `Schema.toJsonSchemaDocument` produces the JSON Schema that goes into the request. OpenCode uses both functions for the same two jobs in [ai/src/tool.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/tool.ts).
+In Part 4 a tool's input was described twice: a JSON Schema object for the model and `field()` calls for validation. They could drift apart. Now each tool declares one `Schema.Struct`. `Schema.decodeUnknownEffect` validates the model's arguments against it, and `Schema.toJsonSchemaDocument` produces the JSON Schema that goes into the request. OpenCode uses both functions for the same two jobs in [ai/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/tool.ts).
 
 Schema's default messages for a wrong input are short. For `{}` and for `{ path: 42 }` against a Schema with a `path` string field they are:
 
@@ -226,7 +228,7 @@ type ToolExecute<Input, Success> = (
 ) => Effect.Effect<Schema.Schema.Type<Success>, ToolFailure>
 ```
 
-The agent keeps the Schema inside the tool. `defineTool` takes a typed `execute` and builds a `run` that decodes the raw input, asks for confirmation and calls `execute`. That makes the registry a plain `Tool[]` whatever the tools' input types are. OpenCode's tool object carries the Schema and a decoder for it, and its `execute` receives the decoded input. It also has a second Schema for the output. Its tool guidelines state that the registry erases the definitions' types at that boundary ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md)).
+The agent keeps the Schema inside the tool. `defineTool` takes a typed `execute` and builds a `run` that decodes the raw input, asks for confirmation and calls `execute`. That makes the registry a plain `Tool[]` whatever the tools' input types are. OpenCode's tool object carries the Schema and a decoder for it, and its `execute` receives the decoded input. It also has a second Schema for the output. Its tool guidelines state that the registry erases the definitions' types at that boundary ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)).
 
 ## Check yourself
 
@@ -302,6 +304,8 @@ Work in the `my-agent` folder from Part 4. Parts 1 to 4 kept the agent in one `i
 | `src/protocols.ts` | `Protocol`, `openaiChat` and `anthropicMessages`, unchanged from Part 4 |
 | `src/provider.ts`  | The routes, route selection from `PROVIDER`, and `chat`                 |
 | `src/index.ts`     | The prompt loop                                                         |
+
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 5 November 2026. The model's wording will differ.
 
 ### Step 1: Move the agent into `src` and split it into files
 
@@ -733,8 +737,7 @@ while (true) {
 Run the compiler and the agent. Both should behave as they did at the end of Part 4:
 
 ````text
-$ bun run typecheck
-$ tsc --noEmit
+$ bunx --package typescript tsc --noEmit
 $ cd playground && bun ../src/index.ts
 You: List the files here and tell me what is in README.md
 [tool] list_files({"path":"."})
@@ -1531,8 +1534,7 @@ await Effect.runPromise(program)
 Run it. The first prompt names a file that does not exist, and the second makes the agent write one:
 
 ```text
-$ bun run typecheck
-$ tsc --noEmit
+$ bunx --package typescript tsc --noEmit
 $ cd playground && bun ../src/index.ts
 You: Read notes/missing.txt and tell me what it says.
 [tool] read_file({"path":"notes/missing.txt"})
@@ -1545,7 +1547,7 @@ Agent: I've created the file `notes/hello.txt` containing the word "hi".
 You: ^D
 ```
 
-The compiler is clean, and the output has the same shape as in Part 4. Ctrl-D at the prompt now ends the program instead of raising an error. Run `sh reset-playground.sh` to remove `notes/hello.txt`.
+The compiler is clean, and the output has the same shape as in Part 4. Ctrl-D at the prompt now ends the program instead of raising an error. Delete `playground/notes/hello.txt` to restore the playground.
 
 <details>
 <summary>Stuck? The finished provider.ts and index.ts</summary>
@@ -2383,8 +2385,10 @@ await Effect.runPromise(program)
 
 The first item is the primary source for this Part. A useful exercise is to find where OpenCode's tool decodes the model's input and where it builds the JSON Schema, then to list what OpenCode has that the agent does not (an output Schema, `toModelOutput`, an execution context, a raw JSON Schema as input) and what each one is for. _Services and layers_ (Part 6) takes the next step on that list: the model client and the tools become services that the loop asks for.
 
-- OpenCode's [ai/src/tool.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/tool.ts) and the `ToolFailure` comment in [schema/errors.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/errors.ts)
+- OpenCode's [ai/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/tool.ts) and the `ToolFailure` comment in [schema/errors.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/schema/errors.ts)
 - [Effect docs: Why Effect?](https://effect.website/docs/getting-started/why-effect/) (the v3 documentation) and the [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md)
-- OpenCode's [schema/src/tool.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/schema/src/tool.ts) and [core/src/tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md)
+- OpenCode's [schema/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/schema/src/tool.ts) (where `Tool.Error`, the class `ToolFailure` extends, is defined) and [core/src/tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)
 
 Measured: the steps above were run on 5 November 2026 in the [Part 1](/posts/the-loop/) test environment with Effect 4.1.0. The files were type-checked on Effect 4.1.0 and 4.1.2, and the direct calls to `runTool` gave the same messages on both. The Ollama and llama.cpp transcripts used piped input with pauses between prompts, and llama.cpp ran on a second port with `--reasoning off` selected with `BASE_URL`. The failure runs used a port with no server, an unknown model name and the stand-in server above.
+
+Checked: the `Part5_use_effects` tag on the remote (commit `3cb6e23`, the same as `main`); Steps 1 to 5 applied in order to Part 4's finished `index.ts`, with the compiler errors listed in steps 2 to 4 appearing as shown and the eight resulting files equal to the Snapshot's `src` apart from trailing commas and blank lines (the "Stuck?" files and the finished files are the same text); the finished files type-check on Effect 4.1.0 and 4.1.2, and the `check.ts` runs of steps 2 to 4 print the same text on both; every snippet in "What Effect adds" run on its own, including the `TS2322` message, the order of `built the Effect` and `listing`, and Schema's default messages for `{}` and `{ path: 42 }`; the `TS2322` message for a `ProviderError` outside `ToolFailure`; the "Start from the failures" table against Part 4's finished file (a dead port ends the program with `ECONNREFUSED`, empty input never returns from the first `You:`, and input that ends after a prompt raises `readline was closed`; inside a confirmation the same error is caught by `runTool` and sent to the model); the Step 5 and Step 6 runs repeated on Ollama and llama.cpp (b9830) with paced input, where the error lines, the stand-in server's role lists and the `[bug]` run printed as shown and the model's wording differed; the Effect documentation quotations and the page's place in the v3 documentation; the migration guide's rename maps; and, at OpenCode commit `97be25f046`, the `ToolFailure` comment in `schema/errors.ts`, the `Tool` shape, `Schema.decodeUnknownEffect` and `Schema.toJsonSchemaDocument` in `ai/src/tool.ts`, `Tool.Error` in `schema/src/tool.ts`, the registry and `catchCause` guidance in `core/src/tool/AGENTS.md`, and the Effect 4.1.0 pin in its `package.json`. Parts 2 to 4 link OpenCode at `863ea41364`, where the `Tool` interface has `parameters` instead of `input` and Effect is pinned at 4.0.1, so this Part links the newer commit that its comparison matches.
