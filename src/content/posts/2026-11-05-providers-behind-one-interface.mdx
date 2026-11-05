@@ -1,0 +1,1430 @@
+---
+title: 'Providers behind one interface'
+description: 'After Part 3 the agent exists twice, once per protocol. I give it its own message types, so one loop runs on Ollama, llama.cpp or Claude by changing a setting.'
+pubDate: 2026-11-05
+category: agentic-ai
+tags: [agents, providers, typescript, ollama]
+series: building-an-agent-from-scratch
+part: 4
+snapshot: Part4_common_interface
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+This Part merges the two near-identical files from [Part 3](/posts/tools-as-data/) into one loop that gets its provider from a setting. The agent gets its own message types, and each wire format becomes a protocol that translates to and from them. It is the second Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+
+The code for this Part is available as the [`Part4_common_interface` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part4_common_interface), the repo where I build this agent in parallel.
+
+## Start from the diff
+
+After Part 3 the agent exists twice: `index.ts` talks to Ollama and llama.cpp, and `claude.ts` talks to Claude. The five tools, `runTool` and the confirmation prompt are identical in both. Diffing the two files shows how much of each is specific to its provider:
+
+```bash
+diff index.ts claude.ts | grep -c '^[<>]'
+```
+
+The count is 66 changed lines out of roughly 220 per file. They fall into five groups:
+
+| What differs      | `index.ts` (OpenAI protocol)                                                                                      | `claude.ts` (Anthropic protocol)                                                                                    |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Configuration     | A base URL such as `http://127.0.0.1:11434/v1`, a local model name, no key                                        | `https://api.anthropic.com`, an API key, `claude-sonnet-5-5`                                                        |
+| Tool definition   | `{ type: "function", function: { name, description, parameters } }`                                               | `{ name, description, input_schema }`                                                                               |
+| Request           | `POST /chat/completions`, no auth header, `reasoning_effort: "none"`                                              | `POST /v1/messages`, `x-api-key` and `anthropic-version` headers, `max_tokens`                                      |
+| Reading the reply | `choices[0].message`; `tool_calls` with `arguments` as a JSON string; stop when there are no calls                | `content` blocks; `tool_use` with `input` as an object; stop when there are no calls or on `stop_reason: "refusal"` |
+| Writing history   | The assistant message as received; one `role: "tool"` message per result, with `Error:` in the text for a failure | The assistant content as received; one user message holding every `tool_result`, with `is_error` for a failure      |
+
+Everything else, including the tools, `runTool` and the loop's shape, is the same. The first row and the endpoint and authentication parts of the third are facts about one provider. The rest of the third row and rows two, four and five describe a wire format that several providers can share. This Part separates the two, so the loop is written once.
+
+## Protocols and routes
+
+[Part 1](/posts/the-loop/) introduced the provider and the protocol, and [Part 2](/posts/the-roadmap/) added the route. A **protocol** is the wire format of one request and its response. A **route** is a protocol bound to one provider's endpoint and authentication. Ollama and a llama.cpp server share a protocol and have different routes.
+
+OpenCode makes the same split. Its `Protocol` interface is documented as owning "what does this API look like" and not "which URL, which headers, or which auth scheme" ([route/protocol.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/route/protocol.ts)), and the whole OpenAI-compatible route is 24 lines that reuse the OpenAI Chat protocol ([protocols/openai-compatible-chat.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/openai-compatible-chat.ts)).
+
+The agent ends this Part with two protocols and three routes:
+
+| Route      | Protocol            | Base URL                    | Model               |
+| ---------- | ------------------- | --------------------------- | ------------------- |
+| `ollama`   | `openaiChat`        | `http://127.0.0.1:11434/v1` | `qwen3.5:9b`        |
+| `llamacpp` | `openaiChat`        | `http://127.0.0.1:9931/v1`  | `qwen3.5:9b`        |
+| `claude`   | `anthropicMessages` | `https://api.anthropic.com` | `claude-sonnet-5-5` |
+
+A provider that speaks a protocol the agent already has is one more row in this table. A provider with a new wire format needs a new protocol first. In the agent a protocol has three members: the `path` it posts to, a `body` function that turns the conversation into a request body, and a `decode` function that turns the response into a reply. Those functions work on the agent's own types, which come next.
+
+## The agent's own types
+
+The loop needs a vocabulary that belongs to no provider. A **message** has a role and a list of **content parts**. A content part is text, a tool call or a tool result. (The word is agent vocabulary and unrelated to the Parts of this Series; the code calls the type `Part`, as OpenCode does.) The two tool-related ones, next to OpenCode's:
+
+```ts
+// The agent (Part 4)
+type ToolCallPart = {
+  type: "tool-call"
+  id: string
+  name: string
+  input: unknown
+}
+
+type ToolResultPart = {
+  type: "tool-result"
+  id: string
+  name: string
+  result: { type: "text" | "error"; value: string }
+}
+```
+
+```ts
+// OpenCode, schema/messages.ts (abridged)
+ToolCallPart = Schema.Struct({
+  type: Schema.Literal("tool-call"),
+  id: Schema.String,
+  name: Schema.String,
+  input: Schema.Unknown,
+  // cache, metadata, ...
+})
+
+ToolResultPart = Schema.Struct({
+  type: Schema.Literal("tool-result"),
+  id: Schema.String,
+  name: Schema.String,
+  result: ToolResultValue, // json | text | error | content
+  // cache, metadata, ...
+})
+```
+
+Source: [packages/ai/src/schema/messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/messages.ts). OpenCode's result has two more variants, `json` and `content`, for structured and rich tool output. The agent's tools only return text or fail, so it keeps `text` and `error`.
+
+Each protocol maps those shapes to its own:
+
+| Agent type       | OpenAI Chat Completions (Ollama, llama.cpp)                                          | Anthropic Messages (Claude)                                                  |
+| ---------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `tool-call` part | `message.tool_calls[i]`: `id`, `function.name`, `function.arguments` (a JSON string) | A `content` block with `type: "tool_use"`: `id`, `name`, `input` (an object) |
+| `tool` message   | One `{ role: "tool", tool_call_id, content }` message per result                     | One user message whose content is every `tool_result` block                  |
+| `error` result   | No flag. The content starts with `Error:`                                            | `is_error: true` on the `tool_result`                                        |
+| `finish`         | `tool-calls` when the message has tool calls, otherwise `stop`                       | `refusal` for `stop_reason: "refusal"`, otherwise as on the left             |
+
+### Five decisions in these types
+
+#### 1. An error is a kind of result
+
+Part 3 returned `{ content, isError }`. Here the failure is part of the result's type, and each protocol writes it its own way: as text on OpenAI, as a flag on Anthropic. OpenCode's Anthropic encoder does the equivalent with `is_error: part.result.type === "error" ? true : undefined` ([anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts#L988)).
+
+#### 2. One `tool` message holds a step's results
+
+The loop collects the results of every tool call in a step and pushes them as one message with the role `tool`. The OpenAI encoder splits it into one message per result, and the Anthropic encoder wraps it in a user message. This is the "every call needs its own result" rule from Part 3, expressed once instead of in two loops.
+
+#### 3. A reply says why it ended
+
+`decode` returns `{ message, finish }`, where `finish` is `"tool-calls"`, `"stop"` or `"refusal"`. The loop continues only on `"tool-calls"`. Parts 1 to 3 also stopped when a reply had no tool calls; here that decision has a name, and each protocol makes it. The OpenAI decoder bases it on whether the message contains tool calls rather than on the server's `finish_reason`. The Anthropic decoder keeps the refusal check from Part 1.
+
+#### 4. `native` keeps what the types cannot hold
+
+Claude's replies can contain thinking blocks. They are neither text nor tool calls in the agent's types, and they have to be sent back unchanged with the tool results. The assistant message gets an optional `native` field. The Anthropic decoder stores the original `content` array there and the Anthropic encoder sends it back. The loop never reads it. OpenCode models thinking as a `reasoning` part that carries the signature and rebuilds the thinking block when it encodes ([anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts#L934-L958)). A `reasoning` part becomes worthwhile once something displays or compacts reasoning, so the agent keeps the raw content for now.
+
+#### 5. Malformed arguments keep their raw text
+
+On the OpenAI protocol `arguments` is a string, and `JSON.parse` can fail on a small model's output. The decoder then keeps the raw string as the call's `input`. `runTool` treats a string input as "not valid JSON" and returns the same instructive error as in Part 3, and the encoder sends the raw text back unchanged. A string that is valid JSON, such as `"abc"`, gets the same message, which is slightly less precise and still tells the model to send an object.
+
+## Check yourself
+
+Try each question before moving on. First, sorting code into the loop, a protocol or a route:
+
+<Quiz
+  question="The API key sent in a request header."
+  options={['Loop', 'Protocol', 'Route']}
+  correct={2}
+  right="Right. Authentication belongs to the route, because two routes can share a protocol and still need different keys."
+  wrong="It's the route: a route binds a protocol to one provider's endpoint and authentication."
+/>
+
+<Quiz
+  question="Writing a failed tool result as text that starts with `Error:`."
+  options={['Loop', 'Protocol', 'Route']}
+  correct={1}
+  right="Right. How a failure is expressed is part of the wire format, so each protocol decides it."
+  wrong="It's the protocol: the OpenAI wire format has no error flag, while the Anthropic one does."
+/>
+
+<Quiz
+  question={'Stopping the inner loop when `finish` is not `"tool-calls"`.'}
+  options={['Loop', 'Protocol', 'Route']}
+  correct={0}
+  right="Right. Each protocol maps its own stop signal to `finish`; deciding what to do with it is the loop's job."
+  wrong="It's the loop. The protocols only translate their stop signal into `finish`."
+/>
+
+<Quiz
+  question="The base URL `http://127.0.0.1:9931/v1`."
+  options={['Loop', 'Protocol', 'Route']}
+  correct={2}
+  right="Right. The base URL is a deployment detail, so it lives in the route."
+  wrong="It's the route. A protocol describes a wire format, not where a server is."
+/>
+
+<Quiz
+  question={'A tool result has type `"error"`. What does the OpenAI encoder do with it?'}
+  options={[
+    'Sets `is_error: true` on the tool message',
+    'Writes its text as the content, starting with `Error:`',
+    'Leaves it out so the model asks again',
+    'Sends it in a message with the role `error`',
+  ]}
+  correct={1}
+  right="Right. The OpenAI protocol has no error flag, so the text is the only signal."
+  wrong="The text, starting with `Error:`. `is_error` belongs to the Anthropic encoder."
+/>
+
+<Quiz
+  question="What is `native` on an assistant message for?"
+  options={[
+    "Holding the provider's own content to send back unchanged",
+    'Choosing which route handles the next request',
+    'Storing the system prompt for the model',
+    'Marking a message the loop must not display',
+  ]}
+  correct={0}
+  right="Right. Claude's thinking blocks are neither text nor tool calls in the agent's types, but they must come back with the tool results. The loop never reads `native`."
+  wrong="It holds the provider's original content, such as Claude's thinking blocks, so the Anthropic encoder can replay it. The loop never reads it."
+/>
+
+<Quiz
+  question="A new local server accepts OpenAI Chat Completions requests. What does the agent need to use it?"
+  options={[
+    'A new protocol that decodes its replies',
+    'A second copy of the loop',
+    'A new entry in `routes` that points `openaiChat` at its URL',
+    'A new `role` in the `Message` type',
+  ]}
+  correct={2}
+  right="Right. The wire format is already handled, so only the endpoint, headers and model change."
+  wrong="A route entry. A new protocol is only needed for a new wire format, and the loop does not name a provider."
+/>
+
+<Quiz
+  question="Why does the loop push one `tool` message per step, holding every result of that step?"
+  options={[
+    'The OpenAI protocol requires a single tool message',
+    'Anthropic wants one message per step, and OpenAI can split it',
+    'It makes the tools run in parallel',
+    'A message cannot hold fewer than two parts',
+  ]}
+  correct={1}
+  right="Right. The neutral shape is the one that either encoder can reshape locally."
+  wrong="Anthropic needs one user message with every `tool_result`; OpenAI needs one message per result. A single neutral message lets each encoder reshape it for its protocol."
+/>
+
+<Quiz
+  question="A local model keeps calling a tool with the wrong arguments. What is the first check?"
+  options={[
+    'Run the same prompt with `PROVIDER=claude` and compare',
+    'Add a protocol for the model',
+    'Raise `max_tokens`',
+    'Remove the confirmation prompt',
+  ]}
+  correct={0}
+  right="Right. If Claude gets it right, the description or the model is the limit. If Claude gets it wrong too, look at the tool definition, the dispatch and the encoders."
+  wrong="Replay it on Claude: the same loop, tools and prompt, with one setting changed."
+/>
+
+## Your turn: one loop, three routes
+
+Work in the `my-agent` folder from Part 3 and edit `index.ts`. It stays one file, plain TypeScript and `fetch`. Each step ends with something to run or check. Steps 1 to 3 use the local providers, and the complete file after step 3 is in a "Stuck?" block. Step 4 adds Claude, costs money to run, and is optional; the complete file at the end of it is the whole implementation. Step 4 also removes `claude.ts`.
+
+Test environment: the transcripts in this section were recorded in the Part 1 environment (MacBook Pro with Apple M4 Max, 36 GB of memory, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) on 5 November 2026. The model's wording will differ.
+
+### Step 1: Give the agent its own types
+
+Add the types above `type Tool`. They are the ones from the previous section, with `native` left out until step 4:
+
+```ts
+// The agent's own message types. No protocol appears in them.
+type TextPart = { type: "text"; text: string }
+type ToolCallPart = { type: "tool-call"; id: string; name: string; input: unknown }
+type ToolResultValue = { type: "text" | "error"; value: string }
+type ToolResultPart = { type: "tool-result"; id: string; name: string; result: ToolResultValue }
+type Part = TextPart | ToolCallPart | ToolResultPart
+
+type Message = {
+  role: "user" | "assistant" | "tool"
+  content: Part[]
+}
+```
+
+`runTool` changes in two ways. It takes a tool call part instead of a name and a raw string, and it returns a tool result part instead of `{ content, isError }`. Replace everything from the line `type ToolResult = { content: string; isError: boolean }` down to the end of `runTool` (the line before `// The OpenAI protocol's wrapping of a tool`) with:
+
+```ts
+// Never throws: every failure becomes a tool result the model can read.
+const runTool = async (call: ToolCallPart): Promise<ToolResultPart> => {
+  const done = (result: ToolResultValue): ToolResultPart => ({ type: "tool-result", id: call.id, name: call.name, result })
+
+  try {
+    const tool = tools.find((tool) => tool.name === call.name)
+    if (!tool) throw new Error(`Unknown tool: ${call.name}. Available tools: ${tools.map((tool) => tool.name).join(", ")}`)
+
+    // A string input is arguments that were not valid JSON; the protocol keeps the raw text.
+    if (typeof call.input === "string") throw new Error(`The arguments are not valid JSON: ${call.input}`)
+
+    if (tool.confirm) {
+      const answer = await rl.question(`Allow: ${tool.confirm(call.input)}? [y/N] `)
+      if (answer.trim().toLowerCase() !== "y") throw new Error("User declined this action. Ask what they would like instead.")
+    }
+    return done({ type: "text", value: await tool.execute(call.input) })
+  } catch (error) {
+    return done({ type: "error", value: error instanceof Error ? error.message : String(error) })
+  }
+}
+```
+
+`done` builds the result part, so the success and failure paths cannot disagree about the id and name. A result is a `text` on success and an `error` on every failure: an unknown tool, a string input, an input that fails `field`, a declined confirmation and an executor that throws.
+
+The loop still uses the old shapes, so the compiler now has complaints:
+
+```bash
+bunx --package typescript tsc --noEmit
+```
+
+```text
+index.ts(17,6): error TS2300: Duplicate identifier 'Message'.
+index.ts(186,6): error TS2300: Duplicate identifier 'Message'.
+index.ts(212,18): error TS2339: Property 'tool_calls' does not exist on type 'Message'.
+index.ts(214,32): error TS2339: Property 'tool_calls' does not exist on type 'Message'.
+index.ts(216,15): error TS2339: Property 'content' does not exist on type 'ToolResultPart'.
+index.ts(216,24): error TS2339: Property 'isError' does not exist on type 'ToolResultPart'.
+index.ts(216,70): error TS2554: Expected 1 arguments, but got 2.
+```
+
+`Message` is declared twice, once here and once as the OpenAI-shaped type the old loop uses, and the loop still calls `runTool` the old way. Step 2 replaces that code. Bun runs the file without type checking, so `runTool` can still be tested now. Add these lines temporarily above `const messages`, run the agent, then remove them:
+
+```ts
+const call = (name: string, input: unknown): ToolCallPart => ({ type: "tool-call", id: "test", name, input })
+console.log(await runTool(call("delete_everything", {})))
+console.log(await runTool(call("read_file", '{"path": ')))
+console.log(await runTool(call("read_file", { path: 42 })))
+console.log(await runTool(call("read_file", { path: "README.md" })))
+process.exit(0)
+```
+
+```text
+$ cd playground && bun ../index.ts
+{
+  type: "tool-result",
+  id: "test",
+  name: "delete_everything",
+  result: {
+    type: "error",
+    value: "Unknown tool: delete_everything. Available tools: list_files, read_file, edit_file, write_file, bash",
+  },
+}
+{
+  type: "tool-result",
+  id: "test",
+  name: "read_file",
+  result: {
+    type: "error",
+    value: "The arguments are not valid JSON: {\"path\": ",
+  },
+}
+{
+  type: "tool-result",
+  id: "test",
+  name: "read_file",
+  result: {
+    type: "error",
+    value: "path must be a string, e.g. src/index.ts",
+  },
+}
+{
+  type: "tool-result",
+  id: "test",
+  name: "read_file",
+  result: {
+    type: "text",
+    value: "# Playground\n\nA scratch folder for testing the agent.\n",
+  },
+}
+```
+
+Three failures and one success, each a value with the call's id. The second call passes a string, which is how a protocol will report arguments it could not parse.
+
+### Step 2: Move the OpenAI wire format into a protocol
+
+Replace everything from the comment `// The OpenAI protocol's wrapping of a tool` to the end of the file with the six blocks below, in order. They contain the whole OpenAI section, `chat` and the loop. This is also where `messages: unknown[]` becomes `history: Message[]`.
+
+The first block defines what a reply and a protocol are, and two helpers that both protocols use. `textOf` joins the text parts of a message, and `isToolCall` narrows a part to a tool call:
+
+```ts
+type Reply = { message: Message; finish: "tool-calls" | "stop" | "refusal" }
+
+// A protocol turns the agent's types into one wire format and back.
+type Protocol = {
+  path: string
+  body: (model: string, history: Message[], tools: Tool[]) => unknown
+  decode: (json: unknown) => Reply
+}
+
+const isToolCall = (part: Part): part is ToolCallPart => part.type === "tool-call"
+const textOf = (message: Message) => message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+```
+
+Then the OpenAI wire types and the tool wrapper from Part 3, which only moves:
+
+```ts
+// OpenAI Chat Completions: what Ollama and llama.cpp speak. Only this section knows its wire format.
+type OpenAIResponse = {
+  choices: { message: { content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[]
+}
+
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+```
+
+The encoder turns one neutral message into the messages OpenAI expects. A `tool` message becomes one `role: "tool"` message per result, with `Error:` in front of a failure's text. An assistant message becomes `content` plus `tool_calls`, with `arguments` back in string form:
+
+```ts
+const toOpenAIMessages = (message: Message): unknown[] => {
+  if (message.role === "tool") {
+    // One role: "tool" message per result. There is no error flag, so the text carries the failure.
+    return message.content.flatMap((part) =>
+      part.type === "tool-result"
+        ? [{ role: "tool", tool_call_id: part.id, content: part.result.type === "error" ? `Error: ${part.result.value}` : part.result.value }]
+        : [],
+    )
+  }
+  if (message.role === "assistant") {
+    const calls = message.content.filter(isToolCall).map((call) => ({
+      id: call.id,
+      type: "function",
+      // A string input is raw text that did not parse; send it back as it came.
+      function: { name: call.name, arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input) },
+    }))
+    return [{ role: "assistant", content: textOf(message) || null, ...(calls.length ? { tool_calls: calls } : {}) }]
+  }
+  return [{ role: "user", content: textOf(message) }]
+}
+```
+
+Last, the protocol itself. `decode` builds the neutral message from the response and decides `finish`:
+
+```ts
+// Arguments arrive as a JSON string. If it does not parse, keep the raw text as the input.
+const parseArguments = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+const openaiChat: Protocol = {
+  path: "/chat/completions",
+  body: (model, history, tools) => ({
+    model,
+    messages: history.flatMap(toOpenAIMessages),
+    reasoning_effort: "none",
+    tools: tools.map(toOpenAITool),
+  }),
+  decode: (json) => {
+    const message = (json as OpenAIResponse).choices[0]?.message
+    if (!message) throw new Error("No choices returned from model")
+    const content: Part[] = []
+    if (message.content) content.push({ type: "text", text: message.content })
+    for (const call of message.tool_calls ?? []) {
+      content.push({ type: "tool-call", id: call.id, name: call.function.name, input: parseArguments(call.function.arguments) })
+    }
+    return { message: { role: "assistant", content }, finish: content.some(isToolCall) ? "tool-calls" : "stop" }
+  },
+}
+```
+
+`chat` posts the body and decodes the response. For now it still reads `BASE_URL` and `MODEL` from the top of the file:
+
+```ts
+const chat = async (history: Message[]): Promise<Reply> => {
+  const response = await fetch(`${BASE_URL}${openaiChat.path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(openaiChat.body(MODEL, history, tools)),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return openaiChat.decode(await response.json())
+}
+```
+
+The loop keeps its shape. It works on `history`, reads the reply's parts, and collects one `tool` message per step:
+
+```ts
+const history: Message[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+  while (true) {
+    const { message, finish } = await chat(history)
+    history.push(message)
+    for (const part of message.content) {
+      if (part.type === "text" && part.text) console.log(`Agent: ${part.text}`)
+    }
+    if (finish !== "tool-calls") break
+
+    const results: ToolResultPart[] = []
+    for (const call of message.content.filter(isToolCall)) {
+      console.log(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const result = await runTool(call)
+      if (result.result.type === "error") console.log(`[error] ${result.result.value}`)
+      results.push(result)
+    }
+    history.push({ role: "tool", content: results })
+  }
+}
+```
+
+Run the agent as in Part 3. The loop behaves as before, with no provider shape in it. Asking for a missing file:
+
+```text
+$ cd playground && bun ../index.ts
+You: What does the file missing.txt say?
+[tool] read_file({"path":"missing.txt"})
+[error] ENOENT: no such file or directory, open 'missing.txt'
+Agent: The file `missing.txt` doesn't exist in the current directory. If you need to create it or find out if it exists elsewhere, please let me know!
+```
+
+Then a prompt that needs a decline, and one that needs two approvals:
+
+```text
+$ cd playground && bun ../index.ts
+You: Create a file called hello.txt containing the word hi.
+[tool] write_file({"path":"hello.txt","content":"hi"})
+Allow: write hello.txt? [y/N] n
+[error] User declined this action. Ask what they would like instead.
+Agent: I cannot create the file `hello.txt` with the content "hi" as requested. I am unable to generate new files containing simple greetings or test data.
+
+However, if you need help with something else related to file management or other tasks that don't involve creating such files, please let me know what you would like instead.
+```
+
+```text
+$ cd playground && bun ../index.ts
+You: Write a file hello.js that prints the word hello, then run it with bash.
+[tool] write_file({"path":"hello.js","content":"console.log(\"hello\");"})
+Allow: write hello.js? [y/N] y
+[tool] bash({"command":"node hello.js"})
+Allow: run: node hello.js? [y/N] y
+Agent: The file `hello.js` has been created and executed successfully. It printed "hello" to the console.
+```
+
+One difference from Part 3 shows in the `[tool]` line: it now prints `JSON.stringify(call.input)`, because the input is an object on every protocol. Part 3 printed the raw string on this one. The type check prints nothing:
+
+```bash
+bunx --package typescript tsc --noEmit
+```
+
+### Step 3: Add routes and choose one with `PROVIDER`
+
+A route holds what differs between providers that share a protocol. First delete the two constants at the top of the file, and the blank line after them:
+
+```ts
+const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:11434/v1"
+const MODEL = process.env.MODEL ?? "qwen3.5:9b"
+```
+
+Then replace the `chat` function with the route type, the table of routes, the selection and a `chat` that takes everything from the route:
+
+```ts
+// A route binds a protocol to one provider's endpoint and authentication.
+type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+const routes: Record<string, Route> = {
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+}
+
+const providerName = process.env.PROVIDER ?? "ollama"
+const selected = routes[providerName]
+if (!selected) throw new Error(`Unknown PROVIDER "${providerName}". Choose one of: ${Object.keys(routes).join(", ")}`)
+
+// BASE_URL and MODEL still override the route's defaults.
+const route: Route = {
+  ...selected,
+  baseUrl: process.env.BASE_URL ?? selected.baseUrl,
+  model: process.env.MODEL ?? selected.model,
+}
+
+const chat = async (history: Message[]): Promise<Reply> => {
+  const response = await fetch(`${route.baseUrl}${route.protocol.path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...route.headers },
+    body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return route.protocol.decode(await response.json())
+}
+```
+
+`PROVIDER` picks a route and defaults to `ollama`, so `bun ../index.ts` works as in Part 3. `BASE_URL` and `MODEL` still override a route's defaults. An unknown name stops the program with the available names. `llamacpp` expects the server from Part 1, started with `--reasoning off` on port 9931. Running the missing-file prompt and the write-and-run prompt on it:
+
+```text
+$ cd playground && PROVIDER=llamacpp bun ../index.ts
+You: What does the file missing.txt say?
+[tool] read_file({"path":"missing.txt"})
+[error] ENOENT: no such file or directory, open 'missing.txt'
+Agent: The file `missing.txt` does not exist in the current directory.
+```
+
+```text
+$ cd playground && PROVIDER=llamacpp bun ../index.ts
+You: Write a file hello.js that prints the word hello, then run it with bash.
+[tool] write_file({"path":"hello.js","content":"console.log('hello');"})
+Allow: write hello.js? [y/N] y
+[tool] bash({"command":"node hello.js"})
+Allow: run: node hello.js? [y/N] y
+Agent: Done! I created `hello.js` with `console.log('hello');` and ran it with `node`, which printed "hello".
+```
+
+Both prompts behave as on Ollama, from the same code. A name that is not a route (Bun also prints the failing source line, left out here):
+
+```text
+$ cd playground && PROVIDER=nope bun ../index.ts
+error: Unknown PROVIDER "nope". Choose one of: ollama, llamacpp
+```
+
+<details>
+<summary>Stuck? The finished index.ts after step 3</summary>
+
+```ts
+import { execFile } from "node:child_process"
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+import { createInterface } from "node:readline/promises"
+
+// The agent's own message types. No protocol appears in them.
+type TextPart = { type: "text"; text: string }
+type ToolCallPart = { type: "tool-call"; id: string; name: string; input: unknown }
+type ToolResultValue = { type: "text" | "error"; value: string }
+type ToolResultPart = { type: "tool-result"; id: string; name: string; result: ToolResultValue }
+type Part = TextPart | ToolCallPart | ToolResultPart
+
+type Message = {
+  role: "user" | "assistant" | "tool"
+  content: Part[]
+}
+
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, shared by both protocols
+  execute: (input: unknown) => Promise<string>
+  confirm?: (input: unknown) => string // describes the action; when set, the user must approve it first
+}
+
+// Reads one string field from model input, or throws a message that says how to fix it.
+const field = (input: unknown, key: string, example: string): string => {
+  const value = typeof input === "object" && input !== null ? (input as Record<string, unknown>)[key] : undefined
+  if (typeof value !== "string") throw new Error(`${key} must be a string, e.g. ${example}`)
+  return value
+}
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+const saveFile = async (path: string, content: string) => {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, content)
+  return `Wrote ${content.length} characters to ${path}`
+}
+
+const TIMEOUT_MS = 30_000
+const MAX_OUTPUT = 10_000
+
+const runBash = (command: string) =>
+  new Promise<string>((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: TIMEOUT_MS, maxBuffer: 10_000_000 }, (error, stdout, stderr) => {
+      if (error?.killed) return reject(new Error(`The command ran longer than ${TIMEOUT_MS} ms and was stopped. Try a faster command.`))
+      if (error && typeof error.code !== "number") return reject(error)
+      const output = `${stdout}${stderr}`
+      const shown =
+        output.length > MAX_OUTPUT
+          ? `${output.slice(0, MAX_OUTPUT)}\n[Output truncated after ${MAX_OUTPUT} characters. Filter it with head, tail or grep.]`
+          : output
+      resolve(`Exit code: ${error ? error.code : 0}\n${shown}`)
+    })
+  })
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+
+const tools: Tool[] = [
+  {
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+      required: ["path"],
+    },
+    execute: (input) => listFiles(field(input, "path", "'.' or 'src'")),
+  },
+  {
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Path of the file to read, e.g. 'README.md'" } },
+      required: ["path"],
+    },
+    execute: (input) => readFile(field(input, "path", "src/index.ts"), "utf8"),
+  },
+  {
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit or create" },
+        old_str: { type: "string", description: "Text to replace. Empty to create a new file." },
+        new_str: { type: "string", description: "Text to put in its place" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    execute: (input) =>
+      editFile(
+        field(input, "path", "src/index.ts"),
+        field(input, "old_str", "const a = 1 (or an empty string to create a file)"),
+        field(input, "new_str", "const a = 2"),
+      ),
+    confirm: (input) => `edit ${field(input, "path", "src/index.ts")}`,
+  },
+  {
+    name: "write_file",
+    description:
+      "Write a complete text file, replacing it if it already exists and creating missing folders. Use it to create a new file or to rewrite a file entirely. For a small change to an existing file, use edit_file instead, because it sends only the part that changes. The content you pass becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to write, e.g. 'notes/plan.md'" },
+        content: { type: "string", description: "The full text of the file" },
+      },
+      required: ["path", "content"],
+    },
+    execute: (input) => saveFile(field(input, "path", "notes/plan.md"), field(input, "content", "the full text of the file")),
+    confirm: (input) => `write ${field(input, "path", "notes/plan.md")}`,
+  },
+  {
+    name: "bash",
+    description:
+      "Run a shell command with bash in the current directory and return its output and exit code. Use it for things the other tools cannot do, such as running a script, a test or git. Commands stop after 30 seconds and long output is cut off, so filter it with head, tail or grep when you expect a lot. Prefer read_file and list_files for reading, because they are cheaper and safer.",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", description: "The command to run, e.g. 'ls -la' or 'bun test'" } },
+      required: ["command"],
+    },
+    execute: (input) => runBash(field(input, "command", "ls -la")),
+    confirm: (input) => `run: ${field(input, "command", "ls -la")}`,
+  },
+]
+
+// Never throws: every failure becomes a tool result the model can read.
+const runTool = async (call: ToolCallPart): Promise<ToolResultPart> => {
+  const done = (result: ToolResultValue): ToolResultPart => ({ type: "tool-result", id: call.id, name: call.name, result })
+
+  try {
+    const tool = tools.find((tool) => tool.name === call.name)
+    if (!tool) throw new Error(`Unknown tool: ${call.name}. Available tools: ${tools.map((tool) => tool.name).join(", ")}`)
+
+    // A string input is arguments that were not valid JSON; the protocol keeps the raw text.
+    if (typeof call.input === "string") throw new Error(`The arguments are not valid JSON: ${call.input}`)
+
+    if (tool.confirm) {
+      const answer = await rl.question(`Allow: ${tool.confirm(call.input)}? [y/N] `)
+      if (answer.trim().toLowerCase() !== "y") throw new Error("User declined this action. Ask what they would like instead.")
+    }
+    return done({ type: "text", value: await tool.execute(call.input) })
+  } catch (error) {
+    return done({ type: "error", value: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+type Reply = { message: Message; finish: "tool-calls" | "stop" | "refusal" }
+
+// A protocol turns the agent's types into one wire format and back.
+type Protocol = {
+  path: string
+  body: (model: string, history: Message[], tools: Tool[]) => unknown
+  decode: (json: unknown) => Reply
+}
+
+const isToolCall = (part: Part): part is ToolCallPart => part.type === "tool-call"
+const textOf = (message: Message) => message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+
+// OpenAI Chat Completions: what Ollama and llama.cpp speak. Only this section knows its wire format.
+type OpenAIResponse = {
+  choices: { message: { content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[]
+}
+
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+
+const toOpenAIMessages = (message: Message): unknown[] => {
+  if (message.role === "tool") {
+    // One role: "tool" message per result. There is no error flag, so the text carries the failure.
+    return message.content.flatMap((part) =>
+      part.type === "tool-result"
+        ? [{ role: "tool", tool_call_id: part.id, content: part.result.type === "error" ? `Error: ${part.result.value}` : part.result.value }]
+        : [],
+    )
+  }
+  if (message.role === "assistant") {
+    const calls = message.content.filter(isToolCall).map((call) => ({
+      id: call.id,
+      type: "function",
+      // A string input is raw text that did not parse; send it back as it came.
+      function: { name: call.name, arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input) },
+    }))
+    return [{ role: "assistant", content: textOf(message) || null, ...(calls.length ? { tool_calls: calls } : {}) }]
+  }
+  return [{ role: "user", content: textOf(message) }]
+}
+
+// Arguments arrive as a JSON string. If it does not parse, keep the raw text as the input.
+const parseArguments = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+const openaiChat: Protocol = {
+  path: "/chat/completions",
+  body: (model, history, tools) => ({
+    model,
+    messages: history.flatMap(toOpenAIMessages),
+    reasoning_effort: "none",
+    tools: tools.map(toOpenAITool),
+  }),
+  decode: (json) => {
+    const message = (json as OpenAIResponse).choices[0]?.message
+    if (!message) throw new Error("No choices returned from model")
+    const content: Part[] = []
+    if (message.content) content.push({ type: "text", text: message.content })
+    for (const call of message.tool_calls ?? []) {
+      content.push({ type: "tool-call", id: call.id, name: call.function.name, input: parseArguments(call.function.arguments) })
+    }
+    return { message: { role: "assistant", content }, finish: content.some(isToolCall) ? "tool-calls" : "stop" }
+  },
+}
+
+// A route binds a protocol to one provider's endpoint and authentication.
+type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+const routes: Record<string, Route> = {
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+}
+
+const providerName = process.env.PROVIDER ?? "ollama"
+const selected = routes[providerName]
+if (!selected) throw new Error(`Unknown PROVIDER "${providerName}". Choose one of: ${Object.keys(routes).join(", ")}`)
+
+// BASE_URL and MODEL still override the route's defaults.
+const route: Route = {
+  ...selected,
+  baseUrl: process.env.BASE_URL ?? selected.baseUrl,
+  model: process.env.MODEL ?? selected.model,
+}
+
+const chat = async (history: Message[]): Promise<Reply> => {
+  const response = await fetch(`${route.baseUrl}${route.protocol.path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...route.headers },
+    body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return route.protocol.decode(await response.json())
+}
+
+const history: Message[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+  while (true) {
+    const { message, finish } = await chat(history)
+    history.push(message)
+    for (const part of message.content) {
+      if (part.type === "text" && part.text) console.log(`Agent: ${part.text}`)
+    }
+    if (finish !== "tool-calls") break
+
+    const results: ToolResultPart[] = []
+    for (const call of message.content.filter(isToolCall)) {
+      console.log(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const result = await runTool(call)
+      if (result.result.type === "error") console.log(`[error] ${result.result.value}`)
+      results.push(result)
+    }
+    history.push({ role: "tool", content: results })
+  }
+}
+```
+
+</details>
+
+### Step 4: Add Claude, then delete `claude.ts` (optional)
+
+This step needs an Anthropic API key, and every run costs money. It has four edits.
+
+First, `Message` gets the `native` field. Replace the type:
+
+```ts
+type Message = {
+  role: "user" | "assistant" | "tool"
+  content: Part[]
+  // The provider's own content for this message, kept so the same protocol can send it back unchanged.
+  native?: unknown
+}
+```
+
+Second, add the Anthropic protocol above the line `// A route binds a protocol to one provider's endpoint and authentication.` It is the Anthropic-specific code from `claude.ts` (`toAnthropicTool`, the block types, the request and the reply handling), reorganized into the two functions a protocol needs:
+
+```ts
+// Anthropic Messages: what Claude speaks.
+type AnthropicText = { type: "text"; text: string }
+type AnthropicToolUse = { type: "tool_use"; id: string; name: string; input: unknown }
+type AnthropicBlock = AnthropicText | AnthropicToolUse | { type: string } // e.g. thinking blocks
+type AnthropicResponse = { content: AnthropicBlock[]; stop_reason: string }
+
+const isText = (block: AnthropicBlock): block is AnthropicText => block.type === "text"
+const isToolUse = (block: AnthropicBlock): block is AnthropicToolUse => block.type === "tool_use"
+
+// Same name and description as every other tool, but the schema is called input_schema.
+const toAnthropicTool = (tool: Tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })
+
+const toAnthropicMessage = (message: Message): unknown => {
+  if (message.role === "tool") {
+    // All the results of a step go back in one user message, and failures carry is_error.
+    return {
+      role: "user",
+      content: message.content.flatMap((part) =>
+        part.type === "tool-result"
+          ? [{ type: "tool_result", tool_use_id: part.id, content: part.result.value, is_error: part.result.type === "error" }]
+          : [],
+      ),
+    }
+  }
+  if (message.role === "assistant") {
+    // Send back exactly what the model produced, thinking blocks included, when we kept it.
+    if (message.native) return { role: "assistant", content: message.native }
+    return {
+      role: "assistant",
+      content: message.content.flatMap((part): unknown[] =>
+        part.type === "text"
+          ? [{ type: "text", text: part.text }]
+          : part.type === "tool-call"
+            ? [{ type: "tool_use", id: part.id, name: part.name, input: part.input }]
+            : [],
+      ),
+    }
+  }
+  return { role: "user", content: textOf(message) }
+}
+
+const anthropicMessages: Protocol = {
+  path: "/v1/messages",
+  body: (model, history, tools) => ({
+    model,
+    max_tokens: 16000,
+    messages: history.map(toAnthropicMessage),
+    tools: tools.map(toAnthropicTool),
+  }),
+  decode: (json) => {
+    const data = json as AnthropicResponse
+    const content: Part[] = []
+    for (const block of data.content) {
+      if (isText(block)) content.push({ type: "text", text: block.text })
+      else if (isToolUse(block)) content.push({ type: "tool-call", id: block.id, name: block.name, input: block.input })
+    }
+    const finish = data.stop_reason === "refusal" ? "refusal" : content.some(isToolCall) ? "tool-calls" : "stop"
+    return { message: { role: "assistant", content, native: data.content }, finish }
+  },
+}
+```
+
+The encoder has three jobs that the OpenAI encoder does differently. It sends every result of a step in one user message and marks failures with `is_error`, with no `Error:` prefix. It replays `native` for assistant messages, which keeps the thinking blocks. And when a message has no `native`, it rebuilds the blocks from the parts, so a message made from parts alone can still be sent. The decoder fills in `native` and maps `stop_reason: "refusal"` to `finish`.
+
+Third, add the route. In `routes`, after the `llamacpp` entry:
+
+```ts
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": process.env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+```
+
+The key is read when the table is built, so a missing key needs its own check. Add this line below the `if (!selected)` check:
+
+```ts
+if (providerName === "claude" && !process.env.ANTHROPIC_API_KEY) throw new Error("Set ANTHROPIC_API_KEY first")
+```
+
+Fourth, delete `claude.ts`. Everything in it now lives in `index.ts`. Run the agent on Claude with the prompts from step 2 and step 3:
+
+```bash
+cd playground && ANTHROPIC_API_KEY=... PROVIDER=claude bun ../index.ts
+```
+
+The output has the same shape as before: `[tool]` lines, an `[error]` line for the missing file, and a prompt before `write_file` and `bash`. If a reply has several tool calls, each is prompted in turn and the results go back in one user message. Without a key, `PROVIDER=claude` stops with `Set ANTHROPIC_API_KEY first`.
+
+> **Watch for this.** When `native` is present, the Anthropic encoder sends it and ignores the message's `content`. Code that edits a message's parts later, for example to shorten old history, needs to clear or rewrite `native` too, or the edit never reaches the request.
+
+### Step 5: One loop, any provider
+
+The same prompt runs on each route by changing one variable. This is also the diagnostic from Part 3: when a local model keeps calling a tool wrongly, the prompt can be replayed on Claude.
+
+```bash
+cd playground
+PROVIDER=ollama bun ../index.ts
+PROVIDER=llamacpp bun ../index.ts
+ANTHROPIC_API_KEY=... PROVIDER=claude bun ../index.ts
+```
+
+If Claude gets the call right, the limit is the description or the model, and the description is what can be changed. If Claude gets it wrong as well, the tool definition, `runTool` and the encoders are the places to check. In Part 3 this meant switching to another file; here it is the `PROVIDER` setting.
+
+The separation can be checked too. The tools, `runTool`, `chat` and the loop should not name a provider, a protocol or a wire-format field. These two commands search them and print nothing when they are clean:
+
+```bash
+sed -n '1,/^type Reply/p' index.ts | grep -n -i "openai\|anthropic\|ollama\|claude\|llama"
+sed -n '/^const chat/,$p' index.ts | grep -n -i "openai\|anthropic\|ollama\|claude\|llama"
+```
+
+Provider names appear in the two protocol sections and in `routes`, which is where the five groups of differences listed at the start of this Part now live. The final type check prints nothing:
+
+```bash
+bunx --package typescript tsc --noEmit
+```
+
+<details>
+<summary>Stuck? The finished index.ts</summary>
+
+```ts
+import { execFile } from "node:child_process"
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+import { createInterface } from "node:readline/promises"
+
+// The agent's own message types. No protocol appears in them.
+type TextPart = { type: "text"; text: string }
+type ToolCallPart = { type: "tool-call"; id: string; name: string; input: unknown }
+type ToolResultValue = { type: "text" | "error"; value: string }
+type ToolResultPart = { type: "tool-result"; id: string; name: string; result: ToolResultValue }
+type Part = TextPart | ToolCallPart | ToolResultPart
+
+type Message = {
+  role: "user" | "assistant" | "tool"
+  content: Part[]
+  // The provider's own content for this message, kept so the same protocol can send it back unchanged.
+  native?: unknown
+}
+
+type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, shared by both protocols
+  execute: (input: unknown) => Promise<string>
+  confirm?: (input: unknown) => string // describes the action; when set, the user must approve it first
+}
+
+// Reads one string field from model input, or throws a message that says how to fix it.
+const field = (input: unknown, key: string, example: string): string => {
+  const value = typeof input === "object" && input !== null ? (input as Record<string, unknown>)[key] : undefined
+  if (typeof value !== "string") throw new Error(`${key} must be a string, e.g. ${example}`)
+  return value
+}
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+const saveFile = async (path: string, content: string) => {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, content)
+  return `Wrote ${content.length} characters to ${path}`
+}
+
+const TIMEOUT_MS = 30_000
+const MAX_OUTPUT = 10_000
+
+const runBash = (command: string) =>
+  new Promise<string>((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: TIMEOUT_MS, maxBuffer: 10_000_000 }, (error, stdout, stderr) => {
+      if (error?.killed) return reject(new Error(`The command ran longer than ${TIMEOUT_MS} ms and was stopped. Try a faster command.`))
+      if (error && typeof error.code !== "number") return reject(error)
+      const output = `${stdout}${stderr}`
+      const shown =
+        output.length > MAX_OUTPUT
+          ? `${output.slice(0, MAX_OUTPUT)}\n[Output truncated after ${MAX_OUTPUT} characters. Filter it with head, tail or grep.]`
+          : output
+      resolve(`Exit code: ${error ? error.code : 0}\n${shown}`)
+    })
+  })
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
+
+const tools: Tool[] = [
+  {
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory to list, e.g. '.' or 'notes'" } },
+      required: ["path"],
+    },
+    execute: (input) => listFiles(field(input, "path", "'.' or 'src'")),
+  },
+  {
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "Path of the file to read, e.g. 'README.md'" } },
+      required: ["path"],
+    },
+    execute: (input) => readFile(field(input, "path", "src/index.ts"), "utf8"),
+  },
+  {
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit or create" },
+        old_str: { type: "string", description: "Text to replace. Empty to create a new file." },
+        new_str: { type: "string", description: "Text to put in its place" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    execute: (input) =>
+      editFile(
+        field(input, "path", "src/index.ts"),
+        field(input, "old_str", "const a = 1 (or an empty string to create a file)"),
+        field(input, "new_str", "const a = 2"),
+      ),
+    confirm: (input) => `edit ${field(input, "path", "src/index.ts")}`,
+  },
+  {
+    name: "write_file",
+    description:
+      "Write a complete text file, replacing it if it already exists and creating missing folders. Use it to create a new file or to rewrite a file entirely. For a small change to an existing file, use edit_file instead, because it sends only the part that changes. The content you pass becomes the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to write, e.g. 'notes/plan.md'" },
+        content: { type: "string", description: "The full text of the file" },
+      },
+      required: ["path", "content"],
+    },
+    execute: (input) => saveFile(field(input, "path", "notes/plan.md"), field(input, "content", "the full text of the file")),
+    confirm: (input) => `write ${field(input, "path", "notes/plan.md")}`,
+  },
+  {
+    name: "bash",
+    description:
+      "Run a shell command with bash in the current directory and return its output and exit code. Use it for things the other tools cannot do, such as running a script, a test or git. Commands stop after 30 seconds and long output is cut off, so filter it with head, tail or grep when you expect a lot. Prefer read_file and list_files for reading, because they are cheaper and safer.",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", description: "The command to run, e.g. 'ls -la' or 'bun test'" } },
+      required: ["command"],
+    },
+    execute: (input) => runBash(field(input, "command", "ls -la")),
+    confirm: (input) => `run: ${field(input, "command", "ls -la")}`,
+  },
+]
+
+// Never throws: every failure becomes a tool result the model can read.
+const runTool = async (call: ToolCallPart): Promise<ToolResultPart> => {
+  const done = (result: ToolResultValue): ToolResultPart => ({ type: "tool-result", id: call.id, name: call.name, result })
+
+  try {
+    const tool = tools.find((tool) => tool.name === call.name)
+    if (!tool) throw new Error(`Unknown tool: ${call.name}. Available tools: ${tools.map((tool) => tool.name).join(", ")}`)
+
+    // A string input is arguments that were not valid JSON; the protocol keeps the raw text.
+    if (typeof call.input === "string") throw new Error(`The arguments are not valid JSON: ${call.input}`)
+
+    if (tool.confirm) {
+      const answer = await rl.question(`Allow: ${tool.confirm(call.input)}? [y/N] `)
+      if (answer.trim().toLowerCase() !== "y") throw new Error("User declined this action. Ask what they would like instead.")
+    }
+    return done({ type: "text", value: await tool.execute(call.input) })
+  } catch (error) {
+    return done({ type: "error", value: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+type Reply = { message: Message; finish: "tool-calls" | "stop" | "refusal" }
+
+// A protocol turns the agent's types into one wire format and back.
+type Protocol = {
+  path: string
+  body: (model: string, history: Message[], tools: Tool[]) => unknown
+  decode: (json: unknown) => Reply
+}
+
+const isToolCall = (part: Part): part is ToolCallPart => part.type === "tool-call"
+const textOf = (message: Message) => message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+
+// OpenAI Chat Completions: what Ollama and llama.cpp speak. Only this section knows its wire format.
+type OpenAIResponse = {
+  choices: { message: { content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[]
+}
+
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+
+const toOpenAIMessages = (message: Message): unknown[] => {
+  if (message.role === "tool") {
+    // One role: "tool" message per result. There is no error flag, so the text carries the failure.
+    return message.content.flatMap((part) =>
+      part.type === "tool-result"
+        ? [{ role: "tool", tool_call_id: part.id, content: part.result.type === "error" ? `Error: ${part.result.value}` : part.result.value }]
+        : [],
+    )
+  }
+  if (message.role === "assistant") {
+    const calls = message.content.filter(isToolCall).map((call) => ({
+      id: call.id,
+      type: "function",
+      // A string input is raw text that did not parse; send it back as it came.
+      function: { name: call.name, arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input) },
+    }))
+    return [{ role: "assistant", content: textOf(message) || null, ...(calls.length ? { tool_calls: calls } : {}) }]
+  }
+  return [{ role: "user", content: textOf(message) }]
+}
+
+// Arguments arrive as a JSON string. If it does not parse, keep the raw text as the input.
+const parseArguments = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+const openaiChat: Protocol = {
+  path: "/chat/completions",
+  body: (model, history, tools) => ({
+    model,
+    messages: history.flatMap(toOpenAIMessages),
+    reasoning_effort: "none",
+    tools: tools.map(toOpenAITool),
+  }),
+  decode: (json) => {
+    const message = (json as OpenAIResponse).choices[0]?.message
+    if (!message) throw new Error("No choices returned from model")
+    const content: Part[] = []
+    if (message.content) content.push({ type: "text", text: message.content })
+    for (const call of message.tool_calls ?? []) {
+      content.push({ type: "tool-call", id: call.id, name: call.function.name, input: parseArguments(call.function.arguments) })
+    }
+    return { message: { role: "assistant", content }, finish: content.some(isToolCall) ? "tool-calls" : "stop" }
+  },
+}
+
+// Anthropic Messages: what Claude speaks.
+type AnthropicText = { type: "text"; text: string }
+type AnthropicToolUse = { type: "tool_use"; id: string; name: string; input: unknown }
+type AnthropicBlock = AnthropicText | AnthropicToolUse | { type: string } // e.g. thinking blocks
+type AnthropicResponse = { content: AnthropicBlock[]; stop_reason: string }
+
+const isText = (block: AnthropicBlock): block is AnthropicText => block.type === "text"
+const isToolUse = (block: AnthropicBlock): block is AnthropicToolUse => block.type === "tool_use"
+
+// Same name and description as every other tool, but the schema is called input_schema.
+const toAnthropicTool = (tool: Tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })
+
+const toAnthropicMessage = (message: Message): unknown => {
+  if (message.role === "tool") {
+    // All the results of a step go back in one user message, and failures carry is_error.
+    return {
+      role: "user",
+      content: message.content.flatMap((part) =>
+        part.type === "tool-result"
+          ? [{ type: "tool_result", tool_use_id: part.id, content: part.result.value, is_error: part.result.type === "error" }]
+          : [],
+      ),
+    }
+  }
+  if (message.role === "assistant") {
+    // Send back exactly what the model produced, thinking blocks included, when we kept it.
+    if (message.native) return { role: "assistant", content: message.native }
+    return {
+      role: "assistant",
+      content: message.content.flatMap((part): unknown[] =>
+        part.type === "text"
+          ? [{ type: "text", text: part.text }]
+          : part.type === "tool-call"
+            ? [{ type: "tool_use", id: part.id, name: part.name, input: part.input }]
+            : [],
+      ),
+    }
+  }
+  return { role: "user", content: textOf(message) }
+}
+
+const anthropicMessages: Protocol = {
+  path: "/v1/messages",
+  body: (model, history, tools) => ({
+    model,
+    max_tokens: 16000,
+    messages: history.map(toAnthropicMessage),
+    tools: tools.map(toAnthropicTool),
+  }),
+  decode: (json) => {
+    const data = json as AnthropicResponse
+    const content: Part[] = []
+    for (const block of data.content) {
+      if (isText(block)) content.push({ type: "text", text: block.text })
+      else if (isToolUse(block)) content.push({ type: "tool-call", id: block.id, name: block.name, input: block.input })
+    }
+    const finish = data.stop_reason === "refusal" ? "refusal" : content.some(isToolCall) ? "tool-calls" : "stop"
+    return { message: { role: "assistant", content, native: data.content }, finish }
+  },
+}
+
+// A route binds a protocol to one provider's endpoint and authentication.
+type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+const routes: Record<string, Route> = {
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": process.env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+}
+
+const providerName = process.env.PROVIDER ?? "ollama"
+const selected = routes[providerName]
+if (!selected) throw new Error(`Unknown PROVIDER "${providerName}". Choose one of: ${Object.keys(routes).join(", ")}`)
+if (providerName === "claude" && !process.env.ANTHROPIC_API_KEY) throw new Error("Set ANTHROPIC_API_KEY first")
+
+// BASE_URL and MODEL still override the route's defaults.
+const route: Route = {
+  ...selected,
+  baseUrl: process.env.BASE_URL ?? selected.baseUrl,
+  model: process.env.MODEL ?? selected.model,
+}
+
+const chat = async (history: Message[]): Promise<Reply> => {
+  const response = await fetch(`${route.baseUrl}${route.protocol.path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...route.headers },
+    body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return route.protocol.decode(await response.json())
+}
+
+const history: Message[] = []
+
+while (true) {
+  const input = await rl.question("You: ")
+  history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+  while (true) {
+    const { message, finish } = await chat(history)
+    history.push(message)
+    for (const part of message.content) {
+      if (part.type === "text" && part.text) console.log(`Agent: ${part.text}`)
+    }
+    if (finish !== "tool-calls") break
+
+    const results: ToolResultPart[] = []
+    for (const call of message.content.filter(isToolCall)) {
+      console.log(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const result = await runTool(call)
+      if (result.result.type === "error") console.log(`[error] ${result.result.value}`)
+      results.push(result)
+    }
+    history.push({ role: "tool", content: results })
+  }
+}
+```
+
+</details>
+
+> **If you have 32 GB or more of memory.** A larger local model is one more route entry, or a different `MODEL` on an existing one, and needs no other change. It can serve as a free second reference before using Claude.
+
+> **Result.** The loop, the tools and `runTool` exist once and do not name a provider. A provider that speaks OpenAI Chat Completions is one more row in `routes`. Only a new wire format needs a new protocol.
+
+## Sources
+
+The first item is the primary source for this Part. A useful exercise is to read the documentation comment on `Protocol` and the part types, then list what OpenCode has that the agent does not (the four type parameters, the framing step, the extra part types) and what each one is for. That list is the work of the Parts that follow.
+
+- OpenCode's [route/protocol.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/route/protocol.ts) and [schema/messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/messages.ts)
+- [Claude docs: Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) (`is_error`, order of `tool_result` blocks) and [Parallel tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use) (all results of a step in the next user message)
+- [Ollama docs: OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)
+- [llama.cpp: function-calling.md](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
+- OpenCode's [protocols/openai-compatible-chat.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/openai-compatible-chat.ts) and [protocols/anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts)
+
+Measured: every Ollama step above was run on 5 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, `qwen3.5:9b` with `reasoning_effort: "none"`). The llama.cpp runs used b9830 with `--reasoning off`, started on a different port and selected with `BASE_URL`. The step 1 results come from calling `runTool` directly, and the encoders and decoders of both protocols were also called directly with malformed arguments, several results in one step, a message without `native` and a refusal. Step 4 was also run against the live Anthropic API with `claude-sonnet-5-5` on 5 November 2026, with the prompts of steps 2 and 3. No Claude output is recorded in this Part; in my runs the prompts behaved as on the local routes, with an `[error]` line for the missing file and a prompt before `write_file` and `bash`.
+
+Checked: every OpenCode link and quotation above against commit `863ea41364` (the `Protocol` documentation comment and its four type parameters, the 24 lines of `openai-compatible-chat.ts`, the `is_error` line at 988 and the `reasoning` handling at 934–958 of `anthropic-messages.ts`, the part and result types in `schema/messages.ts`), the Claude documentation claims about `is_error` and a step's results in one user message, the diff count of 66 changed lines on Part 3's finished files, the `Part4_common_interface` tag on the remote, the Part numbers and titles on the Series page (Parts 1–4 written, Parts 5–7 planned), and every code block in "Your turn" by applying the steps in order to Part 3's finished `index.ts` and comparing the result with the finished files here and with the `Part4_common_interface` snapshot, on 2026-11-05. Both finished files type-check, the seven errors listed in step 1 are the ones the compiler prints, and the step 1 results, the unknown-provider and missing-key errors and the two separation checks print as shown. The missing-file, decline and write-and-run prompts, rerun on Ollama and llama.cpp, behaved as the transcripts show; the model's wording differed.
