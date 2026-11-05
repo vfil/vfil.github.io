@@ -121,7 +121,7 @@ The loop collects the results of every tool call in a step and pushes them as on
 
 #### 4. `native` keeps what the types cannot hold
 
-Claude's replies can contain thinking blocks. They are neither text nor tool calls in the agent's types, and they have to be sent back unchanged with the tool results. The assistant message gets an optional `native` field. The Anthropic decoder stores the original `content` array there and the Anthropic encoder sends it back. The loop never reads it. OpenCode models thinking as a `reasoning` part that carries the signature and rebuilds the thinking block when it encodes ([anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts#L934-L937)). A `reasoning` part becomes worthwhile once something displays or compacts reasoning, so the agent keeps the raw content for now.
+Claude's replies can contain thinking blocks. They are neither text nor tool calls in the agent's types, and they have to be sent back unchanged with the tool results. The assistant message gets an optional `native` field. The Anthropic decoder stores the original `content` array there and the Anthropic encoder sends it back. The loop never reads it. OpenCode models thinking as a `reasoning` part that carries the signature and rebuilds the thinking block when it encodes ([anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts#L934-L958)). A `reasoning` part becomes worthwhile once something displays or compacts reasoning, so the agent keeps the raw content for now.
 
 #### 5. Malformed arguments keep their raw text
 
@@ -252,7 +252,7 @@ type Message = {
 }
 ```
 
-`runTool` changes in two ways. It takes a tool call part instead of a name and a raw string, and it returns a tool result part instead of `{ content, isError }`. Replace everything from `type ToolResult` down to the end of `runTool` (the line before `// The OpenAI protocol's wrapping of a tool`) with:
+`runTool` changes in two ways. It takes a tool call part instead of a name and a raw string, and it returns a tool result part instead of `{ content, isError }`. Replace everything from the line `type ToolResult = { content: string; isError: boolean }` down to the end of `runTool` (the line before `// The OpenAI protocol's wrapping of a tool`) with:
 
 ```ts
 // Never throws: every failure becomes a tool result the model can read.
@@ -584,7 +584,7 @@ Allow: run: node hello.js? [y/N] y
 Agent: Done! I created `hello.js` with `console.log('hello');` and ran it with `node`, which printed "hello".
 ```
 
-Both prompts behave as on Ollama, from the same code. A name that is not a route:
+Both prompts behave as on Ollama, from the same code. A name that is not a route (Bun also prints the failing source line, left out here):
 
 ```text
 $ cd playground && PROVIDER=nope bun ../index.ts
@@ -1421,9 +1421,11 @@ while (true) {
 If you read only one, read the first. A useful exercise afterwards is to read the documentation comment on `Protocol` and the part types, then list what OpenCode has that the agent does not (the four type parameters, the framing step, the extra part types) and what each one is for. That list is the work of the Parts that follow.
 
 - OpenCode's [route/protocol.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/route/protocol.ts) and [schema/messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/messages.ts)
-- [Claude docs: Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) (results in one user message, `is_error`)
+- [Claude docs: Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) (`is_error`, order of `tool_result` blocks) and [Parallel tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use) (all results of a step in the next user message)
 - [Ollama docs: OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)
 - [llama.cpp: function-calling.md](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
 - OpenCode's [protocols/openai-compatible-chat.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/openai-compatible-chat.ts) and [protocols/anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts)
 
 Measured: every Ollama step above was run on 5 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, `qwen3.5:9b` with `reasoning_effort: "none"`). The llama.cpp runs used b9830 with `--reasoning off`, started on a different port and selected with `BASE_URL`. The step 1 results come from calling `runTool` directly, and the encoders and decoders of both protocols were also called directly with malformed arguments, several results in one step, a message without `native` and a refusal. Step 4 was also run against the live Anthropic API with `claude-sonnet-5-5` on 5 November 2026, with the prompts of steps 2 and 3. No Claude output is recorded in this Part; in my runs the prompts behaved as on the local routes, with an `[error]` line for the missing file and a prompt before `write_file` and `bash`.
+
+Checked: every OpenCode link and quotation above against commit `863ea41364` (the `Protocol` documentation comment and its four type parameters, the 24 lines of `openai-compatible-chat.ts`, the `is_error` line at 988 and the `reasoning` handling at 934–958 of `anthropic-messages.ts`, the part and result types in `schema/messages.ts`), the Claude documentation claims about `is_error` and a step's results in one user message, the diff count of 66 changed lines on Part 3's finished files, and every code block in "Your turn" by applying the steps in order to Part 3's finished `index.ts` and comparing the result with the finished files here and with the `Part4_common_interface` snapshot, on 2026-11-05. Both finished files type-check, the seven errors listed in step 1 are the ones the compiler prints, and the step 1 results, the unknown-provider and missing-key errors and the two separation checks print as shown. The missing-file, decline and write-and-run prompts, rerun on Ollama and llama.cpp, behaved as the transcripts show; the model's wording differed.
