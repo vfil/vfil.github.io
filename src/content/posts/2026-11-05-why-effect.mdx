@@ -1,13 +1,12 @@
 ---
 title: 'Why Effect: errors as values'
-description: 'After Part 4 four kinds of failure are handled four ways and none shows in a type. I move the agent to Effect, so tools fail with typed errors and the model and the user each read only their own.'
+description: 'After Part 4 four kinds of failure are handled four ways and none shows in a type. Moving the agent to Effect makes tools fail with typed errors, and the model and the user each read only their own.'
 pubDate: 2026-11-05
 category: agentic-ai
 tags: [agents, effect, typescript, ollama]
 series: building-an-agent-from-scratch
 part: 5
 snapshot: Part5_use_effects
-draft: true
 ---
 
 import Quiz from '../../components/Quiz.astro';
@@ -199,7 +198,7 @@ Expected string
   at ["path"]
 ```
 
-Part 3 gave the model `path must be a string, e.g. src/index.ts`, which names the field and says what to send. The default text names the field and the problem, and leaves out what the tool takes. `InvalidInput` lists every problem as `field: problem` and then names the fields the tool takes, so the message keeps that purpose. Step 6 shows a model correcting a call from it.
+Part 3 gave the model `path must be a string, e.g. src/index.ts`, which names the field and says what to send. The default text names the field and the problem, and leaves out what the tool takes. `InvalidInput` lists every problem as `field: problem` and then names the fields the tool takes, which is the purpose Part 3's message served. Step 6 shows a model correcting a call from it.
 
 ```ts
 // The agent (Part 5)
@@ -1808,7 +1807,7 @@ Did you perhaps mean `todo.txt`?
 
 > **Watch for this.** `Effect.catch` and `catchTag` handle typed failures only. A bug that throws is a defect, and the typed handler next to it does not run for it. When a handler seems to be ignored, check which of the two kinds of failure reached it.
 
-> **Result.** Every function that can fail says so in its type. The model reads tool failures, the user reads provider errors and bugs, and a failed turn leaves the history valid. Adding a tool is one `defineTool` entry, and adding a route or a protocol touches neither the tools nor the loop.
+> **Result.** In this agent every function that can fail has the failure in its type. The model reads tool failures, the user reads provider errors and bugs, and a failed turn leaves the history valid. A new tool is one `defineTool` entry, and a new route or protocol changes neither the tools nor the loop.
 
 ### The finished files
 
@@ -2391,4 +2390,15 @@ The first item is the primary source for this Part. A useful exercise is to find
 
 Measured: the steps above were run on 5 November 2026 in the [Part 1](/posts/the-loop/) test environment with Effect 4.1.0. The files were type-checked on Effect 4.1.0 and 4.1.2, and the direct calls to `runTool` gave the same messages on both. The Ollama and llama.cpp transcripts used piped input with pauses between prompts, and llama.cpp ran on a second port with `--reasoning off` selected with `BASE_URL`. The failure runs used a port with no server, an unknown model name and the stand-in server above.
 
-Checked: the `Part5_use_effects` tag on the remote (commit `3cb6e23`, the same as `main`); Steps 1 to 5 applied in order to Part 4's finished `index.ts`, with the compiler errors listed in steps 2 to 4 appearing as shown and the eight resulting files equal to the Snapshot's `src` apart from trailing commas and blank lines (the "Stuck?" files and the finished files are the same text); the finished files type-check on Effect 4.1.0 and 4.1.2, and the `check.ts` runs of steps 2 to 4 print the same text on both; every snippet in "What Effect adds" run on its own, including the `TS2322` message, the order of `built the Effect` and `listing`, and Schema's default messages for `{}` and `{ path: 42 }`; the `TS2322` message for a `ProviderError` outside `ToolFailure`; the "Start from the failures" table against Part 4's finished file (a dead port ends the program with `ECONNREFUSED`, empty input never returns from the first `You:`, and input that ends after a prompt raises `readline was closed`; inside a confirmation the same error is caught by `runTool` and sent to the model); the Step 5 and Step 6 runs repeated on Ollama and llama.cpp (b9830) with paced input, where the error lines, the stand-in server's role lists and the `[bug]` run printed as shown and the model's wording differed; the Effect documentation quotations and the page's place in the v3 documentation; the migration guide's rename maps; and, at OpenCode commit `97be25f046`, the `ToolFailure` comment in `schema/errors.ts`, the `Tool` shape, `Schema.decodeUnknownEffect` and `Schema.toJsonSchemaDocument` in `ai/src/tool.ts`, `Tool.Error` in `schema/src/tool.ts`, the registry and `catchCause` guidance in `core/src/tool/AGENTS.md`, and the Effect 4.1.0 pin in its `package.json`. Parts 2 to 4 link OpenCode at `863ea41364`, where the `Tool` interface has `parameters` instead of `input` and Effect is pinned at 4.0.1, so this Part links the newer commit that its comparison matches.
+Checked:
+
+- the `Part5_use_effects` tag on the remote (commit `3cb6e23`, the same as `main`)
+- Steps 1 to 5 applied in order to Part 4's finished `index.ts`: the compiler errors listed in steps 2 to 4 appear as shown, and the eight resulting files equal the Snapshot's `src` apart from trailing commas and blank lines (the "Stuck?" files and the finished files are the same text)
+- the finished files type-check on Effect 4.1.0 and 4.1.2, and the `check.ts` runs of steps 2 to 4 print the same text on both
+- every snippet in "What Effect adds" run on its own, including the `TS2322` message, the order of `built the Effect` and `listing`, and Schema's default messages for `{}` and `{ path: 42 }`; the `TS2322` message for a `ProviderError` outside `ToolFailure`
+- the "Start from the failures" table against Part 4's finished file: a dead port ends the program with `ECONNREFUSED`, empty input never returns from the first `You:`, and input that ends after a prompt raises `readline was closed`; inside a confirmation the same error is caught by `runTool` and sent to the model
+- the Step 5 and Step 6 runs repeated on Ollama and llama.cpp (b9830) with paced input: the error lines, the stand-in server's role lists and the `[bug]` run printed as shown, and the model's wording differed
+- the Effect documentation quotations and the page's place in the v3 documentation, and the migration guide's rename maps
+- at OpenCode commit `97be25f046`: the `ToolFailure` comment in `schema/errors.ts`, the `Tool` shape, `Schema.decodeUnknownEffect` and `Schema.toJsonSchemaDocument` in `ai/src/tool.ts`, `Tool.Error` in `schema/src/tool.ts`, the registry and `catchCause` guidance in `core/src/tool/AGENTS.md`, and the Effect 4.1.0 pin in its `package.json`
+
+Parts 2 to 4 link OpenCode at `863ea41364`, where the `Tool` interface has `parameters` instead of `input` and Effect is pinned at 4.0.1, so this Part links the newer commit that its comparison matches.
