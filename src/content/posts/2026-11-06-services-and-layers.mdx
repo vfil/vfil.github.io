@@ -199,7 +199,7 @@ repl: Effect<void, never, ModelClient | Terminal | Tools>
 
 `index.ts` used to create `history`, define the loop and run it. The loop now lives in `agent.ts` as the two functions from decision 2. `turn(history, input)` is one prompt: call the model until it stops asking for tools. `repl(history)` is the outer loop around it. `history` is an argument instead of a module-level array, so a test can start from an empty one and look at it afterwards.
 
-`agent.ts` still imports files that contain real implementations, because `model-client.ts` holds both the service and its live layer, and `terminal.ts` does the same. That is harmless now, since nothing runs when a file loads: a live layer does its work only when something builds it. OpenCode puts a service and its layer in one file in the same way ([core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts)).
+`agent.ts` still imports files that contain real implementations, because `model-client.ts` holds both the service and its live layer, and `terminal.ts` does the same. Importing them has no effect now, since nothing runs when a file loads: a live layer does its work only when something builds it. OpenCode puts a service and its layer in one file in the same way ([core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts)).
 
 ### 5. A fake is a layer, and what it can and cannot tell you
 
@@ -306,7 +306,7 @@ Work in the `my-agent` folder from Part 5, with its eight files in `src`. This P
 
 `messages.ts` and `protocols.ts` do not change. Each step ends with code that type-checks and runs, so the work can stop after any of them.
 
-Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 5 November 2026. The model's wording will differ.
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 5 November 2026, and repeated on 6 November 2026 (see Measured at the end). The model's wording will differ.
 
 ### Step 1: Move the loop into `agent.ts`
 
@@ -1602,13 +1602,13 @@ You: hello
 You: ^D
 ```
 
-`PROVIDER=claude` selects the Anthropic route, and the protocols are unchanged from Part 4.
+`PROVIDER=claude` selects the Anthropic route, and the protocols are unchanged from [Part 4](/posts/providers-behind-one-interface/).
 
 > **Watch for this.** A missing layer is reported where the program is run, not where the service is used. When the compiler names a service that no code near the error seems to use, follow the `R` of the Effect upward: the use is somewhere inside it, and the fix is a layer in `index.ts` or in the test's `run`.
 
 > **Watch for this.** A scripted fake keeps its script and its recordings in variables created by the function that builds it. Build a new `scriptedModel` and a new `scriptedTerminal` for each test, as `run` does. Sharing one between tests carries the script position and the recorded requests from one test into the next.
 
-> **Result.** The loop imports no real model, terminal or tools, and its type lists exactly what it needs. The program provides live layers and a test provides scripted ones, so the whole loop, with its tool calls, a refusal and a failed turn, runs without a server in the three tests above, which took 47 ms.
+> **Result.** The loop imports no real model, terminal or tools, and its type lists what it needs. The program provides live layers and a test provides scripted ones, so the whole loop, with its tool calls, a refusal and a failed turn, runs without a server in the three tests above, which took between 47 and 63 ms in five runs.
 
 ### The finished files
 
@@ -2272,7 +2272,7 @@ Checked:
 - the "Start from what you cannot test" table against Part 5's finished files
 - the Ollama and llama.cpp runs repeated with paced input: the tool calls, the confirmation prompt, the written file, the declined command and the `ECONNREFUSED` line printed as shown, and the model's wording differed
 - in Effect 4.1.0's source, `Layer.mock` documents that a missing member fails with an unimplemented defect when it is used, and the Services page of the migration guide describes `Context.Service`
-- at OpenCode commit `97be25f046`: the `Service` and `layer` in `core/src/tool.ts` with the three `yield*` lines, the `Layer.mock(LLMClient.Service)` block in `core/test/session-compact.test.ts`, and the `LLMClient` service in `ai/src/route/client.ts`
+- at OpenCode commit `97be25f046`: the Effect 4.1.0 pin in the catalog of its `package.json`, the `Service` and `layer` in `core/src/tool.ts` with the three `yield*` lines, the `Layer.mock(LLMClient.Service)` block in `core/test/session-compact.test.ts`, and the `LLMClient` service in `ai/src/route/client.ts`
 - the Part numbers and titles against the Series file, and the Stage A count against the Forewords of Parts 3 to 5
 
 Parts 2 to 4 link OpenCode at `863ea41364`, where the first lines of the tool layer do not include `Permission.Service`, so this Part links the newer commit that its description matches.
