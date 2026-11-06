@@ -52,7 +52,7 @@ This Part moves each of those pieces to the edge of the program. The loop asks f
 
 ## What services and layers add
 
-In [Part 5](/posts/why-effect/), `R` in `Effect<A, E, R>` stayed `never`. It is the list of things an Effect needs from its surroundings before it can run. Effect calls such a thing a **service** and the recipe that builds one a **layer**. Effect 4 defines services with `Context.Service`; the [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md) lists how it replaces the v3 spellings. The snippets in this Part were run on Effect 4.1.0, the version OpenCode pins at the commit its links point to (`97be25f046`).
+In [Part 5](/posts/why-effect/), `R` in `Effect<A, E, R>` stayed `never`. It is the list of things an Effect needs from its surroundings before it can run. Effect calls such a thing a **service** and the recipe that builds one a **layer**. Effect 4 defines services with `Context.Service`; the [Services page of the v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/migration/services.md) lists how it replaces the v3 spellings. The snippets in this Part were run on Effect 4.1.0, the version OpenCode pins at the commit its links point to (`97be25f046`).
 
 This section covers four ideas. Each snippet was run on its own before it went into this Part. To follow along, the snippets of an idea can be saved in a temporary file in `src`, such as `src/dice.ts`, and deleted afterwards.
 
@@ -205,7 +205,7 @@ repl: Effect<void, never, ModelClient | Terminal | Tools>
 
 `scriptedModel` returns replies from a list and records the history it receives at each step. It stores a copy, `[...history]`, because the loop keeps pushing messages onto the same history array after the call returns, so a stored reference would later show messages the model was never sent. `scriptedTerminal` returns answers from a list and records what the agent printed. The loop's code is the same in a test and in the real program. Only the layers differ.
 
-OpenCode's tests use the same pattern for its model client, with `Layer.mock`, which accepts a partial implementation and fails when a method that was left out is called ([core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)). The agent's services have one or two methods each, so its fakes implement all of them:
+OpenCode's tests use the same pattern for its model client, with `Layer.mock`, which accepts a partial implementation. In Effect 4.1.0's documentation, a method that was left out fails with an unimplemented defect when it is used ([core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)). The agent's services have one or two methods each, so its fakes implement all of them:
 
 ```ts
 // The agent (test/fakes.ts, abridged)
@@ -440,7 +440,7 @@ and in the signature of `runTool`:
 export const runTool = (tools: Tool[], call: ToolCallPart): Effect.Effect<ToolResultPart, never, Terminal> =>
 ```
 
-In `defineTool`, the confirmation asks the service. The first two lines are as before:
+In `defineTool`, the confirmation asks the service instead of calling `ask`. The comment above it is unchanged:
 
 ```ts
           // No answer counts as "no".
@@ -723,7 +723,7 @@ add a type for the environment above the `Route` type:
 type Env = Record<string, string | undefined>
 ```
 
-replace everything from `const routes` down to `chat` with a function for the routes and a function that selects one. Both read an environment they are given. A route that cannot be selected is a `ConfigError`:
+replace everything from `const routes` down to the comment above `chat` with a function for the routes and a function that selects one. Both read an environment they are given. A route that cannot be selected is a `ConfigError`:
 
 ```ts
 // The routes the agent knows. They read the environment they are given, so nothing happens at import time.
@@ -1471,10 +1471,10 @@ bun test v1.4.4 (38afee6c8)
  3 pass
  0 fail
  7 expect() calls
-Ran 3 tests across 1 file. [45.00ms]
+Ran 3 tests across 1 file. [47.00ms]
 ```
 
-The three tests ran in 45 ms in the Test environment above, with no server and no key.
+The three tests ran in 47 ms in the Test environment above, with no server and no key.
 
 ### Step 6: Read `R`, break things and run it live
 
@@ -1535,12 +1535,12 @@ error: expect(received).toMatchObject(expected)
 + Received  + 4
 
       at <anonymous> (test/agent.test.ts:56:20)
-(fail) the agent loop > tells the model when the user declines [0.51ms]
+(fail) the agent loop > tells the model when the user declines [8.85ms]
 
  2 pass
  1 fail
  6 expect() calls
-Ran 3 tests across 1 file. [49.00ms]
+Ran 3 tests across 1 file. [63.00ms]
 ```
 
 Change it back. The test fails for the reason it is meant to, so it does check the refusal.
@@ -1608,7 +1608,7 @@ You: ^D
 
 > **Watch for this.** A scripted fake keeps its script and its recordings in variables created by the function that builds it. Build a new `scriptedModel` and a new `scriptedTerminal` for each test, as `run` does. Sharing one between tests carries the script position and the recorded requests from one test into the next.
 
-> **Result.** The loop imports no real model, terminal or tools, and its type lists exactly what it needs. The program provides live layers and a test provides scripted ones, so the whole loop, with its tool calls, a refusal and a failed turn, runs without a server in the three tests above, which took 45 ms.
+> **Result.** The loop imports no real model, terminal or tools, and its type lists exactly what it needs. The program provides live layers and a test provides scripted ones, so the whole loop, with its tool calls, a refusal and a failed turn, runs without a server in the three tests above, which took 47 ms.
 
 ### The finished files
 
@@ -2258,4 +2258,21 @@ The first item is the primary source for this Part. A useful exercise is to find
 
 - OpenCode's [core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts) and [core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)
 - OpenCode's [ai/src/route/client.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/client.ts) (the `LLMClient` service)
-- The Effect [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md) (Services)
+- The Effect v3 to v4 migration guide: [Services](https://github.com/Effect-TS/effect/blob/main/migration/services.md)
+
+Measured: the steps above were run on 6 November 2026 in the [Part 1](/posts/the-loop/) test environment (Ollama 0.40.14, llama.cpp b9830) with Effect 4.1.0, Bun 1.4.4 and TypeScript 7.0.2. Steps 1 to 4 were applied to Part 5's finished files and every state was type-checked. Five runs of the three tests took 47 to 63 ms, and the first run after the files were written took 102 ms. The Ollama and llama.cpp runs used piped input with pauses between prompts, and llama.cpp ran on a second port with `--reasoning off` selected with `BASE_URL`.
+
+Checked:
+
+- the `Part6_services_and_layers` tag on the remote (commit `93fc2e7`): its `src` and `test` files equal the finished files above apart from trailing commas and the position of one import in `agent.ts`
+- Steps 1 to 4 applied in order to Part 5's finished files, with the edits worded as in the steps: every state type-checks, and the files after steps 2, 3 and 4 equal the "Stuck?" files
+- the finished files type-check on Effect 4.1.0, and the three tests pass; the compiler errors for the `play` that still needs `Dice`, for `probe.ts` and for the missing `TerminalLive` are the ones shown, and the test with `y` in place of `n` fails with the message shown (durations differ, and Bun prints the full path in the `at` line)
+- every snippet in "What services and layers add" run on its own, with the `TS2345` message, the second number always 8, and the `open`, `rows for select 1`, `close`, `done` order
+- the `PROVIDER=nope` import fails on Part 5's `provider.ts` as shown (the stack trace there shows the full path) and succeeds on Part 6's; `index.ts` prints the message and exits with code 1, and so does `PROVIDER=claude` without `ANTHROPIC_API_KEY`
+- the "Start from what you cannot test" table against Part 5's finished files
+- the Ollama and llama.cpp runs repeated with paced input: the tool calls, the confirmation prompt, the written file, the declined command and the `ECONNREFUSED` line printed as shown, and the model's wording differed
+- in Effect 4.1.0's source, `Layer.mock` documents that a missing member fails with an unimplemented defect when it is used, and the Services page of the migration guide describes `Context.Service`
+- at OpenCode commit `97be25f046`: the `Service` and `layer` in `core/src/tool.ts` with the three `yield*` lines, the `Layer.mock(LLMClient.Service)` block in `core/test/session-compact.test.ts`, and the `LLMClient` service in `ai/src/route/client.ts`
+- the Part numbers and titles against the Series file, and the Stage A count against the Forewords of Parts 3 to 5
+
+Parts 2 to 4 link OpenCode at `863ea41364`, where the first lines of the tool layer do not include `Permission.Service`, so this Part links the newer commit that its description matches.
