@@ -1,0 +1,2277 @@
+---
+title: 'Services and layers'
+description: 'After Part 5 the loop can only run against a live model, a keyboard and real files. Making the model client, the terminal and the tools services lets a test run the whole loop against a scripted model.'
+pubDate: 2026-11-06
+category: agentic-ai
+tags: [agents, effect, typescript, testing, ollama]
+series: building-an-agent-from-scratch
+part: 6
+snapshot: Part6_services_and_layers
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+This Part turns the model, the terminal and the tools of the agent from [Part 5](/posts/why-effect/) into services that the loop asks for, instead of things it imports. The loop can then be imported by a test and run against a scripted model: no server, no API key and no keyboard. It is the fourth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+
+The code for this Part is available as the [`Part6_services_and_layers` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part6_services_and_layers), the repo where I build this agent in parallel.
+
+## Start from what you cannot test
+
+[Part 5](/posts/why-effect/) put every failure the agent can raise into a type. One thing is still out of reach of the compiler and of a test: the loop only runs against the real world. Each piece it needs is reached by an import, and each import does its work as soon as the file loads.
+
+| Piece     | How the loop reaches it in Part 5                                                                          | What a test of the loop would need  |
+| --------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| The model | `provider.ts` reads `PROVIDER` and `ANTHROPIC_API_KEY` when the file is imported, and `chat` calls `fetch` | A running server, or a key          |
+| The user  | `terminal.ts` opens readline on standard input when it is imported, and `tool.ts` imports `ask`            | Someone typing `y` and `n`          |
+| The tools | `index.ts` imports the `tools` array                                                                       | Real files and real shell commands  |
+| The loop  | `index.ts` builds `history`, defines `turn` and runs the program at the top level                          | Importing the loop starts the agent |
+
+The first row shows in a small experiment. Importing `provider.ts` with an unknown provider name fails before any code of a test could run:
+
+```text
+$ cd playground && PROVIDER=nope bun -e 'await import("../src/provider"); console.log("imported")'
+18 |   },
+19 | }
+20 |
+21 | const providerName = process.env.PROVIDER ?? "ollama"
+22 | const selected = routes[providerName]
+23 | if (!selected) throw new Error(`Unknown PROVIDER "${providerName}". Choose one of: ${Object.keys(routes).join(", ")}`)
+                              ^
+error: Unknown PROVIDER "nope". Choose one of: ollama, llamacpp, claude
+      at src/provider.ts:23:26
+
+Bun v1.4.4 (macOS arm64)
+```
+
+The environment is read when the file loads, so a test cannot pick a different one. The readline interface behaves the same way: importing `terminal.ts` attaches it to standard input, and the process stays tied to the keyboard until input ends.
+
+This Part moves each of those pieces to the edge of the program. The loop asks for a model client, a terminal and a tools list, and `index.ts` is the only file that decides which real ones it gets. A test decides differently.
+
+## What services and layers add
+
+In [Part 5](/posts/why-effect/), `R` in `Effect<A, E, R>` stayed `never`. It is the list of things an Effect needs from its surroundings before it can run. Effect calls such a thing a **service** and the recipe that builds one a **layer**. Effect 4 defines services with `Context.Service`; the [Services page of the v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/migration/services.md) lists how it replaces the v3 spellings. The snippets in this Part were run on Effect 4.1.0, the version OpenCode pins at the commit its links point to (`97be25f046`).
+
+This section covers four ideas. Each snippet was run on its own before it went into this Part. To follow along, the snippets of an idea can be saved in a temporary file in `src`, such as `src/dice.ts`, and deleted afterwards.
+
+### 1. A service is a key for something the program needs
+
+A service is declared as a class. Its type parameters are the class itself and the shape of what it provides, and the string is its identifier. Inside `Effect.gen`, `yield*` on the class asks for the service:
+
+```ts
+import { Context, Effect, Layer } from "effect"
+
+class Dice extends Context.Service<Dice, { readonly roll: Effect.Effect<number> }>()("Dice") {}
+
+const play = Effect.gen(function* () {
+  const dice = yield* Dice
+  const first = yield* dice.roll
+  const second = yield* dice.roll
+  return first + second
+})
+// play: Effect<number, never, Dice>
+```
+
+`play` does not know how dice are rolled. Its type says only that it needs a `Dice`, in the third slot. The compiler refuses to run an Effect that still needs something:
+
+```ts
+await Effect.runPromise(play)
+```
+
+```text
+$ bunx --package typescript tsc --noEmit
+src/dice.ts(13,25): error TS2345: Argument of type 'Effect<number, never, Dice>' is not assignable to parameter of type 'Effect<number, never, never>'.
+  Type 'Dice' is not assignable to type 'never'.
+```
+
+### 2. A layer builds a service, and providing it removes the requirement
+
+`Layer.succeed` makes a layer from a value that already exists. `Effect.provide` gives a layer to an Effect, and the service disappears from `R`. Two layers for the same service give two behaviors for the same `play`:
+
+```ts
+const RealDice = Layer.succeed(Dice, Dice.of({ roll: Effect.sync(() => 1 + Math.floor(Math.random() * 6)) }))
+const FixedDice = Layer.succeed(Dice, Dice.of({ roll: Effect.succeed(4) }))
+
+console.log(await Effect.runPromise(play.pipe(Effect.provide(RealDice))))
+console.log(await Effect.runPromise(play.pipe(Effect.provide(FixedDice))))
+```
+
+```text
+$ bun src/dice.ts
+11
+8
+```
+
+The first number is random and differs between runs. The second is always 8, because `FixedDice` returns 4 every time. `play` is the same code in both runs, and the only difference is the layer.
+
+### 3. A layer can run code, fail and need other services
+
+`Layer.succeed` takes a finished value. `Layer.effect` takes an Effect that produces the service, so building the service can run code, read the environment, fail, and ask for other services. A layer has a type of its own, `Layer<Provided, Error, Required>`, so its failure and its requirements are visible in the same way as an Effect's.
+
+When one layer needs the service another layer provides, `Layer.provide` connects them. OpenCode's tool layer asks for three services in its first lines, and its type carries them as requirements until they are provided ([core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts)):
+
+```ts
+export class Service extends Context.Service<Service, Interface>()("@opencode/Tool") {}
+
+const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const hooks = yield* PluginHooks.Service
+    const image = yield* Image.Service
+    const permission = yield* Permission.Service
+```
+
+The agent in this Part needs none of that. None of its layers uses another service while it is built, so they are merged side by side.
+
+### 4. A layer can open a resource and close it again
+
+`Effect.acquireRelease` takes an Effect that opens something and a function that closes it. Inside `Layer.effect`, the resource lives as long as the program the layer was provided to:
+
+```ts
+class Database extends Context.Service<Database, { readonly query: (sql: string) => Effect.Effect<string> }>()("Database") {}
+
+const DatabaseLive = Layer.effect(
+  Database,
+  Effect.gen(function* () {
+    yield* Effect.acquireRelease(
+      Effect.sync(() => console.log("open")),
+      () => Effect.sync(() => console.log("close")),
+    )
+    return Database.of({ query: (sql) => Effect.sync(() => `rows for ${sql}`) })
+  }),
+)
+
+const program = Effect.gen(function* () {
+  const db = yield* Database
+  console.log(yield* db.query("select 1"))
+})
+
+await Effect.runPromise(program.pipe(Effect.provide(DatabaseLive)))
+console.log("done")
+```
+
+```text
+$ bun src/database.ts
+open
+rows for select 1
+close
+done
+```
+
+`close` prints when the program ends, before the line that follows `runPromise`. The agent uses this for readline, which has to be opened once and closed at the end.
+
+## Five decisions in the rewrite
+
+### 1. Three services, named for what the loop needs
+
+A service is a capability the agent asks for by name instead of importing it, and a layer is the recipe that builds one. The model client is the service that makes one step. The agent has three:
+
+| Service       | What the loop uses                                                 | Live layer                                             | Test layer                              |
+| ------------- | ------------------------------------------------------------------ | ------------------------------------------------------ | --------------------------------------- |
+| `ModelClient` | `chat(history, tools)`: one step, which fails with `ProviderError` | `ModelClientLive` selects a route from the environment | `scriptedModel`: replies from a list    |
+| `Terminal`    | `ask(prompt)`, which fails with `InputClosed`, and `say(line)`     | `TerminalLive` opens readline and closes it at the end | `scriptedTerminal`: answers from a list |
+| `Tools`       | The tool list the model is offered and `runTool` searches          | `ToolsLive` holds the five tools                       | A list of small fake tools              |
+
+Permission is not a service in this Part. The y/n question stays on the tool as `confirm`, and it reaches the user through `Terminal`. OpenCode has a `Permission.Service` of its own; a later Part on permissions would build the equivalent.
+
+### 2. A service's methods have no requirements of their own
+
+Every method of `ModelClient` and `Terminal` returns an Effect whose `R` is `never`. `Terminal.ask` is `Effect<string, InputClosed>`, not an Effect that also asks for a readline interface. What a live layer needs to build the service stays inside the layer, and the code that uses the service sees only the service.
+
+The requirements show up where a service is used. This Part moves the agent loop out of `index.ts` into two functions in a new file, `agent.ts`: `turn`, which handles one prompt, and `repl`, the read-eval-print loop, which reads a line from the user, runs a turn on it, prints the output and asks again until input ends (decision 4 covers the move). Asking the compiler for the types of the two functions with a deliberate type error (step 6 does this) gives:
+
+```text
+turn: Effect<void, ProviderError, ModelClient | Terminal | Tools>
+repl: Effect<void, never, ModelClient | Terminal | Tools>
+```
+
+`R` is a union of everything the loop asks for, and `E` is what it can still fail with. `repl` has `never` there because it handles `ProviderError` and defects itself, as in Part 5.
+
+### 3. The live layers hold what used to happen at import
+
+`ModelClientLive` is a `Layer.effect`. Building it calls `selectRoute`, which now takes the environment as an argument and returns an Effect that can fail with a new `ConfigError`: an unknown `PROVIDER` or a missing `ANTHROPIC_API_KEY`. The layer's type, `Layer<ModelClient, ConfigError>`, makes that failure visible, and `index.ts` is where it is caught and printed.
+
+`TerminalLive` opens readline with `Effect.acquireRelease`, so the interface is created when the layer is built and closed when the program ends. Importing `terminal.ts` no longer touches standard input.
+
+### 4. The loop can be imported
+
+`index.ts` used to create `history`, define the loop and run it. The loop now lives in `agent.ts` as the two functions from decision 2. `turn(history, input)` is one prompt: call the model until it stops asking for tools. `repl(history)` is the outer loop around it. `history` is an argument instead of a module-level array, so a test can start from an empty one and look at it afterwards.
+
+`agent.ts` still imports files that contain real implementations, because `model-client.ts` holds both the service and its live layer, and `terminal.ts` does the same. Importing them has no effect now, since nothing runs when a file loads: a live layer does its work only when something builds it. OpenCode puts a service and its layer in one file in the same way ([core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts)).
+
+### 5. A fake is a layer, and what it can and cannot tell you
+
+`scriptedModel` returns replies from a list and records the history it receives at each step. It stores a copy, `[...history]`, because the loop keeps pushing messages onto the same history array after the call returns, so a stored reference would later show messages the model was never sent. `scriptedTerminal` returns answers from a list and records what the agent printed. The loop's code is the same in a test and in the real program. Only the layers differ.
+
+OpenCode's tests use the same pattern for its model client, with `Layer.mock`, which accepts a partial implementation. In Effect 4.1.0's documentation, a method that was left out fails with an unimplemented defect when it is used ([core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)). The agent's services have one or two methods each, so its fakes implement all of them:
+
+```ts
+// The agent (test/fakes.ts, abridged)
+export const scriptedModel = (steps: Step[]) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Effect.suspend(() => {
+          requests.push([...history])
+          // ... the next step of the script
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+```
+
+```ts
+// OpenCode (session-compact.test.ts)
+const client = Layer.mock(LLMClient.Service)({
+  stream: (request: LLMRequest) => {
+    requests.push(request)
+    return Stream.make(LLMEvent.textDelta({ id: "summary", text: "manual session summary" }))
+  },
+  generate: () => Effect.die("unused"),
+})
+```
+
+A scripted model checks the harness: that tool results go back in the right order, that a refusal reaches the model, that a failed turn leaves the history valid. It does not check the model. Whether a model picks the right tool or writes valid arguments is still decided by running it; [Part 1](/posts/the-loop/) used a run against Claude to tell a weak local model from a harness bug.
+
+## Check yourself
+
+<Quiz
+  question="What does the type `Effect<void, never, Terminal>` say about the program it describes?"
+  options={["It cannot run until a `Terminal` has been provided", "It prints to the terminal when it is created", "It can fail with a `Terminal` error", "It has already been given a terminal"]}
+  correct={0}
+  right="Right. The third slot is what the Effect still needs. `Effect.provide` with a layer for `Terminal` removes it."
+  wrong="The third slot is the requirement. The compiler refuses to run an Effect while it still names something there."
+/>
+
+<Quiz
+  question="Which of these belongs inside a layer instead of at the top of a module?"
+  options={["A pure function that formats a tool failure", "Opening readline on standard input", "The `Message` type", "The JSON Schema of a tool"]}
+  correct={1}
+  right="Right. Opening readline is work with a side effect and something to clean up. In a layer it happens when the layer is built and is undone when the program ends."
+  wrong="Types and pure functions can stay at the top of a module. Opening readline touches standard input, so it belongs in a layer."
+/>
+
+<Quiz
+  question="`FixedDice` and `RealDice` provide the same service. What differs between the two runs of `play`?"
+  options={["The type of `play`", "Nothing, because both layers have the same type", "Only the layer that was provided", "How many times `play` calls `roll`"]}
+  correct={2}
+  right="Right. `play` is untouched and has the same type in both runs. This is how a test runs the real loop."
+  wrong="`play` is the same value in both runs, so it rolls the same number of times and has the same type. Providing a different layer is the only change."
+/>
+
+<Quiz
+  question="A test passes with `scriptedModel`. What does that show?"
+  options={["The model picks the right tool for the prompt", "Ollama and llama.cpp return the same tool call ids", "The Claude route works", "The loop handles those replies correctly"]}
+  correct={3}
+  right="Right. The script stands in for the model, so the test covers the loop and not the model."
+  wrong="The script decides what the model says, so a pass says nothing about what a real model would say. It covers the loop."
+/>
+
+<Quiz
+  question="`index.ts` merges `ModelClientLive` and `ToolsLive` but forgets `TerminalLive`. Where does the compiler report it?"
+  options={["At the call that runs the program, with `Terminal` named in the message", "Inside `tool.ts`, where `Terminal` is used", "Nowhere. The program fails when it first asks a question", "In `terminal.ts`, on the layer"]}
+  correct={0}
+  right="Right. The requirement travels up through the types and is reported where the program is run. Step 6 does this on purpose."
+  wrong="Every use of `Terminal` is fine on its own. The missing layer shows where the Effect is run, because that is where `R` has to be `never`."
+/>
+
+<Quiz
+  question="Why is the live model client a `Layer.effect` and not a `Layer.succeed`?"
+  options={["Services must be built with `Layer.effect`", "Building it reads the environment and can fail with `ConfigError`", "`Layer.succeed` cannot hold a function", "`Layer.effect` is faster"]}
+  correct={1}
+  right="Right. `Layer.succeed` takes a value that already exists. Choosing a route can fail, so it has to be an Effect."
+  wrong="`Layer.succeed` works for a finished value, like the tools list. Choosing a route reads the environment and can fail, so it needs an Effect."
+/>
+
+## Your turn: services, layers and a test
+
+Work in the `my-agent` folder from Part 5, with its eight files in `src`. This Part adds two files to `src` and two in a new `test` folder, and changes five of the existing files:
+
+| File                                  | Change                                                            |
+| ------------------------------------- | ----------------------------------------------------------------- |
+| `src/agent.ts`                        | New. `turn` and `repl`, moved out of `index.ts`                   |
+| `src/terminal.ts`                     | `ask` becomes the `Terminal` service and `TerminalLive`           |
+| `src/tool.ts`                         | `Tool.run` and `runTool` gain `Terminal` in `R`. `Tools` is added |
+| `src/errors.ts`                       | Adds `ConfigError`                                                |
+| `src/provider.ts`                     | Route selection becomes a function of the environment             |
+| `src/model-client.ts`                 | New. The `ModelClient` service and `ModelClientLive`              |
+| `src/tools.ts`                        | Adds `ToolsLive`                                                  |
+| `src/index.ts`                        | Builds the live layers and runs `repl`                            |
+| `test/fakes.ts`, `test/agent.test.ts` | New. The scripted model, the scripted terminal and three tests    |
+
+`messages.ts` and `protocols.ts` do not change. Each step ends with code that type-checks and runs, so the work can stop after any of them.
+
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 5 November 2026, and repeated on 6 November 2026 (see Measured at the end). The model's wording will differ.
+
+### Step 1: Move the loop into `agent.ts`
+
+This step changes no behavior. `turn` and the outer loop leave `index.ts`, and `history` becomes an argument. Create `src/agent.ts`:
+
+```ts
+import { Effect } from "effect"
+import { messageOf } from "./errors"
+import { isToolCall, type Message, type ToolResultPart } from "./messages"
+import { chat } from "./provider"
+import { ask } from "./terminal"
+import { runTool } from "./tool"
+import { tools } from "./tools"
+
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* chat(history, tools)
+      history.push(message)
+      for (const part of message.content) {
+        if (part.type === "text" && part.text) console.log(`Agent: ${part.text}`)
+      }
+      if (finish !== "tool-calls") return
+
+      const results: ToolResultPart[] = []
+      for (const call of message.content.filter(isToolCall)) {
+        console.log(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+        const result = yield* runTool(tools, call)
+        if (result.result.type === "error") console.log(`[error] ${result.result.value}`)
+        results.push(result)
+      }
+      history.push({ role: "tool", content: results })
+    }
+  })
+
+// The read-eval-print loop: read a line from the user, run a turn on it, print the output, and repeat.
+export const repl = (history: Message[]) =>
+  Effect.gen(function* () {
+    while (true) {
+      const input = yield* ask("You: ")
+
+      // A turn that fails is dropped from the history, so the next prompt starts from a consistent conversation.
+      const before = history.length
+      const drop = (label: string, reason: string) =>
+        Effect.sync(() => {
+          history.length = before
+          console.log(`[${label}] ${reason}`)
+        })
+
+      yield* turn(history, input).pipe(
+        Effect.catchTag("ProviderError", (error) => drop("provider error", error.message)),
+        Effect.catchDefect((defect) => drop("bug", messageOf(defect))),
+      )
+    }
+  }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
+```
+
+`repl` is the read-eval-print loop: it reads a line, runs a turn on it, prints what the turn produced and repeats until input ends. Replace the contents of `src/index.ts` with:
+
+```ts
+import { Effect } from "effect"
+import { repl } from "./agent"
+
+await Effect.runPromise(repl([]))
+```
+
+Run `bunx --package typescript tsc --noEmit` and then the agent. It behaves as in Part 5.
+
+### Step 2: The `Terminal` service
+
+Replace `src/terminal.ts`. The class declares what the agent needs from the person at the keyboard. `TerminalLive` is the layer that builds it: it opens readline with `Effect.acquireRelease`, so closing it is part of the layer, and the code from Part 5 that turns a closed input into `InputClosed` moves inside. `say` replaces direct `console.log` calls:
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import { createInterface } from "node:readline/promises"
+import { InputClosed } from "./errors"
+
+// What the agent needs from the person at the keyboard. Nothing here says readline.
+export class Terminal extends Context.Service<
+  Terminal,
+  {
+    // Asks one question. The type says it can fail: input may have ended.
+    readonly ask: (prompt: string) => Effect.Effect<string, InputClosed>
+    readonly say: (line: string) => Effect.Effect<void>
+  }
+>()("@agent/Terminal") {}
+
+// The real terminal. Building the layer opens readline; the end of the program closes it.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const rl = yield* Effect.acquireRelease(
+      Effect.sync(() => createInterface({ input: process.stdin, output: process.stdout })),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    // A pending question never settles when input ends, so ending input is turned into a rejection.
+    const closed = new Promise<never>((_, reject) => rl.once("close", () => reject(new Error("input closed"))))
+    closed.catch(() => {})
+
+    return Terminal.of({
+      ask: (prompt) =>
+        Effect.tryPromise({
+          try: () => Promise.race([rl.question(prompt), closed]),
+          catch: () => new InputClosed(),
+        }),
+      say: (line) => Effect.sync(() => console.log(line)),
+    })
+  }),
+)
+```
+
+Three things change in `src/tool.ts`. It imports `Terminal` in place of `ask`:
+
+```ts
+import { Terminal } from "./terminal"
+```
+
+A tool's `run` and `runTool` now say in their types that they need a terminal. In the `Tool` type:
+
+```ts
+  run: (input: unknown) => Effect.Effect<string, ToolFailure, Terminal>
+```
+
+and in the signature of `runTool`:
+
+```ts
+export const runTool = (tools: Tool[], call: ToolCallPart): Effect.Effect<ToolResultPart, never, Terminal> =>
+```
+
+In `defineTool`, the confirmation asks the service instead of calling `ask`. The comment above it is unchanged:
+
+```ts
+          // No answer counts as "no".
+          const terminal = yield* Terminal
+          const answer = yield* terminal.ask(`Allow: ${config.confirm(input)}? [y/N] `).pipe(Effect.orElseSucceed(() => ""))
+```
+
+In `src/agent.ts`, `console.log` and `ask` become calls on the service. Replace the import:
+
+```ts
+import { Terminal } from "./terminal"
+```
+
+At the top of `turn`, ask for the service:
+
+```ts
+    const terminal = yield* Terminal
+```
+
+and replace the three `console.log` lines in `turn`:
+
+```ts
+if (part.type === "text" && part.text) yield* terminal.say(`Agent: ${part.text}`)
+yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+if (result.result.type === "error") yield* terminal.say(`[error] ${result.result.value}`)
+```
+
+In `repl`, ask for the service before the loop and use it to read the prompt:
+
+```ts
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+```
+
+`drop` prints too, so its `console.log` is replaced by `terminal.say`, which returns an Effect. `Effect.sync` would hand that Effect back as a plain value and never run it, so `Effect.sync` becomes `Effect.suspend`, which runs the Effect that its function returns:
+
+```ts
+      const drop = (label: string, reason: string) =>
+        Effect.suspend(() => {
+          history.length = before
+          return terminal.say(`[${label}] ${reason}`)
+        })
+```
+
+Last, `src/index.ts` builds the live layer and provides it to the loop:
+
+```ts
+import { Effect } from "effect"
+import { repl } from "./agent"
+import { TerminalLive } from "./terminal"
+
+await Effect.runPromise(repl([]).pipe(Effect.provide(TerminalLive)))
+```
+
+`repl([])` now has `Terminal` in its type, and `Effect.provide(TerminalLive)` removes it. Run `bunx --package typescript tsc --noEmit` and the agent: it behaves as before, and the model is still reached through `chat`.
+
+<details>
+<summary>Stuck? The finished terminal.ts, tool.ts, agent.ts and index.ts</summary>
+
+`src/terminal.ts`
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import { createInterface } from "node:readline/promises"
+import { InputClosed } from "./errors"
+
+// What the agent needs from the person at the keyboard. Nothing here says readline.
+export class Terminal extends Context.Service<
+  Terminal,
+  {
+    // Asks one question. The type says it can fail: input may have ended.
+    readonly ask: (prompt: string) => Effect.Effect<string, InputClosed>
+    readonly say: (line: string) => Effect.Effect<void>
+  }
+>()("@agent/Terminal") {}
+
+// The real terminal. Building the layer opens readline; the end of the program closes it.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const rl = yield* Effect.acquireRelease(
+      Effect.sync(() => createInterface({ input: process.stdin, output: process.stdout })),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    // A pending question never settles when input ends, so ending input is turned into a rejection.
+    const closed = new Promise<never>((_, reject) => rl.once("close", () => reject(new Error("input closed"))))
+    closed.catch(() => {})
+
+    return Terminal.of({
+      ask: (prompt) =>
+        Effect.tryPromise({
+          try: () => Promise.race([rl.question(prompt), closed]),
+          catch: () => new InputClosed(),
+        }),
+      say: (line) => Effect.sync(() => console.log(line)),
+    })
+  }),
+)
+```
+
+`src/tool.ts`
+
+```ts
+import { Effect, Schema, SchemaIssue } from "effect"
+import { Declined, InvalidInput, messageOf, ToolCrashed, UnknownTool } from "./errors"
+import type { ToolCallPart, ToolResultPart, ToolResultValue } from "./messages"
+import { Terminal } from "./terminal"
+
+export type ToolFailure = UnknownTool | InvalidInput | Declined | ToolCrashed
+
+export type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, derived from the input Schema
+  run: (input: unknown) => Effect.Effect<string, ToolFailure, Terminal>
+}
+
+const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1()
+
+// Builds a Tool from one Schema: it validates the input and produces the JSON Schema the model receives.
+// `DecodingServices: never` limits S to Schemas that need nothing else to decode, so `run` keeps R = never.
+export const defineTool = <S extends Schema.Struct<Schema.Struct.Fields> & { readonly DecodingServices: never }>(config: {
+  name: string
+  description: string
+  input: S
+  execute: (input: S["Type"]) => Promise<string>
+  confirm?: (input: S["Type"]) => string // describes the action; when set, the user must approve it first
+}): Tool => {
+  const takes = Object.keys(config.input.fields).join(", ")
+  const decode = Schema.decodeUnknownEffect(config.input)
+
+  return {
+    name: config.name,
+    description: config.description,
+    parameters: Schema.toJsonSchemaDocument(config.input).schema,
+    run: (raw) =>
+      Effect.gen(function* () {
+        // A string is arguments that were not valid JSON; the protocol keeps the raw text.
+        if (typeof raw === "string") {
+          return yield* new InvalidInput({ tool: config.name, problems: [`the arguments are not valid JSON: ${raw}`], takes })
+        }
+
+        const input = yield* decode(raw, { errors: "all" }).pipe(
+          Effect.mapError(
+            (error) =>
+              new InvalidInput({
+                tool: config.name,
+                problems: formatIssues(error.issue).issues.map((issue) => `${issue.path?.join(".") || "input"}: ${issue.message}`),
+                takes,
+              }),
+          ),
+        )
+
+        if (config.confirm) {
+          // No answer counts as "no".
+          const terminal = yield* Terminal
+          const answer = yield* terminal.ask(`Allow: ${config.confirm(input)}? [y/N] `).pipe(Effect.orElseSucceed(() => ""))
+          if (answer.trim().toLowerCase() !== "y") return yield* new Declined()
+        }
+
+        return yield* Effect.tryPromise({
+          try: () => config.execute(input),
+          catch: (error) => new ToolCrashed({ tool: config.name, reason: messageOf(error) }),
+        })
+      }),
+  }
+}
+
+// Cannot fail: every tool failure becomes a tool result the model can read.
+export const runTool = (tools: Tool[], call: ToolCallPart): Effect.Effect<ToolResultPart, never, Terminal> => {
+  const done = (result: ToolResultValue): ToolResultPart => ({ type: "tool-result", id: call.id, name: call.name, result })
+  const tool = tools.find((tool) => tool.name === call.name)
+  const run = tool ? tool.run(call.input) : Effect.fail(new UnknownTool({ name: call.name, available: tools.map((tool) => tool.name) }))
+
+  return run.pipe(
+    Effect.map((value) => done({ type: "text", value })),
+    Effect.catch((failure) => Effect.succeed(done({ type: "error", value: failure.message }))),
+  )
+}
+```
+
+`src/agent.ts`
+
+```ts
+import { Effect } from "effect"
+import { messageOf } from "./errors"
+import { isToolCall, type Message, type ToolResultPart } from "./messages"
+import { chat } from "./provider"
+import { Terminal } from "./terminal"
+import { runTool } from "./tool"
+import { tools } from "./tools"
+
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* chat(history, tools)
+      history.push(message)
+      for (const part of message.content) {
+        if (part.type === "text" && part.text) yield* terminal.say(`Agent: ${part.text}`)
+      }
+      if (finish !== "tool-calls") return
+
+      const results: ToolResultPart[] = []
+      for (const call of message.content.filter(isToolCall)) {
+        yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+        const result = yield* runTool(tools, call)
+        if (result.result.type === "error") yield* terminal.say(`[error] ${result.result.value}`)
+        results.push(result)
+      }
+      history.push({ role: "tool", content: results })
+    }
+  })
+
+// The read-eval-print loop: read a line from the user, run a turn on it, print the output, and repeat.
+export const repl = (history: Message[]) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+
+      // A turn that fails is dropped from the history, so the next prompt starts from a consistent conversation.
+      const before = history.length
+      const drop = (label: string, reason: string) =>
+        Effect.suspend(() => {
+          history.length = before
+          return terminal.say(`[${label}] ${reason}`)
+        })
+
+      yield* turn(history, input).pipe(
+        Effect.catchTag("ProviderError", (error) => drop("provider error", error.message)),
+        Effect.catchDefect((defect) => drop("bug", messageOf(defect))),
+      )
+    }
+  }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
+```
+
+`src/index.ts`
+
+```ts
+import { Effect } from "effect"
+import { repl } from "./agent"
+import { TerminalLive } from "./terminal"
+
+await Effect.runPromise(repl([]).pipe(Effect.provide(TerminalLive)))
+```
+
+</details>
+
+### Step 3: The `ModelClient` service
+
+Add the error for a bad configuration to `src/errors.ts`, above `InputClosed`:
+
+```ts
+// The environment asks for a provider the agent cannot reach, such as an unknown PROVIDER or a missing API key.
+export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
+  reason: Schema.String,
+}) {
+  override get message() {
+    return this.reason
+  }
+}
+```
+
+In `src/provider.ts`, the routes and the route selection currently run when the file loads. Add `ConfigError` to the import from `./errors`:
+
+```ts
+import { ConfigError, messageOf, ProviderError } from "./errors"
+```
+
+add a type for the environment above the `Route` type:
+
+```ts
+type Env = Record<string, string | undefined>
+```
+
+replace everything from `const routes` down to the comment above `chat` with a function for the routes and a function that selects one. Both read an environment they are given. A route that cannot be selected is a `ConfigError`:
+
+```ts
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+})
+
+// PROVIDER picks the route. BASE_URL and MODEL override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model })
+}
+```
+
+and let `chat` receive the route instead of reading a module-level one:
+
+```ts
+export const chat = (route: Route, history: Message[], tools: Tool[]) =>
+```
+
+Create `src/model-client.ts`. The class is what the loop sees. The layer builds it: `selectRoute` runs while the layer is built, so a bad `PROVIDER` fails before the first prompt:
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import type { ProviderError } from "./errors"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Reply } from "./protocols"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step. Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Effect.Effect<Reply, ProviderError>
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools) })
+  }),
+)
+```
+
+In `src/agent.ts`, replace the `chat` import:
+
+```ts
+import { ModelClient } from "./model-client"
+```
+
+ask for the service in `turn`, above the line that asks for `terminal`:
+
+```ts
+    const model = yield* ModelClient
+```
+
+and call it:
+
+```ts
+yield* model.chat(history, tools)
+```
+
+`src/index.ts` merges the two live layers and handles the layer's failure. `ConfigError` is printed and sets the exit code:
+
+```ts
+import { Effect, Layer } from "effect"
+import { repl } from "./agent"
+import { ModelClientLive } from "./model-client"
+import { TerminalLive } from "./terminal"
+
+const live = Layer.mergeAll(ModelClientLive, TerminalLive)
+
+await Effect.runPromise(
+  repl([]).pipe(
+    Effect.provide(live),
+    Effect.catchTag("ConfigError", (error) =>
+      Effect.sync(() => {
+        console.error(error.message)
+        process.exitCode = 1
+      }),
+    ),
+  ),
+)
+```
+
+An unknown provider now stops the program with the message, and nothing else:
+
+```text
+$ cd playground && PROVIDER=nope bun ../src/index.ts
+Unknown PROVIDER "nope". Choose one of: ollama, llamacpp, claude
+$ echo $?
+1
+```
+
+<details>
+<summary>Stuck? The finished errors.ts, provider.ts, model-client.ts, agent.ts and index.ts</summary>
+
+`src/errors.ts`
+
+```ts
+import { Schema } from "effect"
+
+// Tool failures: each one becomes a tool result the model can read and react to.
+export class UnknownTool extends Schema.TaggedError<UnknownTool>()("UnknownTool", {
+  name: Schema.String,
+  available: Schema.Array(Schema.String),
+}) {
+  override get message() {
+    return `Unknown tool: ${this.name}. Available tools: ${this.available.join(", ")}`
+  }
+}
+
+export class InvalidInput extends Schema.TaggedError<InvalidInput>()("InvalidInput", {
+  tool: Schema.String,
+  problems: Schema.Array(Schema.String),
+  takes: Schema.String,
+}) {
+  override get message() {
+    return [`Invalid input for ${this.tool}:`, ...this.problems.map((problem) => `- ${problem}`), `${this.tool} takes an object with the fields: ${this.takes}`].join("\n")
+  }
+}
+
+export class Declined extends Schema.TaggedError<Declined>()("Declined", {}) {
+  override get message() {
+    return "User declined this action. Ask what they would like instead."
+  }
+}
+
+export class ToolCrashed extends Schema.TaggedError<ToolCrashed>()("ToolCrashed", {
+  tool: Schema.String,
+  reason: Schema.String,
+}) {
+  override get message() {
+    return this.reason
+  }
+}
+
+// Failures of the model request. The user reads these; the model never sees them.
+export class ProviderError extends Schema.TaggedError<ProviderError>()("ProviderError", {
+  reason: Schema.String,
+}) {
+  override get message() {
+    return this.reason
+  }
+}
+
+// The environment asks for a provider the agent cannot reach, such as an unknown PROVIDER or a missing API key.
+export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
+  reason: Schema.String,
+}) {
+  override get message() {
+    return this.reason
+  }
+}
+
+// Standard input ended, so there is nobody left to ask.
+export class InputClosed extends Schema.TaggedError<InputClosed>()("InputClosed", {}) {}
+
+export const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
+```
+
+`src/provider.ts`
+
+```ts
+import { Effect } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol, type Reply } from "./protocols"
+import type { Tool } from "./tool"
+
+type Env = Record<string, string | undefined>
+
+// A route binds a protocol to one provider's endpoint and authentication.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+})
+
+// PROVIDER picks the route. BASE_URL and MODEL override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model })
+}
+
+// One step: one model call. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]) =>
+  Effect.gen(function* () {
+    const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetch(`${route.baseUrl}${route.protocol.path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...route.headers },
+          body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+        }),
+      catch: unreachable,
+    })
+    const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+    if (!response.ok) return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+
+    return yield* Effect.try({
+      try: (): Reply => route.protocol.decode(JSON.parse(text)),
+      catch: (error) => new ProviderError({ reason: `Could not read the reply from ${route.baseUrl}: ${messageOf(error)}` }),
+    })
+  })
+```
+
+`src/model-client.ts`
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import type { ProviderError } from "./errors"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Reply } from "./protocols"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step. Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Effect.Effect<Reply, ProviderError>
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools) })
+  }),
+)
+```
+
+`src/agent.ts`
+
+```ts
+import { Effect } from "effect"
+import { messageOf } from "./errors"
+import { isToolCall, type Message, type ToolResultPart } from "./messages"
+import { ModelClient } from "./model-client"
+import { Terminal } from "./terminal"
+import { runTool } from "./tool"
+import { tools } from "./tools"
+
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* model.chat(history, tools)
+      history.push(message)
+      for (const part of message.content) {
+        if (part.type === "text" && part.text) yield* terminal.say(`Agent: ${part.text}`)
+      }
+      if (finish !== "tool-calls") return
+
+      const results: ToolResultPart[] = []
+      for (const call of message.content.filter(isToolCall)) {
+        yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+        const result = yield* runTool(tools, call)
+        if (result.result.type === "error") yield* terminal.say(`[error] ${result.result.value}`)
+        results.push(result)
+      }
+      history.push({ role: "tool", content: results })
+    }
+  })
+
+// The read-eval-print loop: read a line from the user, run a turn on it, print the output, and repeat.
+export const repl = (history: Message[]) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+
+      // A turn that fails is dropped from the history, so the next prompt starts from a consistent conversation.
+      const before = history.length
+      const drop = (label: string, reason: string) =>
+        Effect.suspend(() => {
+          history.length = before
+          return terminal.say(`[${label}] ${reason}`)
+        })
+
+      yield* turn(history, input).pipe(
+        Effect.catchTag("ProviderError", (error) => drop("provider error", error.message)),
+        Effect.catchDefect((defect) => drop("bug", messageOf(defect))),
+      )
+    }
+  }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
+```
+
+`src/index.ts`
+
+```ts
+import { Effect, Layer } from "effect"
+import { repl } from "./agent"
+import { ModelClientLive } from "./model-client"
+import { TerminalLive } from "./terminal"
+
+const live = Layer.mergeAll(ModelClientLive, TerminalLive)
+
+await Effect.runPromise(
+  repl([]).pipe(
+    Effect.provide(live),
+    Effect.catchTag("ConfigError", (error) =>
+      Effect.sync(() => {
+        console.error(error.message)
+        process.exitCode = 1
+      }),
+    ),
+  ),
+)
+```
+
+</details>
+
+### Step 4: The `Tools` service
+
+The tool list is the third thing the loop imports. In `src/tool.ts`, import `Context`:
+
+```ts
+import { Context, Effect, Schema, SchemaIssue } from "effect"
+```
+
+and declare the service above `formatIssues`. Its shape is the tool list itself:
+
+```ts
+// The tools the agent knows, as a service. Which tools exist is decided where the layer is built.
+export class Tools extends Context.Service<Tools, Tool[]>()("@agent/Tools") {}
+```
+
+Replace `runTool`. It no longer takes the list as an argument; it asks for the service, and its type says that it needs both `Tools` and `Terminal`:
+
+```ts
+// Cannot fail: every tool failure becomes a tool result the model can read.
+export const runTool = (call: ToolCallPart): Effect.Effect<ToolResultPart, never, Tools | Terminal> =>
+  Effect.gen(function* () {
+    const tools = yield* Tools
+    const done = (result: ToolResultValue): ToolResultPart => ({ type: "tool-result", id: call.id, name: call.name, result })
+    const tool = tools.find((tool) => tool.name === call.name)
+    const run = tool ? tool.run(call.input) : Effect.fail(new UnknownTool({ name: call.name, available: tools.map((tool) => tool.name) }))
+
+    return yield* run.pipe(
+      Effect.map((value) => done({ type: "text", value })),
+      Effect.catch((failure) => Effect.succeed(done({ type: "error", value: failure.message }))),
+    )
+  })
+```
+
+In `src/tools.ts`, import `Layer` and `Tools`:
+
+```ts
+import { Layer, Schema } from "effect"
+import { defineTool, Tools, type Tool } from "./tool"
+```
+
+and add the layer at the end of the file, after the `tools` array:
+
+```ts
+export const ToolsLive = Layer.succeed(Tools, tools)
+```
+
+In `src/agent.ts`, the two imports that named the tools become one:
+
+```ts
+import { runTool, Tools } from "./tool"
+```
+
+`turn` asks for `Tools` below the line that asks for `terminal`:
+
+```ts
+    const tools = yield* Tools
+```
+
+and calls `runTool` with the call only:
+
+```ts
+runTool(call)
+```
+
+`agent.ts` now imports no real implementation of the tools. In `src/index.ts`, import `ToolsLive`:
+
+```ts
+import { ToolsLive } from "./tools"
+```
+
+and add it to the merged layers:
+
+```ts
+Layer.mergeAll(ModelClientLive, TerminalLive, ToolsLive)
+```
+
+Run the agent and ask it for a file listing. A confirmation prompt appears for `write_file`, `edit_file` and `bash`, and `y` and `n` work as before.
+
+<details>
+<summary>Stuck? The finished tool.ts, agent.ts and index.ts</summary>
+
+`src/tool.ts`
+
+```ts
+import { Context, Effect, Schema, SchemaIssue } from "effect"
+import { Declined, InvalidInput, messageOf, ToolCrashed, UnknownTool } from "./errors"
+import type { ToolCallPart, ToolResultPart, ToolResultValue } from "./messages"
+import { Terminal } from "./terminal"
+
+export type ToolFailure = UnknownTool | InvalidInput | Declined | ToolCrashed
+
+export type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, derived from the input Schema
+  run: (input: unknown) => Effect.Effect<string, ToolFailure, Terminal>
+}
+
+// The tools the agent knows, as a service. Which tools exist is decided where the layer is built.
+export class Tools extends Context.Service<Tools, Tool[]>()("@agent/Tools") {}
+
+const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1()
+
+// Builds a Tool from one Schema: it validates the input and produces the JSON Schema the model receives.
+// `DecodingServices: never` limits S to Schemas that need nothing else to decode, so `run` keeps R = never.
+export const defineTool = <S extends Schema.Struct<Schema.Struct.Fields> & { readonly DecodingServices: never }>(config: {
+  name: string
+  description: string
+  input: S
+  execute: (input: S["Type"]) => Promise<string>
+  confirm?: (input: S["Type"]) => string // describes the action; when set, the user must approve it first
+}): Tool => {
+  const takes = Object.keys(config.input.fields).join(", ")
+  const decode = Schema.decodeUnknownEffect(config.input)
+
+  return {
+    name: config.name,
+    description: config.description,
+    parameters: Schema.toJsonSchemaDocument(config.input).schema,
+    run: (raw) =>
+      Effect.gen(function* () {
+        // A string is arguments that were not valid JSON; the protocol keeps the raw text.
+        if (typeof raw === "string") {
+          return yield* new InvalidInput({ tool: config.name, problems: [`the arguments are not valid JSON: ${raw}`], takes })
+        }
+
+        const input = yield* decode(raw, { errors: "all" }).pipe(
+          Effect.mapError(
+            (error) =>
+              new InvalidInput({
+                tool: config.name,
+                problems: formatIssues(error.issue).issues.map((issue) => `${issue.path?.join(".") || "input"}: ${issue.message}`),
+                takes,
+              }),
+          ),
+        )
+
+        if (config.confirm) {
+          // No answer counts as "no".
+          const terminal = yield* Terminal
+          const answer = yield* terminal.ask(`Allow: ${config.confirm(input)}? [y/N] `).pipe(Effect.orElseSucceed(() => ""))
+          if (answer.trim().toLowerCase() !== "y") return yield* new Declined()
+        }
+
+        return yield* Effect.tryPromise({
+          try: () => config.execute(input),
+          catch: (error) => new ToolCrashed({ tool: config.name, reason: messageOf(error) }),
+        })
+      }),
+  }
+}
+
+// Cannot fail: every tool failure becomes a tool result the model can read.
+export const runTool = (call: ToolCallPart): Effect.Effect<ToolResultPart, never, Tools | Terminal> =>
+  Effect.gen(function* () {
+    const tools = yield* Tools
+    const done = (result: ToolResultValue): ToolResultPart => ({ type: "tool-result", id: call.id, name: call.name, result })
+    const tool = tools.find((tool) => tool.name === call.name)
+    const run = tool ? tool.run(call.input) : Effect.fail(new UnknownTool({ name: call.name, available: tools.map((tool) => tool.name) }))
+
+    return yield* run.pipe(
+      Effect.map((value) => done({ type: "text", value })),
+      Effect.catch((failure) => Effect.succeed(done({ type: "error", value: failure.message }))),
+    )
+  })
+```
+
+`src/agent.ts`
+
+```ts
+import { Effect } from "effect"
+import { messageOf } from "./errors"
+import { isToolCall, type Message, type ToolResultPart } from "./messages"
+import { ModelClient } from "./model-client"
+import { Terminal } from "./terminal"
+import { runTool, Tools } from "./tool"
+
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const tools = yield* Tools
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* model.chat(history, tools)
+      history.push(message)
+      for (const part of message.content) {
+        if (part.type === "text" && part.text) yield* terminal.say(`Agent: ${part.text}`)
+      }
+      if (finish !== "tool-calls") return
+
+      const results: ToolResultPart[] = []
+      for (const call of message.content.filter(isToolCall)) {
+        yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+        const result = yield* runTool(call)
+        if (result.result.type === "error") yield* terminal.say(`[error] ${result.result.value}`)
+        results.push(result)
+      }
+      history.push({ role: "tool", content: results })
+    }
+  })
+
+// The read-eval-print loop: read a line from the user, run a turn on it, print the output, and repeat.
+export const repl = (history: Message[]) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+
+      // A turn that fails is dropped from the history, so the next prompt starts from a consistent conversation.
+      const before = history.length
+      const drop = (label: string, reason: string) =>
+        Effect.suspend(() => {
+          history.length = before
+          return terminal.say(`[${label}] ${reason}`)
+        })
+
+      yield* turn(history, input).pipe(
+        Effect.catchTag("ProviderError", (error) => drop("provider error", error.message)),
+        Effect.catchDefect((defect) => drop("bug", messageOf(defect))),
+      )
+    }
+  }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
+```
+
+`src/index.ts`
+
+```ts
+import { Effect, Layer } from "effect"
+import { repl } from "./agent"
+import { ModelClientLive } from "./model-client"
+import { TerminalLive } from "./terminal"
+import { ToolsLive } from "./tools"
+
+const live = Layer.mergeAll(ModelClientLive, TerminalLive, ToolsLive)
+
+await Effect.runPromise(
+  repl([]).pipe(
+    Effect.provide(live),
+    Effect.catchTag("ConfigError", (error) =>
+      Effect.sync(() => {
+        console.error(error.message)
+        process.exitCode = 1
+      }),
+    ),
+  ),
+)
+```
+
+</details>
+
+`tools.ts` is the Part 5 file with the changed import line and the new last line. The loop now has everything it needs in `R`, and `index.ts` provides it.
+
+### Step 5: The fakes and three tests
+
+The runner is Bun's own, so nothing else is installed.
+
+Create `test/fakes.ts`. A `Step` is what the scripted model does next: a reply, or a `ProviderError`. `reply` and `callTool` build replies without the surrounding message. `scriptedModel` returns a layer and the list of histories it was sent (each one a copy, `[...history]`, because the loop keeps adding to the original), and `scriptedTerminal` returns a layer and everything the agent printed. When the answers run out, `ask` fails with `InputClosed`, which ends `repl` the same way end of input does:
+
+```ts
+import { Effect, Layer } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import type { Reply } from "../src/protocols"
+import { Terminal } from "../src/terminal"
+
+// Replies the scripted model gives, in order. A ProviderError makes that step fail instead.
+export type Step = Reply | ProviderError
+
+export const reply = (text: string): Step => ({ message: { role: "assistant", content: [{ type: "text", text }] }, finish: "stop" })
+
+export const callTool = (id: string, name: string, input: unknown): Step => ({
+  message: { role: "assistant", content: [{ type: "tool-call", id, name, input }] },
+  finish: "tool-calls",
+})
+
+// A model that follows a script and records the history it was given at each step.
+export const scriptedModel = (steps: Step[]) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Effect.suspend(() => {
+          requests.push([...history])
+          const next = steps[requests.length - 1]
+          if (!next) return Effect.fail(new ProviderError({ reason: "The script has no reply left for this step" }))
+          return next instanceof ProviderError ? Effect.fail(next) : Effect.succeed(next)
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. When they run out, input ends.
+export const scriptedTerminal = (answers: string[]) => {
+  const output: string[] = []
+  const queue = [...answers]
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(prompt)
+          const next = queue.shift()
+          return next === undefined ? Effect.fail(new InputClosed()) : Effect.succeed(next)
+        }),
+      say: (line) => Effect.sync(() => void output.push(line)),
+    }),
+  )
+  return { layer, output }
+}
+```
+
+Create `test/agent.test.ts`. Two small tools stand in for the real ones, so no test touches the disk: `echo` returns its text, and `delete_everything` asks for confirmation and does nothing. `run` assembles the layers for one script, runs `repl` on an empty history and returns what the fakes saw:
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { ProviderError } from "../src/errors"
+import type { Message } from "../src/messages"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+// Two small tools, so the tests never touch the disk.
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const deleteEverything = defineTool({
+  name: "delete_everything",
+  description: "Pretends to delete everything.",
+  input: Schema.Struct({}),
+  execute: async () => "deleted",
+  confirm: () => "delete everything",
+})
+
+// Runs the loop against a script and returns what the loop and the fakes saw.
+const run = async (script: { model: Step[]; answers: string[] }) => {
+  const model = scriptedModel(script.model)
+  const terminal = scriptedTerminal(script.answers)
+  const history: Message[] = []
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo, deleteEverything]))
+
+  await Effect.runPromise(repl(history).pipe(Effect.provide(layers)))
+  return { history, requests: model.requests, output: terminal.output }
+}
+
+describe("the agent loop", () => {
+  test("runs a tool call and then answers", async () => {
+    const { history, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("The tool said hi.")],
+      answers: ["say hi"],
+    })
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"])
+    expect(history[2]?.content).toEqual([{ type: "tool-result", id: "call_1", name: "echo", result: { type: "text", value: "hi" } }])
+    expect(output).toContain("Agent: The tool said hi.")
+  })
+
+  test("tells the model when the user declines", async () => {
+    const { requests } = await run({
+      model: [callTool("call_1", "delete_everything", {}), reply("Understood, I will not delete anything.")],
+      answers: ["clean up", "n"],
+    })
+
+    // The second request is the step after the tool call: its last message holds the result.
+    const result = requests[1]?.at(-1)?.content[0]
+    expect(result).toMatchObject({ type: "tool-result", result: { type: "error" } })
+    expect(JSON.stringify(result)).toContain("User declined")
+  })
+
+  test("drops a turn whose model call fails", async () => {
+    const { history, output } = await run({
+      model: [new ProviderError({ reason: "connection refused" })],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(output).toContain("[provider error] connection refused")
+  })
+})
+```
+
+The three tests are the Part 5 behaviors that needed a live model: a tool call followed by an answer, a refusal that the model is told about, and a model failure that drops the turn. Run them:
+
+```text
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+ 3 pass
+ 0 fail
+ 7 expect() calls
+Ran 3 tests across 1 file. [47.00ms]
+```
+
+The three tests ran in 47 ms in the Test environment above, with no server and no key.
+
+### Step 6: Read `R`, break things and run it live
+
+**Ask the compiler for the types.** A deliberate type error in a temporary `src/probe.ts` makes the compiler print the types:
+
+```ts
+import { repl, turn } from "./agent"
+
+const a: number = repl([])
+const b: number = turn([], "x")
+```
+
+```text
+$ bunx --package typescript tsc --noEmit
+src/probe.ts(3,7): error TS2322: Type 'Effect<void, never, ModelClient | Terminal | Tools>' is not assignable to type 'number'.
+src/probe.ts(4,7): error TS2322: Type 'Effect<void, ProviderError, ModelClient | Terminal | Tools>' is not assignable to type 'number'.
+```
+
+Delete `probe.ts` afterwards.
+
+**Leave out a layer.** In `index.ts`, remove `TerminalLive` from `Layer.mergeAll`. The error is on the argument of `Effect.runPromise`, the line that runs the program, and it names the missing service:
+
+```text
+$ bunx --package typescript tsc --noEmit
+src/index.ts(10,3): error TS2345: Argument of type 'Effect<void, never, Terminal>' is not assignable to parameter of type 'Effect<void, never, never>'.
+  Type 'Terminal' is not assignable to type 'never'.
+```
+
+The other two services are already provided, so only `Terminal` is left in `R`. Put `TerminalLive` back.
+
+**Make a test fail.** In the second test, change the scripted answer from `n` to `y`. The tool then runs, and the assertion about the error result fails:
+
+```text
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+test/agent.test.ts:
+51 |       answers: ["clean up", "y"],
+52 |     })
+53 |
+54 |     // The second request is the step after the tool call: its last message holds the result.
+55 |     const result = requests[1]?.at(-1)?.content[0]
+56 |     expect(result).toMatchObject({ type: "tool-result", result: { type: "error" } })
+                        ^
+error: expect(received).toMatchObject(expected)
+
+@@ -1,4 +1,7 @@
+  {
++   "id": "call_1",
++   "name": "delete_everything",
+    "result": {
+-     "type": "error",
++     "type": "text",
++     "value": "deleted",
+    },
+
+- Expected  - 1
++ Received  + 4
+
+      at <anonymous> (test/agent.test.ts:56:20)
+(fail) the agent loop > tells the model when the user declines [8.85ms]
+
+ 2 pass
+ 1 fail
+ 6 expect() calls
+Ran 3 tests across 1 file. [63.00ms]
+```
+
+Change it back. The test fails for the reason it is meant to, so it does check the refusal.
+
+**Run it for real.** The live layers replace the fakes. On Ollama, with a confirmed write:
+
+```text
+$ cd playground && bun ../src/index.ts
+You: List the files in this folder, then read secret-file.txt
+[tool] list_files({"path":"."})
+Agent: I see three items in this directory: `secret-file.txt`, `README.md`, and a `notes` directory. Now let me read the contents of `secret-file.txt`:
+[tool] read_file({"path":"secret-file.txt"})
+Agent: The files in this folder are:
+- `secret-file.txt`
+- `README.md`
+- `notes/` (directory)
+
+I've read `secret-file.txt`, and it contains a riddle: "I have keys but no locks. I have space but no room. You can enter, but you can't go outside. What am I?" The answer to this riddle is **a keyboard**.
+You: Create notes/hello.txt containing the word hi
+[tool] write_file({"path":"notes/hello.txt","content":"hi"})
+Allow: write notes/hello.txt? [y/N] y
+Agent: I've created `notes/hello.txt` containing the word "hi".
+You: ^D
+```
+
+On llama.cpp, started with `--reasoning off`, a declined command:
+
+```text
+$ cd playground && PROVIDER=llamacpp bun ../src/index.ts
+You: List the files in this folder, then read secret-file.txt
+[tool] list_files({"path":"."})
+[tool] read_file({"path":"secret-file.txt"})
+Agent: Here are the files in the folder:
+- secret-file.txt
+- README.md
+- notes/
+
+The content of **secret-file.txt** is:
+"I have keys but no locks. I have space but no room. You can enter, but you can't go outside. What am I?"
+
+(This is a riddle; the answer is a **keyboard**.)
+You: Delete nothing, but run: echo hello from bash
+[tool] bash({"command":"echo hello from bash"})
+Allow: run: echo hello from bash? [y/N] n
+[error] User declined this action. Ask what they would like instead.
+Agent: It seems the system prevented me from running the `echo` command. How else would you like to proceed?
+You: ^D
+```
+
+A bad configuration is now reported before the first prompt, and a model request that fails is still printed as a provider error:
+
+```text
+$ cd playground && PROVIDER=claude bun ../src/index.ts
+Set ANTHROPIC_API_KEY first
+
+$ cd playground && BASE_URL=http://127.0.0.1:9/v1 bun ../src/index.ts
+You: hello
+[provider error] Could not reach http://127.0.0.1:9/v1: ECONNREFUSED: Unable to connect. Is the computer able to access the url?
+You: ^D
+```
+
+`PROVIDER=claude` selects the Anthropic route, and the protocols are unchanged from [Part 4](/posts/providers-behind-one-interface/).
+
+> **Watch for this.** A missing layer is reported where the program is run, not where the service is used. When the compiler names a service that no code near the error seems to use, follow the `R` of the Effect upward: the use is somewhere inside it, and the fix is a layer in `index.ts` or in the test's `run`.
+
+> **Watch for this.** A scripted fake keeps its script and its recordings in variables created by the function that builds it. Build a new `scriptedModel` and a new `scriptedTerminal` for each test, as `run` does. Sharing one between tests carries the script position and the recorded requests from one test into the next.
+
+> **Result.** The loop imports no real model, terminal or tools, and its type lists what it needs. The program provides live layers and a test provides scripted ones, so the whole loop, with its tool calls, a refusal and a failed turn, runs without a server in the three tests above, which took between 47 and 63 ms in five runs.
+
+### The finished files
+
+These are the files that differ from Part 5, plus the two test files. `messages.ts` and `protocols.ts` are as Part 5 left them.
+
+<details>
+<summary>src/agent.ts</summary>
+
+```ts
+import { Effect } from "effect"
+import { messageOf } from "./errors"
+import { isToolCall, type Message, type ToolResultPart } from "./messages"
+import { ModelClient } from "./model-client"
+import { Terminal } from "./terminal"
+import { runTool, Tools } from "./tool"
+
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const tools = yield* Tools
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* model.chat(history, tools)
+      history.push(message)
+      for (const part of message.content) {
+        if (part.type === "text" && part.text) yield* terminal.say(`Agent: ${part.text}`)
+      }
+      if (finish !== "tool-calls") return
+
+      const results: ToolResultPart[] = []
+      for (const call of message.content.filter(isToolCall)) {
+        yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+        const result = yield* runTool(call)
+        if (result.result.type === "error") yield* terminal.say(`[error] ${result.result.value}`)
+        results.push(result)
+      }
+      history.push({ role: "tool", content: results })
+    }
+  })
+
+// The read-eval-print loop: read a line from the user, run a turn on it, print the output, and repeat.
+export const repl = (history: Message[]) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+
+      // A turn that fails is dropped from the history, so the next prompt starts from a consistent conversation.
+      const before = history.length
+      const drop = (label: string, reason: string) =>
+        Effect.suspend(() => {
+          history.length = before
+          return terminal.say(`[${label}] ${reason}`)
+        })
+
+      yield* turn(history, input).pipe(
+        Effect.catchTag("ProviderError", (error) => drop("provider error", error.message)),
+        Effect.catchDefect((defect) => drop("bug", messageOf(defect))),
+      )
+    }
+  }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
+```
+
+</details>
+
+<details>
+<summary>src/errors.ts</summary>
+
+```ts
+import { Schema } from "effect"
+
+// Tool failures: each one becomes a tool result the model can read and react to.
+export class UnknownTool extends Schema.TaggedError<UnknownTool>()("UnknownTool", {
+  name: Schema.String,
+  available: Schema.Array(Schema.String),
+}) {
+  override get message() {
+    return `Unknown tool: ${this.name}. Available tools: ${this.available.join(", ")}`
+  }
+}
+
+export class InvalidInput extends Schema.TaggedError<InvalidInput>()("InvalidInput", {
+  tool: Schema.String,
+  problems: Schema.Array(Schema.String),
+  takes: Schema.String,
+}) {
+  override get message() {
+    return [`Invalid input for ${this.tool}:`, ...this.problems.map((problem) => `- ${problem}`), `${this.tool} takes an object with the fields: ${this.takes}`].join("\n")
+  }
+}
+
+export class Declined extends Schema.TaggedError<Declined>()("Declined", {}) {
+  override get message() {
+    return "User declined this action. Ask what they would like instead."
+  }
+}
+
+export class ToolCrashed extends Schema.TaggedError<ToolCrashed>()("ToolCrashed", {
+  tool: Schema.String,
+  reason: Schema.String,
+}) {
+  override get message() {
+    return this.reason
+  }
+}
+
+// Failures of the model request. The user reads these; the model never sees them.
+export class ProviderError extends Schema.TaggedError<ProviderError>()("ProviderError", {
+  reason: Schema.String,
+}) {
+  override get message() {
+    return this.reason
+  }
+}
+
+// The environment asks for a provider the agent cannot reach, such as an unknown PROVIDER or a missing API key.
+export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
+  reason: Schema.String,
+}) {
+  override get message() {
+    return this.reason
+  }
+}
+
+// Standard input ended, so there is nobody left to ask.
+export class InputClosed extends Schema.TaggedError<InputClosed>()("InputClosed", {}) {}
+
+export const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
+```
+
+</details>
+
+<details>
+<summary>src/index.ts</summary>
+
+```ts
+import { Effect, Layer } from "effect"
+import { repl } from "./agent"
+import { ModelClientLive } from "./model-client"
+import { TerminalLive } from "./terminal"
+import { ToolsLive } from "./tools"
+
+const live = Layer.mergeAll(ModelClientLive, TerminalLive, ToolsLive)
+
+await Effect.runPromise(
+  repl([]).pipe(
+    Effect.provide(live),
+    Effect.catchTag("ConfigError", (error) =>
+      Effect.sync(() => {
+        console.error(error.message)
+        process.exitCode = 1
+      }),
+    ),
+  ),
+)
+```
+
+</details>
+
+<details>
+<summary>src/model-client.ts</summary>
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import type { ProviderError } from "./errors"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Reply } from "./protocols"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step. Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Effect.Effect<Reply, ProviderError>
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools) })
+  }),
+)
+```
+
+</details>
+
+<details>
+<summary>src/provider.ts</summary>
+
+```ts
+import { Effect } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol, type Reply } from "./protocols"
+import type { Tool } from "./tool"
+
+type Env = Record<string, string | undefined>
+
+// A route binds a protocol to one provider's endpoint and authentication.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+})
+
+// PROVIDER picks the route. BASE_URL and MODEL override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model })
+}
+
+// One step: one model call. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]) =>
+  Effect.gen(function* () {
+    const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetch(`${route.baseUrl}${route.protocol.path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...route.headers },
+          body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+        }),
+      catch: unreachable,
+    })
+    const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+    if (!response.ok) return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+
+    return yield* Effect.try({
+      try: (): Reply => route.protocol.decode(JSON.parse(text)),
+      catch: (error) => new ProviderError({ reason: `Could not read the reply from ${route.baseUrl}: ${messageOf(error)}` }),
+    })
+  })
+```
+
+</details>
+
+<details>
+<summary>src/terminal.ts</summary>
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import { createInterface } from "node:readline/promises"
+import { InputClosed } from "./errors"
+
+// What the agent needs from the person at the keyboard. Nothing here says readline.
+export class Terminal extends Context.Service<
+  Terminal,
+  {
+    // Asks one question. The type says it can fail: input may have ended.
+    readonly ask: (prompt: string) => Effect.Effect<string, InputClosed>
+    readonly say: (line: string) => Effect.Effect<void>
+  }
+>()("@agent/Terminal") {}
+
+// The real terminal. Building the layer opens readline; the end of the program closes it.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const rl = yield* Effect.acquireRelease(
+      Effect.sync(() => createInterface({ input: process.stdin, output: process.stdout })),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    // A pending question never settles when input ends, so ending input is turned into a rejection.
+    const closed = new Promise<never>((_, reject) => rl.once("close", () => reject(new Error("input closed"))))
+    closed.catch(() => {})
+
+    return Terminal.of({
+      ask: (prompt) =>
+        Effect.tryPromise({
+          try: () => Promise.race([rl.question(prompt), closed]),
+          catch: () => new InputClosed(),
+        }),
+      say: (line) => Effect.sync(() => console.log(line)),
+    })
+  }),
+)
+```
+
+</details>
+
+<details>
+<summary>src/tool.ts</summary>
+
+```ts
+import { Context, Effect, Schema, SchemaIssue } from "effect"
+import { Declined, InvalidInput, messageOf, ToolCrashed, UnknownTool } from "./errors"
+import type { ToolCallPart, ToolResultPart, ToolResultValue } from "./messages"
+import { Terminal } from "./terminal"
+
+export type ToolFailure = UnknownTool | InvalidInput | Declined | ToolCrashed
+
+export type Tool = {
+  name: string
+  description: string
+  parameters: Record<string, unknown> // JSON Schema, derived from the input Schema
+  run: (input: unknown) => Effect.Effect<string, ToolFailure, Terminal>
+}
+
+// The tools the agent knows, as a service. Which tools exist is decided where the layer is built.
+export class Tools extends Context.Service<Tools, Tool[]>()("@agent/Tools") {}
+
+const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1()
+
+// Builds a Tool from one Schema: it validates the input and produces the JSON Schema the model receives.
+// `DecodingServices: never` limits S to Schemas that need nothing else to decode, so `run` keeps R = never.
+export const defineTool = <S extends Schema.Struct<Schema.Struct.Fields> & { readonly DecodingServices: never }>(config: {
+  name: string
+  description: string
+  input: S
+  execute: (input: S["Type"]) => Promise<string>
+  confirm?: (input: S["Type"]) => string // describes the action; when set, the user must approve it first
+}): Tool => {
+  const takes = Object.keys(config.input.fields).join(", ")
+  const decode = Schema.decodeUnknownEffect(config.input)
+
+  return {
+    name: config.name,
+    description: config.description,
+    parameters: Schema.toJsonSchemaDocument(config.input).schema,
+    run: (raw) =>
+      Effect.gen(function* () {
+        // A string is arguments that were not valid JSON; the protocol keeps the raw text.
+        if (typeof raw === "string") {
+          return yield* new InvalidInput({ tool: config.name, problems: [`the arguments are not valid JSON: ${raw}`], takes })
+        }
+
+        const input = yield* decode(raw, { errors: "all" }).pipe(
+          Effect.mapError(
+            (error) =>
+              new InvalidInput({
+                tool: config.name,
+                problems: formatIssues(error.issue).issues.map((issue) => `${issue.path?.join(".") || "input"}: ${issue.message}`),
+                takes,
+              }),
+          ),
+        )
+
+        if (config.confirm) {
+          // No answer counts as "no".
+          const terminal = yield* Terminal
+          const answer = yield* terminal.ask(`Allow: ${config.confirm(input)}? [y/N] `).pipe(Effect.orElseSucceed(() => ""))
+          if (answer.trim().toLowerCase() !== "y") return yield* new Declined()
+        }
+
+        return yield* Effect.tryPromise({
+          try: () => config.execute(input),
+          catch: (error) => new ToolCrashed({ tool: config.name, reason: messageOf(error) }),
+        })
+      }),
+  }
+}
+
+// Cannot fail: every tool failure becomes a tool result the model can read.
+export const runTool = (call: ToolCallPart): Effect.Effect<ToolResultPart, never, Tools | Terminal> =>
+  Effect.gen(function* () {
+    const tools = yield* Tools
+    const done = (result: ToolResultValue): ToolResultPart => ({ type: "tool-result", id: call.id, name: call.name, result })
+    const tool = tools.find((tool) => tool.name === call.name)
+    const run = tool ? tool.run(call.input) : Effect.fail(new UnknownTool({ name: call.name, available: tools.map((tool) => tool.name) }))
+
+    return yield* run.pipe(
+      Effect.map((value) => done({ type: "text", value })),
+      Effect.catch((failure) => Effect.succeed(done({ type: "error", value: failure.message }))),
+    )
+  })
+```
+
+</details>
+
+<details>
+<summary>src/tools.ts</summary>
+
+```ts
+import { execFile } from "node:child_process"
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+import { Layer, Schema } from "effect"
+import { defineTool, Tools, type Tool } from "./tool"
+
+const listFiles = async (path: string) => {
+  const entries = await readdir(path, { withFileTypes: true })
+  return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")
+}
+
+const editFile = async (path: string, oldStr: string, newStr: string) => {
+  if (oldStr === newStr) throw new Error("old_str and new_str must be different")
+
+  if (oldStr === "") {
+    if (existsSync(path)) throw new Error(`${path} already exists; pass the text to replace as old_str`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, newStr)
+    return `Created ${path}`
+  }
+
+  const content = await readFile(path, "utf8")
+  const matches = content.split(oldStr).length - 1
+  if (matches === 0) throw new Error(`old_str was not found in ${path}`)
+  if (matches > 1) throw new Error(`old_str matches ${matches} places in ${path}; include more surrounding text`)
+  await writeFile(path, content.replace(oldStr, () => newStr))
+  return "OK"
+}
+
+const saveFile = async (path: string, content: string) => {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, content)
+  return `Wrote ${content.length} characters to ${path}`
+}
+
+const TIMEOUT_MS = 30_000
+const MAX_OUTPUT = 10_000
+
+const runBash = (command: string) =>
+  new Promise<string>((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: TIMEOUT_MS, maxBuffer: 10_000_000 }, (error, stdout, stderr) => {
+      if (error?.killed) return reject(new Error(`The command ran longer than ${TIMEOUT_MS} ms and was stopped. Try a faster command.`))
+      if (error && typeof error.code !== "number") return reject(error)
+      const output = `${stdout}${stderr}`
+      const shown =
+        output.length > MAX_OUTPUT
+          ? `${output.slice(0, MAX_OUTPUT)}\n[Output truncated after ${MAX_OUTPUT} characters. Filter it with head, tail or grep.]`
+          : output
+      resolve(`Exit code: ${error ? error.code : 0}\n${shown}`)
+    })
+  })
+
+export const tools: Tool[] = [
+  defineTool({
+    name: "list_files",
+    description:
+      "List the files and directories at a path. Directory names end with a slash. Use it whenever you need to know what exists. Pass '.' for the current directory.",
+    input: Schema.Struct({
+      path: Schema.String.annotate({ description: "Directory to list, e.g. '.' or 'notes'" }),
+    }),
+    execute: ({ path }) => listFiles(path),
+  }),
+  defineTool({
+    name: "read_file",
+    description:
+      "Read the full text contents of a file. Use it when you need to see what is inside a file. Do not use it on directories; use list_files for those.",
+    input: Schema.Struct({
+      path: Schema.String.annotate({ description: "Path of the file to read, e.g. 'README.md'" }),
+    }),
+    execute: ({ path }) => readFile(path, "utf8"),
+  }),
+  defineTool({
+    name: "edit_file",
+    description:
+      "Edit a text file by replacing old_str with new_str. old_str must match exactly one place in the file, character for character, including whitespace, so read the file first and copy it. To create a new file, use a path that does not exist and set old_str to an empty string; new_str becomes the whole file.",
+    input: Schema.Struct({
+      path: Schema.String.annotate({ description: "Path of the file to edit or create" }),
+      old_str: Schema.String.annotate({ description: "Text to replace. Empty to create a new file." }),
+      new_str: Schema.String.annotate({ description: "Text to put in its place" }),
+    }),
+    execute: ({ path, old_str, new_str }) => editFile(path, old_str, new_str),
+    confirm: ({ path }) => `edit ${path}`,
+  }),
+  defineTool({
+    name: "write_file",
+    description:
+      "Write a complete text file, replacing it if it already exists and creating missing folders. Use it to create a new file or to rewrite a file entirely. For a small change to an existing file, use edit_file instead, because it sends only the part that changes. The content you pass becomes the whole file.",
+    input: Schema.Struct({
+      path: Schema.String.annotate({ description: "Path of the file to write, e.g. 'notes/plan.md'" }),
+      content: Schema.String.annotate({ description: "The full text of the file" }),
+    }),
+    execute: ({ path, content }) => saveFile(path, content),
+    confirm: ({ path }) => `write ${path}`,
+  }),
+  defineTool({
+    name: "bash",
+    description:
+      "Run a shell command with bash in the current directory and return its output and exit code. Use it for things the other tools cannot do, such as running a script, a test or git. Commands stop after 30 seconds and long output is cut off, so filter it with head, tail or grep when you expect a lot. Prefer read_file and list_files for reading, because they are cheaper and safer.",
+    input: Schema.Struct({
+      command: Schema.String.annotate({ description: "The command to run, e.g. 'ls -la' or 'bun test'" }),
+    }),
+    execute: ({ command }) => runBash(command),
+    confirm: ({ command }) => `run: ${command}`,
+  }),
+]
+
+export const ToolsLive = Layer.succeed(Tools, tools)
+```
+
+</details>
+
+<details>
+<summary>test/fakes.ts</summary>
+
+```ts
+import { Effect, Layer } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import type { Reply } from "../src/protocols"
+import { Terminal } from "../src/terminal"
+
+// Replies the scripted model gives, in order. A ProviderError makes that step fail instead.
+export type Step = Reply | ProviderError
+
+export const reply = (text: string): Step => ({ message: { role: "assistant", content: [{ type: "text", text }] }, finish: "stop" })
+
+export const callTool = (id: string, name: string, input: unknown): Step => ({
+  message: { role: "assistant", content: [{ type: "tool-call", id, name, input }] },
+  finish: "tool-calls",
+})
+
+// A model that follows a script and records the history it was given at each step.
+export const scriptedModel = (steps: Step[]) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Effect.suspend(() => {
+          requests.push([...history])
+          const next = steps[requests.length - 1]
+          if (!next) return Effect.fail(new ProviderError({ reason: "The script has no reply left for this step" }))
+          return next instanceof ProviderError ? Effect.fail(next) : Effect.succeed(next)
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. When they run out, input ends.
+export const scriptedTerminal = (answers: string[]) => {
+  const output: string[] = []
+  const queue = [...answers]
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(prompt)
+          const next = queue.shift()
+          return next === undefined ? Effect.fail(new InputClosed()) : Effect.succeed(next)
+        }),
+      say: (line) => Effect.sync(() => void output.push(line)),
+    }),
+  )
+  return { layer, output }
+}
+```
+
+</details>
+
+<details>
+<summary>test/agent.test.ts</summary>
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { ProviderError } from "../src/errors"
+import type { Message } from "../src/messages"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+// Two small tools, so the tests never touch the disk.
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const deleteEverything = defineTool({
+  name: "delete_everything",
+  description: "Pretends to delete everything.",
+  input: Schema.Struct({}),
+  execute: async () => "deleted",
+  confirm: () => "delete everything",
+})
+
+// Runs the loop against a script and returns what the loop and the fakes saw.
+const run = async (script: { model: Step[]; answers: string[] }) => {
+  const model = scriptedModel(script.model)
+  const terminal = scriptedTerminal(script.answers)
+  const history: Message[] = []
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo, deleteEverything]))
+
+  await Effect.runPromise(repl(history).pipe(Effect.provide(layers)))
+  return { history, requests: model.requests, output: terminal.output }
+}
+
+describe("the agent loop", () => {
+  test("runs a tool call and then answers", async () => {
+    const { history, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("The tool said hi.")],
+      answers: ["say hi"],
+    })
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"])
+    expect(history[2]?.content).toEqual([{ type: "tool-result", id: "call_1", name: "echo", result: { type: "text", value: "hi" } }])
+    expect(output).toContain("Agent: The tool said hi.")
+  })
+
+  test("tells the model when the user declines", async () => {
+    const { requests } = await run({
+      model: [callTool("call_1", "delete_everything", {}), reply("Understood, I will not delete anything.")],
+      answers: ["clean up", "n"],
+    })
+
+    // The second request is the step after the tool call: its last message holds the result.
+    const result = requests[1]?.at(-1)?.content[0]
+    expect(result).toMatchObject({ type: "tool-result", result: { type: "error" } })
+    expect(JSON.stringify(result)).toContain("User declined")
+  })
+
+  test("drops a turn whose model call fails", async () => {
+    const { history, output } = await run({
+      model: [new ProviderError({ reason: "connection refused" })],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(output).toContain("[provider error] connection refused")
+  })
+})
+```
+
+</details>
+
+## Sources
+
+The first item is the primary source for this Part. A useful exercise is to find the three services the tool layer asks for, and the services `session-compact.test.ts` replaces with `Layer.mock`. For each, the exercise is to write down what the agent in this Part does instead, and what it would need before it could do the same (a layer that needs another layer is the first case). _Streaming_ (Part 7) is planned to change what the model client returns, from one reply to a stream of events, and the scripted model would change with it.
+
+- OpenCode's [core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts) and [core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)
+- OpenCode's [ai/src/route/client.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/client.ts) (the `LLMClient` service)
+- The Effect v3 to v4 migration guide: [Services](https://github.com/Effect-TS/effect/blob/main/migration/services.md)
+
+Measured: the steps above were run on 6 November 2026 in the [Part 1](/posts/the-loop/) test environment (Ollama 0.40.14, llama.cpp b9830) with Effect 4.1.0, Bun 1.4.4 and TypeScript 7.0.2. Steps 1 to 4 were applied to Part 5's finished files and every state was type-checked. Five runs of the three tests took 47 to 63 ms, and the first run after the files were written took 102 ms. The Ollama and llama.cpp runs used piped input with pauses between prompts, and llama.cpp ran on a second port with `--reasoning off` selected with `BASE_URL`.
+
+Checked:
+
+- the `Part6_services_and_layers` tag on the remote (commit `93fc2e7`): its `src` and `test` files equal the finished files above apart from trailing commas and the position of one import in `agent.ts`
+- Steps 1 to 4 applied in order to Part 5's finished files, with the edits worded as in the steps: every state type-checks, and the files after steps 2, 3 and 4 equal the "Stuck?" files
+- the finished files type-check on Effect 4.1.0, and the three tests pass; the compiler errors for the `play` that still needs `Dice`, for `probe.ts` and for the missing `TerminalLive` are the ones shown, and the test with `y` in place of `n` fails with the message shown (durations differ, and Bun prints the full path in the `at` line)
+- every snippet in "What services and layers add" run on its own, with the `TS2345` message, the second number always 8, and the `open`, `rows for select 1`, `close`, `done` order
+- the `PROVIDER=nope` import fails on Part 5's `provider.ts` as shown (the stack trace there shows the full path) and succeeds on Part 6's; `index.ts` prints the message and exits with code 1, and so does `PROVIDER=claude` without `ANTHROPIC_API_KEY`
+- the "Start from what you cannot test" table against Part 5's finished files
+- the Ollama and llama.cpp runs repeated with paced input: the tool calls, the confirmation prompt, the written file, the declined command and the `ECONNREFUSED` line printed as shown, and the model's wording differed
+- in Effect 4.1.0's source, `Layer.mock` documents that a missing member fails with an unimplemented defect when it is used, and the Services page of the migration guide describes `Context.Service`
+- at OpenCode commit `97be25f046`: the Effect 4.1.0 pin in the catalog of its `package.json`, the `Service` and `layer` in `core/src/tool.ts` with the three `yield*` lines, the `Layer.mock(LLMClient.Service)` block in `core/test/session-compact.test.ts`, and the `LLMClient` service in `ai/src/route/client.ts`
+- the Part numbers and titles against the Series file, and the Stage A count against the Forewords of Parts 3 to 5
+
+Parts 2 to 4 link OpenCode at `863ea41364`, where the first lines of the tool layer do not include `Permission.Service`, so this Part links the newer commit that its description matches.
