@@ -1,20 +1,19 @@
 ---
 title: 'Streaming'
-description: 'After Part 6 the agent prints a reply only once the model has written all of it. A model client that returns a stream of events lets the first words appear as they are produced, on every provider.'
+description: 'After Part 6 the agent prints a reply only once the model has written all of it. A model client that returns a stream of events lets the first words appear as they are produced.'
 pubDate: 2026-11-09
 category: agentic-ai
 tags: [agents, effect, typescript, streaming, ollama]
 series: building-an-agent-from-scratch
 part: 7
 snapshot: Part7_Streaming
-draft: true
 ---
 
 import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-This Part changes the model client of the agent from [Part 6](/posts/services-and-layers/) so that it returns a stream of events instead of one reply, and the loop prints the text as it arrives. Each protocol decodes the server's messages into those events. It is the fifth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/), and the last one.
+This Part changes the model client of the agent from [Part 6](/posts/services-and-layers/) so that it returns a stream of events instead of one reply, and the loop prints the text as it arrives. Each protocol decodes the server's messages into those events. It is the fifth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
 
 The code for this Part is available as the [`Part7_Streaming` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part7_Streaming), the repo where I build this agent in parallel.
 
@@ -1534,7 +1533,7 @@ export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.St
 
 ### Step 3: Tests for the stream
 
-Step 2 was checked by watching. This step adds tests that run without a server. Save the five recorded streams in `test/fixtures/` (they are at the end of this Part): `ollama-text.sse`, `ollama-tool.sse`, `llamacpp-text.sse`, `llamacpp-tool.sse` and `claude-tool.sse`. The first four were recorded from the servers with curl, as in the commands shown earlier. The last is an Anthropic stream with a thinking block, a text block, a tool call whose arguments arrive in three fragments, and a second tool call with none.
+Step 2 was checked by watching. This step adds tests that run without a server. Save the five streams in `test/fixtures/` (they are at the end of this Part): `ollama-text.sse`, `ollama-tool.sse`, `llamacpp-text.sse`, `llamacpp-tool.sse` and `claude-tool.sse`. The first four were recorded from the servers with curl, as in the commands shown earlier. The last is not a recording: it is an Anthropic-format stream with placeholder ids, modelled on Anthropic's [Streaming Messages](https://platform.claude.com/docs/en/build-with-claude/streaming) page. It has a thinking block, a text block, a tool call whose arguments arrive in three fragments, and a second tool call with none.
 
 `test/protocols.test.ts` runs each fixture through `frames` and the protocol, and checks the events. One test cuts each fixture in two at every byte position and checks that the events are the same as for the uncut bytes. Another cuts a message in the middle of the letter `é`. The helper `fixture` puts back the blank line that ends the last message of a stream, which a copy of a fixture from this Part can lose:
 
@@ -2105,7 +2104,7 @@ The tool call from llama.cpp, which arrives in fragments, runs once with its com
 
 > **Watch for this.** A frame is complete only at its blank line. A server that stops after the last `data:` line without the blank line gives the agent no frame for it, and the user sees `ended before the model finished` rather than a missing word. If that error appears on a server that seems to work, record its stream with `curl -sN` and look at the end.
 
-> **Result.** The first words of a reply appear after a fraction of a second, on every provider, and the loop does not know which one it is talking to. A reply that breaks off halfway is reported once, on its own line, and leaves the history valid. The decoding of each wire format is a pair of functions that a test can call on bytes recorded from a real server.
+> **Result.** The first words of a reply appear after a fraction of a second on Ollama and llama.cpp, and the loop does not know which one it is talking to. A reply that breaks off halfway is reported once, on its own line, and leaves the history valid. The decoding of each wire format is a pair of functions that a test can call on recorded bytes.
 
 ### The finished files
 
@@ -3086,13 +3085,14 @@ The first item is the primary source for this Part. A useful exercise is to find
 - The HTML Standard: [Server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) (parsing and interpreting an event stream)
 - Anthropic's [Streaming Messages](https://platform.claude.com/docs/en/build-with-claude/streaming)
 
-This Part completes Stage A: a harness that runs one loop on three providers, with tools as data, errors in the types, services that a test can replace, and a reply that streams. The Session stage (Stage B) comes next, and its Parts are not yet scheduled in [the roadmap](/posts/the-roadmap/).
+This Part completes Stage A: a harness with one loop and two wire formats (OpenAI chat and Anthropic Messages), with tools as data, errors in the types, services that a test can replace, and a reply that streams. The Session stage (Stage B) comes next, and its Parts are not yet scheduled in [the roadmap](/posts/the-roadmap/).
 
 Measured: the steps above were run on 6 November 2026 and again on 9 November 2026 in the [Part 1](/posts/the-loop/) test environment (Ollama 0.40.14, llama.cpp b9830) with Effect 4.1.0, Bun 1.4.4 and TypeScript 7.0.2. Every state of the steps was type-checked and the tests were run. The finished files were run on Ollama and on llama.cpp (a second llama-server on another port with `--reasoning off`, selected with `BASE_URL`) with piped input and pauses between prompts. The timings in the first section are from the 9 November runs, with the model already loaded: the time from writing the prompt to standard input until `Agent:` first reached standard output, and until the next `You:` prompt. Two runs per server of the Part 6 agent gave 9.4 to 10.0 s on Ollama and 13.6 to 14.5 s on llama.cpp; the Part 7 agent showed its first text after 0.5 s on Ollama and 0.6 s on llama.cpp, and finished the reply in 8.8 to 10.3 s and 14.9 to 16.4 s. The table shows the last run of each. The replies differed in length from run to run (about 440 to 540 words). Runs of the 18 tests (3 files) took 150 to 180 ms. Long lines in transcripts are shortened. The snippets in "What streams add" were run on their own.
 
 Checked:
 
-- the `Part7_Streaming` tag on the remote (commit `bd618fd`): its fixtures and its `events.ts`, `sse.ts`, `terminal.ts`, `provider.ts`, `test/fakes.ts`, `test/protocols.test.ts` and `test/provider.test.ts` equal the finished files above; `model-client.ts` and `agent.ts` differ in one comment and a trailing comma, `agent.test.ts` in a blank line and the order of the tests, and the Snapshot's `protocols.ts` still has an unused `OpenAIResponse` type that the steps remove
+- the `Part7_Streaming` Snapshot on the remote (commit `bd618fd`): its fixtures and its `events.ts`, `sse.ts`, `terminal.ts`, `provider.ts`, `test/fakes.ts`, `test/protocols.test.ts` and `test/provider.test.ts` equal the finished files above; `model-client.ts` and `agent.ts` differ in one comment and a trailing comma, `agent.test.ts` in a blank line and the order of the tests, and the Snapshot's `protocols.ts` still has an unused `OpenAIResponse` type that the steps remove
+- the starting point of ten files in `src` and two in `test`, counted in Part 6's Snapshot
 - Part 6's files with the edits of Steps 1 to 3 applied as worded: the files after Steps 1 and 2 equal the "Stuck?" files (apart from trailing commas in `provider.ts`), every state type-checks, four tests pass after Steps 1 and 2, the new test fails as shown before the `Effect.ensuring` fix, and all 18 tests pass after it
 - the finished files type-check on Effect 4.1.0, and the two deliberate breakages in Step 4 fail as shown (durations differ, and Bun prints the full path in the `at` line)
 - every snippet in "What streams add" run on its own: the output is as shown, with the last line of the first one at 911 ms instead of 908 ms

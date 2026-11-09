@@ -1,18 +1,18 @@
 # 0011 · Part 7 of the agent Series: "Streaming"
 
-Status: planned
+Status: implemented (2026-11-09), published
 
-Product spec only. The Post will be `src/content/posts/2026-11-09-streaming.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md), [spec 0007](0007-tools-as-data-post.md), [spec 0008](0008-providers-behind-one-interface-post.md), [spec 0009](0009-why-effect-post.md) and [spec 0010](0010-services-and-layers-post.md) for how Parts 1–6 were ported.
+Product spec only. The Post is `src/content/posts/2026-11-09-streaming.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md), [spec 0007](0007-tools-as-data-post.md), [spec 0008](0008-providers-behind-one-interface-post.md), [spec 0009](0009-why-effect-post.md) and [spec 0010](0010-services-and-layers-post.md) for how Parts 1–6 were ported.
 
 ## Problem statement
 
-Part 6 ends with an agent whose loop can be tested against a scripted model, but which still sends a request, waits until the model has written the whole reply and only then prints it. A model writes one token at a time, so the silence lasts as long as the reply. Part 2's roadmap and Part 6 promise that _Streaming_ (Part 7) fixes this: the model client returns a stream of events instead of one reply, and each protocol decodes the server's messages into those events. Vlad finished that Part as a lesson in his OpenCode fork (`lessons/0007-streaming.html`), with the code tagged in the Companion repo as `Part7_Streaming`. It needs to become Part 7, reading and looking like Parts 1–6.
+Part 6 ends with an agent whose loop can be tested against a scripted model, but which still sends a request, waits until the model has written the whole reply and only then prints it. A model writes one token at a time, so the silence lasts as long as the reply. Part 2's roadmap and Part 6 promise that _Streaming_ (Part 7) fixes this: the model client returns a stream of events instead of one reply, and each protocol decodes the server's messages into those events. Vlad finished that Part as a lesson in his OpenCode fork (`lessons/0007-streaming.html`), with the code tagged in the Companion repo as `Part7_Streaming`. It needed to become Part 7, reading and looking like Parts 1–6.
 
-The Series' `planned` list still contains "Streaming", so the Series page would show it a second time as a Planned Part.
+The Series' `planned` list still contained "Streaming", so the Series page would have shown it a second time as a Planned Part.
 
 ## Solution
 
-A faithful port of the lesson as one Post, lightly edited for the blog, with the same kinds of edits as specs 0006 to 0010. It is a Draft until Vlad has read it, then published.
+A faithful port of the lesson as one Post, lightly edited for the blog, with the same kinds of edits as specs 0006 to 0010. It was a Draft until Vlad had read it, and is now published.
 
 - **Front matter**: category Agentic AI, tags `agents`, `effect`, `typescript`, `streaming`, `ollama`, Series _Building an agent from scratch_, Part 7, title "Streaming" (the name used by the Series, Part 2 and Part 6), Snapshot `Part7_Streaming`, spelled as the tag is on the remote (its capital S differs from Parts 1–6). `pubDate` is 2026-11-09. The Foreword calls it the fifth Part of Stage A (Harness), counting from Part 3 as Parts 3 to 6 do, and links the Snapshot in a plain sentence, like Parts 1 and 3 to 6 ([spec 0005](0005-companion-repo.md)). There is no "your prediction" section.
 - **Content**: the silence of the Part 6 agent, with a timing table of first text against whole reply on Ollama and llama.cpp; what the server sends (server-sent events, the recorded Ollama and llama.cpp streams, and how the two send a tool call differently) and the rules of the format; what streams add in four ideas with a runnable snippet each (values handed over as produced, a failure after some values, bytes cut into lines wherever the pieces end, state carried from one value to the next); the six decisions in the rewrite (three events, one path, a protocol as a step function from frames to events, a loop that folds events into a message and runs tools after the finish, a reply that breaks off in the middle, two kinds of test); the five quizzes; the hands-on build in four steps (events, reading the stream from the wire, tests for the stream, breaking things and running it live) with the finished files collapsed; callouts; Sources with OpenCode's `ai/src/route/client.ts` and `ai/src/route/framing.ts` first, then the HTML Standard and Anthropic's Streaming Messages page.
@@ -28,7 +28,7 @@ A faithful port of the lesson as one Post, lightly edited for the blog, with the
 
 ### Claims
 
-The Post states only what is checked before publishing, and anything that cannot be re-run is cut or hedged instead of carried over from the lesson:
+The Post states only what was checked before publishing, and anything that could not be re-run was cut or hedged instead of carried over from the lesson:
 
 - the `Part7_Streaming` tag on the remote: its `src`, `test` and `test/fixtures` files equal the Post's finished files, and the starting point of "ten files in `src` and two in `test`" matches Part 6's finished files
 - Steps 1–4 replayed on Part 6's finished files, with every state type-checking and the files after each step equal to the "Stuck?" files
