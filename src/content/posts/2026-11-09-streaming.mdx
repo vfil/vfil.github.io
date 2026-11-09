@@ -1,0 +1,3093 @@
+---
+title: 'Streaming'
+description: 'After Part 6 the agent prints a reply only once the model has written all of it. A model client that returns a stream of events lets the first words appear as they are produced, on every provider.'
+pubDate: 2026-11-09
+category: agentic-ai
+tags: [agents, effect, typescript, streaming, ollama]
+series: building-an-agent-from-scratch
+part: 7
+snapshot: Part7_Streaming
+draft: true
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+This Part changes the model client of the agent from [Part 6](/posts/services-and-layers/) so that it returns a stream of events instead of one reply, and the loop prints the text as it arrives. Each protocol decodes the server's messages into those events. It is the fifth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/), and the last one.
+
+The code for this Part is available as the [`Part7_Streaming` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part7_Streaming), the repo where I build this agent in parallel.
+
+## Start from the silence
+
+The agent from [Part 6](/posts/services-and-layers/) sends a request, waits until the model has written the whole reply, and only then prints it. A model writes one token at a time (a token is a word or a piece of a word), so the wait is as long as the reply. The same prompt, a story of about 400 words, against the Part 6 agent and the agent from this Part:
+
+| Server    | First text appears, Part 6 | First text appears, this Part | Whole reply, this Part |
+| --------- | -------------------------- | ----------------------------- | ---------------------- |
+| Ollama    | 8.7 s                      | 0.1 s                         | 9.4 s                  |
+| llama.cpp | 12.0 s                     | 0.2 s                         | 13.2 s                 |
+
+Streaming does not make the model faster. The reply finishes at about the same time, and the replies differ in length from run to run, so the last column is only a rough comparison. What changes is when the first words appear: at the start of the reply instead of at the end. The wait grows with the length of the reply and with slower hardware.
+
+This Part changes the agent in three places. The server is asked to send the reply in pieces. Each protocol decodes the pieces into a small set of events. The loop prints and collects the events as they arrive.
+
+## What the server sends
+
+Adding `"stream": true` to the request body changes how the server answers. Instead of one JSON document at the end, it keeps the connection open and writes the reply as a series of small messages. The format is _server-sent events_ (SSE): plain text in which each message is a line that starts with `data:`, followed by a blank line. OpenAI-style servers put one JSON chunk in each message. This is Ollama answering "Say hello in five words." The chunks carry an id, a creation time and the model name as well; the transcripts in this section leave those fields out:
+
+```text
+$ curl -sN http://127.0.0.1:11434/v1/chat/completions -H 'content-type: application/json' \
+    -d '{"model":"qwen3.5:9b","stream":true,"reasoning_effort":"none","messages":[{"role":"user","content":"Say hello in five words."}]}'
+data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":","},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":" nice"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":" to"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":" meet"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":" you"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"."},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+Each chunk's `delta` holds the next piece of the reply. The first chunk also names the role. The last chunk has an empty `delta` and a `finish_reason`, and `data: [DONE]` closes the stream.
+
+A tool call is the part of the reply that the two local servers send differently. Ollama, asked to read a file with a `read_file` tool defined, sends the call in one chunk:
+
+```text
+$ curl -sN http://127.0.0.1:11434/v1/chat/completions -H 'content-type: application/json' \
+    -d '{"model":"qwen3.5:9b","stream":true,"reasoning_effort":"none","tools":[{"type":"function","function":{"name":"read_file","description":"Reads a file and returns its text.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"messages":[{"role":"user","content":"Read the file notes/todo.txt"}]}'
+data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_erxo8g8t","index":0,"type":"function","function":{"name":"read_file","arguments":"{\"path\":\"notes/todo.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+```
+
+llama.cpp sends the same call in fragments:
+
+```text
+$ curl -sN http://127.0.0.1:9932/v1/chat/completions -H 'content-type: application/json' \
+    -d '{"model":"qwen3.5:9b","stream":true,"tools":[{"type":"function","function":{"name":"read_file","description":"Reads a file and returns its text.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"messages":[{"role":"user","content":"Read the file notes/todo.txt"}]}'
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}]}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"id":"lweYCONr7qLC7dbqrULRsZcuyviVrCTP","type":"function","function":{"name":"read_file","arguments":"{"}}]}}]}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\""}}]}}]}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"notes"}}]}}]}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"/todo"}}]}}]}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":".txt"}}]}}]}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\""}}]}}]}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}
+
+data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}]}
+
+data: [DONE]
+```
+
+The first fragment has the call's `id` and name. The later ones carry only an `index` that says which call they belong to, and a piece of the `arguments` text, cut wherever the model's tokens happened to end: `{`, then `"path":"`, then `notes`. The text of a fragment is not valid JSON by itself, and the whole is valid only after the last one. In these recordings the arguments from Ollama arrive complete and from llama.cpp in pieces, and the agent has to produce the same events for both.
+
+### The rules of server-sent events
+
+Anthropic's Messages API uses the same format with different JSON inside, and it also writes an `event:` line before each `data:` line to name the type. The rules come from the HTML Standard's section on parsing an event stream:
+
+- A message is a group of lines that ends with a blank line. A message with no `data:` line is dropped.
+- A line is `field: value`. One space after the colon is removed from the value. A line that starts with a colon is a comment. A field the reader does not know is ignored.
+- If a message has several `data:` lines, their values are joined with a newline.
+- If the stream ends before the blank line, the unfinished message is discarded.
+
+The parser in this Part follows those rules and skips the `id` and `retry` fields, which a model API does not use. Effect has an SSE module of its own, `effect/encoding/Sse`, which is marked unstable in 4.1.0. OpenCode's framing code builds on it ([ai/src/route/framing.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/framing.ts)). The parser here is about twenty lines and covers the rules above; swapping in the library later would change one file.
+
+## What streams add
+
+A _stream_ is the many-valued version of an Effect: instead of producing one value, it produces a sequence of them, one at a time, as they become available. Its type is `Stream<A, E, R>`: the values it produces, the error it can fail with and the services it needs, with the same `E` and `R` as an `Effect`. This section covers four ideas. Each snippet was run on its own on Effect 4.1.0 before it went into this Part. To follow along, save a snippet in a temporary file in `src` and delete it afterwards.
+
+### 1. A stream hands over its values as they are produced
+
+`Stream.make` builds a stream from fixed values. `Stream.mapEffect` runs an Effect on each value, here a wait. `Stream.runForEach` turns a stream into an Effect that calls a function on each value as it arrives, and finishes when the stream ends:
+
+```ts
+import { Effect, Stream } from "effect"
+
+const ticks = Stream.make("one", "two", "three").pipe(
+  Stream.mapEffect((word) => Effect.sleep("300 millis").pipe(Effect.as(word))),
+)
+// ticks: Stream<string>
+
+const start = Date.now()
+await Effect.runPromise(
+  Stream.runForEach(ticks, (word) => Effect.sync(() => console.log(`${Date.now() - start} ms: ${word}`))),
+)
+console.log(`${Date.now() - start} ms: done`)
+```
+
+```text
+$ bun src/ticks.ts
+302 ms: one
+604 ms: two
+907 ms: three
+908 ms: done
+```
+
+The values are handled one at a time, in order, each as soon as it exists. `"done"` prints only after the last one, because `runForEach` is an Effect that completes with the stream.
+
+### 2. A stream can fail after it has produced values
+
+`Stream.fail` ends a stream with an error. The values before it were already delivered, and the values after it never are:
+
+```ts
+import { Effect, Stream } from "effect"
+
+const broken = Stream.make(1, 2).pipe(Stream.concat(Stream.fail("connection reset")), Stream.concat(Stream.make(3)))
+// broken: Stream<number, string>
+
+const seen: number[] = []
+const result = await Effect.runPromise(
+  Stream.runForEach(broken, (n) => Effect.sync(() => void seen.push(n))).pipe(
+    Effect.match({ onSuccess: () => "finished", onFailure: (error) => `failed: ${error}` }),
+  ),
+)
+console.log(seen, result)
+```
+
+```text
+$ bun src/broken.ts
+[ 1, 2 ] failed: connection reset
+```
+
+The type of `broken` is `Stream<number, string>`. [Part 5](/posts/why-effect/)'s `Effect<A, E>` is either an `A` or an `E`. A `Stream<A, E>` can be some `A`s and then an `E`. A model reply that breaks off halfway is exactly that.
+
+### 3. Bytes become lines, wherever the pieces are cut
+
+An SSE stream has two levels of newline. A single newline ends a line, and the lines of a message hold its fields, such as `event:`, `data:` or `id:`. A blank line, which is two newlines in a row, ends the message, and that is where a parser can hand it over. The parser in Step 2 therefore cuts the stream into lines first and finds the messages afterwards.
+
+A network response arrives in pieces of whatever size the network delivered, and a piece can end in the middle of a line. `Stream.decodeText` turns bytes into text and `Stream.splitLines` turns text into lines. Here two messages are cut into three pieces, and the first two pieces end in the middle of a line:
+
+```ts
+import { Effect, Stream } from "effect"
+
+const bytes = new TextEncoder().encode("data: hello\n\ndata: ok\n\n")
+const pieces = [bytes.slice(0, 3), bytes.slice(3, 10), bytes.slice(10)]
+// pieces: "dat", "a: hell", "o\n\ndata: ok\n\n"
+
+const lines = Stream.fromIterable(pieces).pipe(Stream.decodeText(), Stream.splitLines)
+console.log(await Effect.runPromise(Stream.runCollect(lines)))
+```
+
+```text
+$ bun src/lines.ts
+[ "data: hello", "", "data: ok", "" ]
+```
+
+The output is whole lines, the same as if the bytes had arrived in one piece. `splitLines` keeps the incomplete end of a line until the rest of it arrives. `decodeText` does the same for a character that takes several bytes, such as `é`, when a piece ends between its bytes. `splitLines` also removes the newline at the end of each line, so two newlines in a row leave an empty string between them. That empty string is the blank line that ends a message, and Step 2 uses it to find where one message stops.
+
+### 4. A stream can carry state from one value to the next
+
+`Stream.mapAccum` takes a starting state and a function from the state and a value to a new state and a list of output values, which can be empty. The example puts the fragments of a tool call together and emits the text once it is complete:
+
+```ts
+import { Effect, Stream } from "effect"
+
+const fragments = Stream.make('{"pa', 'th":"no', 'tes/todo.txt"', "}")
+
+const complete = fragments.pipe(
+  Stream.mapAccum(
+    () => "",
+    (text, fragment) => {
+      const next = text + fragment
+      return [next, next.endsWith("}") ? [next] : []] as const
+    },
+  ),
+)
+console.log(await Effect.runPromise(Stream.runCollect(complete)))
+```
+
+```text
+$ bun src/fragments.ts
+[ "{\"path\":\"notes/todo.txt\"}" ]
+```
+
+Four fragments went in and one value came out. The function is an ordinary function of the state and a value, so it can be called and checked without a stream. Both protocols below are written as such functions. `mapAccum` also takes an `onHalt` option, a function that can emit more values when the input ends; this agent does not need it.
+
+## Six decisions in the rewrite
+
+### 1. Three events, and why not more
+
+What a step produces while the model is answering is called a _model event_ in this Part. The agent's stream carries three kinds:
+
+```ts
+// What a step produces while the model is answering. The agent builds its message from these events.
+export type FinishReason = "tool-calls" | "stop" | "refusal"
+
+export type ModelEvent =
+  | { type: "text-delta"; text: string }
+  | { type: "tool-call"; id: string; name: string; input: unknown }
+  // The last event of a step. `native` is the provider's own content, kept so the same protocol can send it back.
+  | { type: "finish"; reason: FinishReason; native?: unknown }
+```
+
+`text-delta` is a piece of text. `tool-call` is one complete call, with its arguments already assembled. `finish` ends the step and says why. Its `native` field is the provider's own content for the message, kept for the reason [Part 4](/posts/providers-behind-one-interface/) gave: Claude's thinking blocks have to be sent back unchanged.
+
+OpenCode's stream carries many more. It has start, delta and end events for text, for reasoning and for tool input, then tool results, step starts and finishes with token counts ([ai/src/schema/events.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/schema/events.ts#L313-L331)). A user interface that shows reasoning, or arguments as they are being written, needs them. This agent prints text and runs complete tool calls, so it needs three. Another event type would mean a case in the protocols that produce it and a case in the loop that handles it, and nothing else.
+
+### 2. One path: the reply is a stream
+
+In [Part 6](/posts/services-and-layers/), `ModelClient.chat` returned `Effect<Reply, ProviderError>`. It now returns `Stream<ModelEvent, ProviderError>`, and `Reply`, the function that decoded a whole JSON reply and the non-streaming call are deleted. Keeping a second path beside the first would mean two sets of protocol code that have to agree. A step is still exactly one model call: OpenCode's rule for its model package is that `ai.stream` and `ai.generate` each run one call ([ai/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/AGENTS.md)), and the stream is that one call's reply.
+
+### 3. A protocol turns frames into events with a step function
+
+A _frame_ is one SSE message: its `event` name, if it has one, and its `data` text. Cutting bytes into frames is the same for every server, so it lives in one file, `sse.ts`. What a frame means is the protocol's business. Each protocol has a step function from the state so far and a frame to the new state and the events that frame completed:
+
+|                               | OpenAI chat (Ollama, llama.cpp)                              | Anthropic Messages                                                                    |
+| ----------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| What a frame holds            | A chunk with `choices[0].delta`                              | An event with a `type` (also written on the `event:` line)                            |
+| Text                          | `delta.content`                                              | `content_block_delta` with a `text_delta`                                             |
+| Tool call fragments           | `delta.tool_calls[index]`; the id and name only in the first | `input_json_delta` for the block at `index`; the id and name in `content_block_start` |
+| A tool call is complete       | When `finish_reason` arrives                                 | At `content_block_stop`                                                               |
+| The step is over              | `finish_reason`, then `[DONE]`                               | `message_delta` with the `stop_reason`, then `message_stop`                           |
+| State the step function keeps | The calls whose arguments are still arriving                 | The content blocks received so far                                                    |
+
+One frame can complete several events: the last OpenAI chunk of a tool call finishes the call and also the step, so the function returns a list. A frame that completes nothing, such as one fragment of arguments, returns an empty list.
+
+A small helper, `reduce`, runs a step function over the frames with `Stream.mapAccum`. A step function that throws, for example on a frame that is not JSON, becomes a `ProviderError` there instead of crashing the program.
+
+### 4. The loop folds events into a message, and tools wait for the finish
+
+The loop gets a new function, `step`. It reads the stream with `Stream.runForEach` and builds the assistant message as the events arrive: text goes to the terminal at once and is also collected into a text part, a tool call is collected, and `finish` records the reason. `Terminal` gets a second output method, `write`, which prints without ending the line, because `say` always ends it. The agent writes `Agent: ` before the first piece of a text block and ends the line when the block is over.
+
+A tool call is complete before the step finishes, so the agent could start running it while the model is still writing. It does not. The tools run after `finish`, in order, as in Part 6. A call to `bash` asks `Allow? [y/N]`, and that question would otherwise appear in the middle of the model's sentence. Running tools early is a possible optimization once the rest works.
+
+### 5. A reply can break off in the middle
+
+Streaming adds failures that a single reply did not have. The connection can drop after some text was printed, a frame can fail to parse, and the stream can end without a `finish` event. All three become a `ProviderError`, the type that [Part 5](/posts/why-effect/) already handles: the turn is dropped from the history, and the user sees `[provider error]` and a reason. The text that was already printed stays on the screen. The agent ends its line first, so the error message starts on a line of its own. An error status before the stream starts is handled as in Part 6.
+
+The half-written message is not kept in the history. It could contain a tool call without a result, which breaks the pairing of calls and results that the protocols rely on (Part 5 cut failed turns from the history for the same reason). The user can send the prompt again.
+
+A stream that ends without a `finish` event is the one that needs a check, because nothing else fails. OpenCode's client has the same check, `requireTerminalEvent`, and also rejects events that arrive after the terminal one ([ai/src/route/client.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/client.ts#L331-L346)). The agent's `requireFinish` checks only that a `finish` arrived.
+
+### 6. Two kinds of test, and what each one covers
+
+The scripted model now streams events. A text reply is one `text-delta` per word, so the loop's tests see the same pieces a real model sends. Those tests cover the loop: that text is written in order, that the line is ended, that a failed turn leaves the history valid. They say nothing about the wire.
+
+The wire has its own tests. The streams recorded from Ollama and llama.cpp above are saved as fixture files and run through the framing and the OpenAI protocol. One test cuts each fixture at every possible byte position and checks that the events do not change, which covers the half-line and half-character cases from idea 3 on real data. A last group of tests runs `chat` against a small local server that sends a stream, cuts it off, sends bad JSON, or answers with an error status. Whether a model picks the right tool is still decided by running it, as in Part 6.
+
+## Check yourself
+
+<Quiz
+  question="What does the type `Stream<ModelEvent, ProviderError>` say that `Effect<Reply, ProviderError>` did not?"
+  options={["The reply arrives faster", "The step can fail after it has already produced some events", "The error has become optional", "The model client no longer needs a layer"]}
+  correct={1}
+  right="Right. An Effect is a value or an error. A Stream can be some values and then an error, which is what a reply that breaks off halfway looks like."
+  wrong="The type says nothing about speed, and the error is not optional. What a Stream adds is that values can come before the failure."
+/>
+
+<Quiz
+  question={"llama.cpp sends one tool call as several chunks: `{`, then `\"path\":\"`, then `notes`, and so on. When may the OpenAI protocol emit the `tool-call` event?"}
+  options={["After the first chunk, because it has the id and the name", "After every chunk, with the arguments received so far", "When the server says the call is complete, which on this protocol is the `finish_reason` chunk", "Only after the user confirms it"]}
+  correct={2}
+  right="Right. The arguments are not valid JSON until the last fragment has arrived. On the Anthropic protocol the same moment is the content_block_stop event."
+  wrong="Before the last fragment, the arguments are cut in the middle of a string. The tool call is complete when the server says so."
+/>
+
+<Quiz
+  question="A network chunk ends in the middle of a line, or between the two bytes of one character. Which code deals with it?"
+  options={["Each protocol's step function", "The framing in `sse.ts`, before any protocol sees a frame", "`fetch`, which only delivers whole lines", "The loop in `agent.ts`"]}
+  correct={1}
+  right="Right. decodeText and splitLines hold back the incomplete part, so a protocol only ever sees whole frames."
+  wrong="Protocols and the loop see whole frames and events. Cutting the bytes into frames is the one job of sse.ts."
+/>
+
+<Quiz
+  question="The connection breaks after the agent printed `Agent: The answer is`. What does the history contain afterwards?"
+  options={["An assistant message with the text `The answer is`", "Only the user's prompt", "What it contained before the prompt", "An error message from the model client"]}
+  correct={2}
+  right="Right. The failed turn is cut from the history, prompt included, as in Part 5. The text stays on the screen but not in the conversation."
+  wrong="repl cuts the history back to its length before the turn started. Neither the prompt nor the half reply stays."
+/>
+
+<Quiz
+  question="A step function returns the new state and a _list_ of events. Why a list?"
+  options={["Because `Stream` only accepts arrays", "So the events can be sent in parallel", "Because one frame can complete no event, one event, or several", "So that old events can be replayed"]}
+  correct={2}
+  right="Right. A fragment of arguments completes nothing. The last chunk of a tool call completes the call and the step, which is two events."
+  wrong="The list has nothing to do with parallelism or replay. A frame can complete zero events (a fragment) or two (a call and the end of the step)."
+/>
+
+## Your turn: streaming the reply
+
+Work in the `my-agent` folder from [Part 6](/posts/services-and-layers/), with its ten files in `src` and the two in `test`. This Part adds two files to `src`, two test files and a folder of fixtures, and changes seven of the existing files:
+
+| File                                                                | Change                                                                                     |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `src/events.ts`                                                     | New. `ModelEvent` and `FinishReason`                                                       |
+| `src/sse.ts`                                                        | New. `Frame` and `frames`, which cuts bytes into SSE messages                              |
+| `src/terminal.ts`                                                   | `Terminal` gains `write`                                                                   |
+| `src/model-client.ts`                                               | `chat` returns a `Stream` of events                                                        |
+| `src/protocols.ts`                                                  | `Reply` and `decode` go. Each protocol gets `events` and asks for a stream                 |
+| `src/provider.ts`                                                   | `chat` reads the response as a stream. `requireFinish` is added                            |
+| `src/agent.ts`                                                      | New `step`, which folds the events into a message. `turn` calls it                         |
+| `test/fakes.ts`, `test/agent.test.ts`                               | The scripted model streams events and the scripted terminal records writes. Two more tests |
+| `test/protocols.test.ts`, `test/provider.test.ts`, `test/fixtures/` | New. The recorded streams and the tests that use them                                      |
+
+`messages.ts`, `errors.ts`, `tool.ts`, `tools.ts` and `index.ts` do not change. Each step ends with code that type-checks and runs, so the work can stop after any of them.
+
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 6 November 2026 (see Measured at the end). The model's wording will differ.
+
+### Step 1: Events in the middle
+
+This step changes the loop, the service and the tests, and leaves the wire alone. The provider still reads the whole reply and then turns it into events, so the agent behaves as in Part 6. Create `src/events.ts` with the type from decision 1:
+
+```ts
+// What a step produces while the model is answering. The agent builds its message from these events.
+export type FinishReason = "tool-calls" | "stop" | "refusal"
+
+export type ModelEvent =
+  | { type: "text-delta"; text: string }
+  | { type: "tool-call"; id: string; name: string; input: unknown }
+  // The last event of a step. `native` is the provider's own content, kept so the same protocol can send it back.
+  | { type: "finish"; reason: FinishReason; native?: unknown }
+```
+
+`Terminal` gets `write`. In `src/terminal.ts`, add it to the service:
+
+```ts
+    readonly say: (line: string) => Effect.Effect<void>
+    // Prints text without ending the line, so a reply can appear piece by piece.
+    readonly write: (text: string) => Effect.Effect<void>
+```
+
+and to the live layer, next to `say`:
+
+```ts
+      say: (line) => Effect.sync(() => console.log(line)),
+      write: (text) => Effect.sync(() => void process.stdout.write(text)),
+```
+
+The model client changes its type. In `src/model-client.ts`, replace the imports and the service declaration up to `chat`:
+
+```ts
+import { Context, Effect, Layer, type Stream } from "effect"
+import type { ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step, as a stream of events. Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Stream.Stream<ModelEvent, ProviderError>
+```
+
+In `src/provider.ts`, the existing `chat` keeps its body and becomes `request`. Change the imports:
+
+```ts
+import { Effect, Stream } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol, type Reply } from "./protocols"
+import type { Tool } from "./tool"
+```
+
+Then rename the function. These are the first two lines of the existing `chat`, the comment and the line that opens the function:
+
+```ts
+// One step: one model call. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]) =>
+```
+
+Replace just those two lines with these two. The function is now called `request` and no longer exported, because only the new `chat` below will call it:
+
+```ts
+// One model call, answered in one piece. It fails with a ProviderError that the user reads; the model never sees it.
+const request = (route: Route, history: Message[], tools: Tool[]) =>
+```
+
+Everything after them, from `Effect.gen(function* () {` to the closing `})`, stays exactly as it is.
+
+At the end of the file, add a temporary function that turns a finished reply into the events a stream would have carried, and a new `chat` that returns them as a stream. `Stream.unwrap` turns an Effect that produces a stream into a stream. Step 2 replaces all three functions (`request`, `eventsOf` and this `chat`) once the wire streams for real:
+
+```ts
+// The reply as the events a stream would have carried. This is temporary: the wire is still read in one piece.
+const eventsOf = ({ message, finish }: Reply): ModelEvent[] => [
+  ...message.content.flatMap((part): ModelEvent[] =>
+    part.type === "text" ? [{ type: "text-delta", text: part.text }] : part.type === "tool-call" ? [part] : [],
+  ),
+  { type: "finish", reason: finish, native: message.native },
+]
+
+// One step: one model call, as a stream of events.
+export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.Stream<ModelEvent, ProviderError> =>
+  Stream.unwrap(Effect.map(request(route, history, tools), (reply) => Stream.fromIterable(eventsOf(reply))))
+```
+
+The loop changes the most. In `src/agent.ts`, replace the imports and add `step` above `turn`. It asks for the model client and the terminal, reads the stream with `Stream.runForEach` and builds the message as the events arrive. A text block ends when anything else arrives or when the stream ends, and `endText` is what adds the collected text to the message and ends the printed line:
+
+```ts
+import { Effect, Stream } from "effect"
+import { messageOf } from "./errors"
+import type { FinishReason } from "./events"
+import { isToolCall, type Message, type Part, type ToolResultPart } from "./messages"
+import { ModelClient } from "./model-client"
+import { Terminal } from "./terminal"
+import { runTool, Tools, type Tool } from "./tool"
+
+// One step: stream the model's events, show the text as it arrives, and build the assistant message from them.
+const step = (history: Message[], tools: Tool[]) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const content: Part[] = []
+    let text = "" // the text block being written, if any
+    const outcome: { finish: FinishReason; native?: unknown } = { finish: "stop" }
+
+    // A text block ends when anything else arrives, or when the stream does.
+    const endText = Effect.suspend(() => {
+      if (!text) return Effect.void
+      content.push({ type: "text", text })
+      text = ""
+      return terminal.say("")
+    })
+
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    )
+
+    const message: Message = { role: "assistant", content, ...(outcome.native === undefined ? {} : { native: outcome.native }) }
+    return { message, finish: outcome.finish }
+  })
+```
+
+`turn` uses `step` where it called `model.chat`. It no longer prints the text, because `step` already did. Replace the beginning of `turn`, up to the check on `finish`:
+
+```ts
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    const tools = yield* Tools
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* step(history, tools)
+      history.push(message)
+      if (finish !== "tool-calls") return
+```
+
+The rest of `turn` and all of `repl` are as they were.
+
+The scripted model in `test/fakes.ts` streams its script. A step is now a list of events, and a `ProviderError` in the list makes the stream fail at that point. `reply` sends one `text-delta` per word. The scripted terminal records the pieces passed to `write` in `writes`, and keeps `output` as the finished lines. Replace the file:
+
+```ts
+import { Effect, Layer, Stream } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { ModelEvent } from "../src/events"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import { Terminal } from "../src/terminal"
+
+// What the scripted model streams for one step, in order. A ProviderError makes the stream fail at that point.
+export type Step = Array<ModelEvent | ProviderError>
+
+// A text reply, streamed one word at a time.
+export const reply = (text: string): Step => [
+  ...text.split(/(?<= )/).map((word): ModelEvent => ({ type: "text-delta", text: word })),
+  { type: "finish", reason: "stop" },
+]
+
+export const callTool = (id: string, name: string, input: unknown): Step => [
+  { type: "tool-call", id, name, input },
+  { type: "finish", reason: "tool-calls" },
+]
+
+// A step that fails before sending anything.
+export const fail = (reason: string): Step => [new ProviderError({ reason })]
+
+// A model that follows a script and records the history it was given at each step.
+export const scriptedModel = (steps: Step[]) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const next = steps[requests.length - 1] ?? fail("The script has no reply left for this step")
+          return Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. When they run out, input ends.
+// `output` holds the finished lines; `writes` holds every piece passed to `write`, in order.
+export const scriptedTerminal = (answers: string[]) => {
+  const output: string[] = []
+  const writes: string[] = []
+  const queue = [...answers]
+  let pending = "" // text written since the last line ended
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(pending + prompt)
+          pending = ""
+          const next = queue.shift()
+          return next === undefined ? Effect.fail(new InputClosed()) : Effect.succeed(next)
+        }),
+      say: (line) =>
+        Effect.sync(() => {
+          output.push(pending + line)
+          pending = ""
+        }),
+      write: (text) =>
+        Effect.sync(() => {
+          writes.push(text)
+          pending += text
+        }),
+    }),
+  )
+  return { layer, output, writes }
+}
+```
+
+In `test/agent.test.ts`, import `fail` in place of using `ProviderError` directly, and return `writes` from `run`:
+
+```ts
+import { callTool, fail, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+```
+
+```ts
+  return { history, requests: model.requests, output: terminal.output, writes: terminal.writes }
+```
+
+Replace the model in the failing-model test with `model: [fail("connection refused")]`, delete the import of `ProviderError`, and add a test that the reply is written piece by piece:
+
+```ts
+  test("shows the reply piece by piece", async () => {
+    const { writes } = await run({ model: [reply("Hello there, friend.")], answers: ["hi"] })
+
+    expect(writes).toEqual(["Agent: ", "Hello ", "there, ", "friend."])
+  })
+```
+
+Run `bunx --package typescript tsc --noEmit` and `bun test`, then the agent. The four tests pass and the agent behaves as in Part 6: the loop receives events and the text still appears all at once, because the provider sends them all at once.
+
+```text
+$ bun test
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+ 4 pass
+ 0 fail
+ 8 expect() calls
+Ran 4 tests across 1 file. [49.00ms]
+```
+
+<details>
+<summary>Stuck? The finished events.ts, terminal.ts, model-client.ts, provider.ts and agent.ts</summary>
+
+`src/events.ts`
+
+```ts
+// What a step produces while the model is answering. The agent builds its message from these events.
+export type FinishReason = "tool-calls" | "stop" | "refusal"
+
+export type ModelEvent =
+  | { type: "text-delta"; text: string }
+  | { type: "tool-call"; id: string; name: string; input: unknown }
+  // The last event of a step. `native` is the provider's own content, kept so the same protocol can send it back.
+  | { type: "finish"; reason: FinishReason; native?: unknown }
+```
+
+`src/terminal.ts`
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import { createInterface } from "node:readline/promises"
+import { InputClosed } from "./errors"
+
+// What the agent needs from the person at the keyboard. Nothing here says readline.
+export class Terminal extends Context.Service<
+  Terminal,
+  {
+    // Asks one question. The type says it can fail: input may have ended.
+    readonly ask: (prompt: string) => Effect.Effect<string, InputClosed>
+    readonly say: (line: string) => Effect.Effect<void>
+    // Prints text without ending the line, so a reply can appear piece by piece.
+    readonly write: (text: string) => Effect.Effect<void>
+  }
+>()("@agent/Terminal") {}
+
+// The real terminal. Building the layer opens readline; the end of the program closes it.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const rl = yield* Effect.acquireRelease(
+      Effect.sync(() => createInterface({ input: process.stdin, output: process.stdout })),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    // A pending question never settles when input ends, so ending input is turned into a rejection.
+    const closed = new Promise<never>((_, reject) => rl.once("close", () => reject(new Error("input closed"))))
+    closed.catch(() => {})
+
+    return Terminal.of({
+      ask: (prompt) =>
+        Effect.tryPromise({
+          try: () => Promise.race([rl.question(prompt), closed]),
+          catch: () => new InputClosed(),
+        }),
+      say: (line) => Effect.sync(() => console.log(line)),
+      write: (text) => Effect.sync(() => void process.stdout.write(text)),
+    })
+  }),
+)
+```
+
+`src/model-client.ts`
+
+```ts
+import { Context, Effect, Layer, type Stream } from "effect"
+import type { ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step, as a stream of events. Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Stream.Stream<ModelEvent, ProviderError>
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools) })
+  }),
+)
+```
+
+`src/provider.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol, type Reply } from "./protocols"
+import type { Tool } from "./tool"
+
+type Env = Record<string, string | undefined>
+
+// A route binds a protocol to one provider's endpoint and authentication.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+})
+
+// PROVIDER picks the route. BASE_URL and MODEL override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model })
+}
+
+// One model call, answered in one piece. It fails with a ProviderError that the user reads; the model never sees it.
+const request = (route: Route, history: Message[], tools: Tool[]) =>
+  Effect.gen(function* () {
+    const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetch(`${route.baseUrl}${route.protocol.path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...route.headers },
+          body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+        }),
+      catch: unreachable,
+    })
+    const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+    if (!response.ok) return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+
+    return yield* Effect.try({
+      try: (): Reply => route.protocol.decode(JSON.parse(text)),
+      catch: (error) => new ProviderError({ reason: `Could not read the reply from ${route.baseUrl}: ${messageOf(error)}` }),
+    })
+  })
+
+// The reply as the events a stream would have carried. This is temporary: the wire is still read in one piece.
+const eventsOf = ({ message, finish }: Reply): ModelEvent[] => [
+  ...message.content.flatMap((part): ModelEvent[] =>
+    part.type === "text" ? [{ type: "text-delta", text: part.text }] : part.type === "tool-call" ? [part] : [],
+  ),
+  { type: "finish", reason: finish, native: message.native },
+]
+
+// One step: one model call, as a stream of events.
+export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.Stream<ModelEvent, ProviderError> =>
+  Stream.unwrap(Effect.map(request(route, history, tools), (reply) => Stream.fromIterable(eventsOf(reply))))
+```
+
+`src/agent.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { messageOf } from "./errors"
+import type { FinishReason } from "./events"
+import { isToolCall, type Message, type Part, type ToolResultPart } from "./messages"
+import { ModelClient } from "./model-client"
+import { Terminal } from "./terminal"
+import { runTool, Tools, type Tool } from "./tool"
+
+// One step: stream the model's events, show the text as it arrives, and build the assistant message from them.
+const step = (history: Message[], tools: Tool[]) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const content: Part[] = []
+    let text = "" // the text block being written, if any
+    const outcome: { finish: FinishReason; native?: unknown } = { finish: "stop" }
+
+    // A text block ends when anything else arrives, or when the stream does.
+    const endText = Effect.suspend(() => {
+      if (!text) return Effect.void
+      content.push({ type: "text", text })
+      text = ""
+      return terminal.say("")
+    })
+
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    )
+
+    const message: Message = { role: "assistant", content, ...(outcome.native === undefined ? {} : { native: outcome.native }) }
+    return { message, finish: outcome.finish }
+  })
+
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    const tools = yield* Tools
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* step(history, tools)
+      history.push(message)
+      if (finish !== "tool-calls") return
+
+      const results: ToolResultPart[] = []
+      for (const call of message.content.filter(isToolCall)) {
+        yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+        const result = yield* runTool(call)
+        if (result.result.type === "error") yield* terminal.say(`[error] ${result.result.value}`)
+        results.push(result)
+      }
+      history.push({ role: "tool", content: results })
+    }
+  })
+
+// The read-eval-print loop: read a line from the user, run a turn on it, print the output, and repeat.
+export const repl = (history: Message[]) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+
+      // A turn that fails is dropped from the history, so the next prompt starts from a consistent conversation.
+      const before = history.length
+      const drop = (label: string, reason: string) =>
+        Effect.suspend(() => {
+          history.length = before
+          return terminal.say(`[${label}] ${reason}`)
+        })
+
+      yield* turn(history, input).pipe(
+        Effect.catchTag("ProviderError", (error) => drop("provider error", error.message)),
+        Effect.catchDefect((defect) => drop("bug", messageOf(defect))),
+      )
+    }
+  }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
+```
+
+</details>
+
+### Step 2: Read the stream from the wire
+
+This step makes the server stream. It adds the framing, replaces the decoding in both protocols and makes `chat` read the response body as it arrives. Create `src/sse.ts`. `step` handles one line: a blank line ends a frame, and the other lines are fields. `frames` is the pipeline from bytes to frames, the ideas 3 and 4 from above:
+
+```ts
+import { Stream } from "effect"
+
+// One server-sent event: the optional name from its `event:` line and the text of its `data:` lines.
+export type Frame = { event?: string; data: string }
+
+// The lines of the event being read so far.
+type Pending = { event?: string; data: string[] }
+
+const step = (pending: Pending, line: string): readonly [Pending, Frame[]] => {
+  // A blank line ends the event. An event with no data lines is dropped.
+  if (line === "") return [{ data: [] }, pending.data.length ? [{ event: pending.event, data: pending.data.join("\n") }] : []]
+
+  // Every other line is `field: value`. A line that starts with a colon is a comment and has no field name.
+  const colon = line.indexOf(":")
+  if (colon <= 0) return [pending, []]
+  const field = line.slice(0, colon)
+  const value = line.slice(colon + 1).replace(/^ /, "")
+
+  if (field === "data") return [{ ...pending, data: [...pending.data, value] }, []]
+  if (field === "event") return [{ ...pending, event: value }, []]
+  return [pending, []]
+}
+
+// Cuts bytes into events. The bytes can be split anywhere, even inside a line or inside a character.
+export const frames = <E>(bytes: Stream.Stream<Uint8Array, E>): Stream.Stream<Frame, E> =>
+  bytes.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.mapAccum((): Pending => ({ data: [] }), step),
+  )
+```
+
+Now `src/protocols.ts`. Replace the imports, the `Reply` type and the `Protocol` type at the top of the file with the new `Protocol`, the `reduce` helper and the types for the OpenAI chunks. A protocol no longer has `decode`; it has `events`, from frames to model events:
+
+```ts
+import { Effect, Stream } from "effect"
+import { messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import { isToolCall, textOf, type Message } from "./messages"
+import type { Frame } from "./sse"
+import type { Tool } from "./tool"
+
+// A protocol turns the agent's types into one wire format, and the frames that come back into model events.
+export type Protocol = {
+  path: string
+  body: (model: string, history: Message[], tools: Tool[]) => unknown
+  events: (frames: Stream.Stream<Frame, ProviderError>) => Stream.Stream<ModelEvent, ProviderError>
+}
+
+// Folds the frames into events, one step per frame. The step gets the state so far and returns the new state
+// and the events this frame completed. A step that throws, for example on malformed JSON, becomes a ProviderError.
+const reduce =
+  <S>(initial: S, step: (state: S, frame: Frame) => readonly [S, ModelEvent[]]) =>
+  (frames: Stream.Stream<Frame, ProviderError>): Stream.Stream<ModelEvent, ProviderError> =>
+    frames.pipe(
+      Stream.mapAccumEffect(
+        () => initial,
+        (state, frame) =>
+          Effect.try({
+            try: () => step(state, frame),
+            catch: (error) => new ProviderError({ reason: `Could not read the stream: ${messageOf(error)}` }),
+          }),
+      ),
+    )
+
+// OpenAI Chat Completions: what Ollama and llama.cpp speak. Only this section knows its wire format.
+// Each chunk carries a `delta`: a piece of text, or a fragment of a tool call. Fragments of one call share an `index`.
+type OpenAIChunk = {
+  choices: {
+    delta: {
+      content?: string | null
+      tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[]
+    }
+    finish_reason: string | null
+  }[]
+}
+
+// A tool call whose arguments are still arriving.
+type PendingCall = { id: string; name: string; arguments: string }
+type OpenAIState = { calls: Record<number, PendingCall> }
+```
+
+The functions that build the request (`toOpenAITool`, `toOpenAIMessages`) and `parseArguments` stay. Replace `openaiChat` with its step function and the new protocol. `stream: true` in the body is what makes the server stream. The step function adds the text of each chunk as a `text-delta`, adds each fragment to the call with the same `index`, and when the `finish_reason` arrives it emits the finished calls and the end of the step:
+
+```ts
+const stepOpenAI = (state: OpenAIState, frame: Frame): readonly [OpenAIState, ModelEvent[]] => {
+  if (frame.data === "[DONE]") return [state, []]
+  const choice = (JSON.parse(frame.data) as OpenAIChunk).choices[0]
+  if (!choice) return [state, []]
+
+  const events: ModelEvent[] = []
+  if (choice.delta.content) events.push({ type: "text-delta", text: choice.delta.content })
+
+  // The id and the name arrive in the first fragment of a call. Later fragments only add to the arguments.
+  let calls = state.calls
+  for (const fragment of choice.delta.tool_calls ?? []) {
+    const call = calls[fragment.index] ?? { id: "", name: "", arguments: "" }
+    calls = {
+      ...calls,
+      [fragment.index]: {
+        id: fragment.id ?? call.id,
+        name: fragment.function?.name ?? call.name,
+        arguments: call.arguments + (fragment.function?.arguments ?? ""),
+      },
+    }
+  }
+
+  // The arguments are complete only when the model says it is done.
+  if (choice.finish_reason) {
+    const done = Object.values(calls)
+    for (const call of done) events.push({ type: "tool-call", id: call.id, name: call.name, input: parseArguments(call.arguments) })
+    events.push({ type: "finish", reason: done.length ? "tool-calls" : "stop" })
+  }
+  return [{ calls }, events]
+}
+
+export const openaiChat: Protocol = {
+  path: "/chat/completions",
+  body: (model, history, tools) => ({
+    model,
+    stream: true,
+    messages: history.flatMap(toOpenAIMessages),
+    reasoning_effort: "none",
+    tools: tools.map(toOpenAITool),
+  }),
+  events: reduce<OpenAIState>({ calls: {} }, stepOpenAI),
+}
+```
+
+The Anthropic protocol needs the same change. Replace the `AnthropicResponse` line, the type of the whole reply, with the types of the stream events and the state. The first line below, `AnthropicBlock`, is unchanged:
+
+```ts
+type AnthropicBlock = AnthropicText | AnthropicToolUse | { type: string } // e.g. thinking blocks
+
+// The events this agent reads. Each block of the answer is opened, extended by deltas, and closed.
+type AnthropicDelta =
+  | { type: "text_delta"; text: string }
+  | { type: "input_json_delta"; partial_json: string }
+  | { type: "thinking_delta"; thinking: string }
+  | { type: "signature_delta"; signature: string }
+type AnthropicEvent =
+  | { type: "content_block_start"; content_block: AnthropicBlock }
+  | { type: "content_block_delta"; index: number; delta: AnthropicDelta }
+  | { type: "content_block_stop"; index: number }
+  | { type: "message_delta"; delta: { stop_reason: string | null } }
+  | { type: "message_stop" }
+  | { type: "error"; error: { message: string } }
+  | { type: "message_start" | "ping" }
+
+// The blocks received so far, in order, and why the model stopped.
+type AnthropicState = { blocks: AnthropicBlock[]; stop: string | null }
+```
+
+and replace `anthropicMessages` with its step function and the protocol. The step function keeps the blocks received so far. While a `tool_use` block is open, its `input` holds the JSON text that has arrived, and `content_block_stop` replaces it with the parsed object. `finish` carries all the blocks as `native`, thinking blocks included, which is what the Anthropic encoder sends back in the next request:
+
+```ts
+const stepAnthropic = (state: AnthropicState, frame: Frame): readonly [AnthropicState, ModelEvent[]] => {
+  const event = JSON.parse(frame.data) as AnthropicEvent
+  // The same blocks with the block at `index` extended.
+  const extend = (index: number, extra: (block: AnthropicBlock) => object): AnthropicState => ({
+    ...state,
+    blocks: state.blocks.map((block, i) => (i === index ? { ...block, ...extra(block) } : block)),
+  })
+
+  switch (event.type) {
+    case "content_block_start": {
+      // While a tool_use block is open, its input holds the JSON text received so far.
+      const block = event.content_block.type === "tool_use" ? { ...event.content_block, input: "" } : event.content_block
+      return [{ ...state, blocks: [...state.blocks, block] }, []]
+    }
+    case "content_block_delta": {
+      const delta = event.delta
+      switch (delta.type) {
+        case "text_delta":
+          return [extend(event.index, (block) => ({ text: (isText(block) ? block.text : "") + delta.text })), delta.text ? [{ type: "text-delta", text: delta.text }] : []]
+        case "input_json_delta":
+          return [extend(event.index, (block) => ({ input: String(isToolUse(block) ? block.input : "") + delta.partial_json })), []]
+        case "thinking_delta":
+          return [extend(event.index, (block) => ({ thinking: String((block as { thinking?: string }).thinking ?? "") + delta.thinking })), []]
+        case "signature_delta":
+          return [extend(event.index, () => ({ signature: delta.signature })), []]
+      }
+      return [state, []]
+    }
+    case "content_block_stop": {
+      const block = state.blocks[event.index]
+      if (!block || !isToolUse(block)) return [state, []]
+      // The arguments are complete now. If no argument text arrived, the call has none.
+      const input = parseArguments(String(block.input) || "{}")
+      return [extend(event.index, () => ({ input })), [{ type: "tool-call", id: block.id, name: block.name, input }]]
+    }
+    case "message_delta":
+      return [{ ...state, stop: event.delta.stop_reason }, []]
+    case "message_stop": {
+      const reason = state.stop === "refusal" ? "refusal" : state.blocks.some(isToolUse) ? "tool-calls" : "stop"
+      return [state, [{ type: "finish", reason, native: state.blocks }]]
+    }
+    case "error":
+      throw new Error(event.error.message)
+    default:
+      return [state, []]
+  }
+}
+
+export const anthropicMessages: Protocol = {
+  path: "/v1/messages",
+  body: (model, history, tools) => ({
+    model,
+    stream: true,
+    max_tokens: 16000,
+    messages: history.map(toAnthropicMessage),
+    tools: tools.map(toAnthropicTool),
+  }),
+  events: reduce<AnthropicState>({ blocks: [], stop: null }, stepAnthropic),
+}
+```
+
+Last, `src/provider.ts`. Change the imports so they no longer mention `Reply` and add the framing:
+
+```ts
+import { Effect, Stream } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol } from "./protocols"
+import { frames } from "./sse"
+import type { Tool } from "./tool"
+```
+
+and replace everything from the comment above `request` to the end of the file. `requireFinish` fails a stream that ended without a `finish` event. `chat` sends the request and checks the status. An error status is read as text and fails before any event, as in Part 6. For a good status, the response body becomes a stream of bytes, the bytes become frames, the protocol turns the frames into events, and `requireFinish` watches the result. A failure to read the body is reported with `onError`:
+
+```ts
+// A stream that ends without a finish event was cut off.
+const requireFinish = (route: Route) => (events: Stream.Stream<ModelEvent, ProviderError>) =>
+  Stream.suspend(() => {
+    let finished = false
+    return events.pipe(
+      Stream.tap((event) =>
+        Effect.sync(() => {
+          if (event.type === "finish") finished = true
+        }),
+      ),
+      Stream.onEnd(
+        Effect.suspend(() =>
+          finished ? Effect.void : Effect.fail(new ProviderError({ reason: `The stream from ${route.baseUrl} ended before the model finished` })),
+        ),
+      ),
+    )
+  })
+
+// One step: one model call, as a stream of events. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.Stream<ModelEvent, ProviderError> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetch(`${route.baseUrl}${route.protocol.path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...route.headers },
+            body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+          }),
+        catch: unreachable,
+      })
+      const body = response.body
+      if (!response.ok || !body) {
+        const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+        return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+      }
+
+      // From here on, the answer is still being written. A failure now happens in the middle of a reply.
+      const bytes = Stream.fromReadableStream({
+        evaluate: () => body,
+        onError: (error) => new ProviderError({ reason: `The stream from ${route.baseUrl} broke off: ${messageOf(error)}` }),
+      })
+      return route.protocol.events(frames(bytes)).pipe(requireFinish(route))
+    }),
+  )
+```
+
+Run `bunx --package typescript tsc --noEmit` and `bun test`: the four tests still pass, because the scripted model never reaches the wire. Then run the agent on Ollama and ask for something long, such as `Write a story of about 400 words about a robot learning to bake bread.` The text should start to appear after a fraction of a second and grow while the model writes. On llama.cpp, start the server with `--reasoning off` as in [Part 1](/posts/the-loop/), and run `PROVIDER=llamacpp bun ../src/index.ts` from the `playground` folder.
+
+<details>
+<summary>Stuck? The finished sse.ts, protocols.ts and provider.ts</summary>
+
+`src/sse.ts`
+
+```ts
+import { Stream } from "effect"
+
+// One server-sent event: the optional name from its `event:` line and the text of its `data:` lines.
+export type Frame = { event?: string; data: string }
+
+// The lines of the event being read so far.
+type Pending = { event?: string; data: string[] }
+
+const step = (pending: Pending, line: string): readonly [Pending, Frame[]] => {
+  // A blank line ends the event. An event with no data lines is dropped.
+  if (line === "") return [{ data: [] }, pending.data.length ? [{ event: pending.event, data: pending.data.join("\n") }] : []]
+
+  // Every other line is `field: value`. A line that starts with a colon is a comment and has no field name.
+  const colon = line.indexOf(":")
+  if (colon <= 0) return [pending, []]
+  const field = line.slice(0, colon)
+  const value = line.slice(colon + 1).replace(/^ /, "")
+
+  if (field === "data") return [{ ...pending, data: [...pending.data, value] }, []]
+  if (field === "event") return [{ ...pending, event: value }, []]
+  return [pending, []]
+}
+
+// Cuts bytes into events. The bytes can be split anywhere, even inside a line or inside a character.
+export const frames = <E>(bytes: Stream.Stream<Uint8Array, E>): Stream.Stream<Frame, E> =>
+  bytes.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.mapAccum((): Pending => ({ data: [] }), step),
+  )
+```
+
+`src/protocols.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import { isToolCall, textOf, type Message } from "./messages"
+import type { Frame } from "./sse"
+import type { Tool } from "./tool"
+
+// A protocol turns the agent's types into one wire format, and the frames that come back into model events.
+export type Protocol = {
+  path: string
+  body: (model: string, history: Message[], tools: Tool[]) => unknown
+  events: (frames: Stream.Stream<Frame, ProviderError>) => Stream.Stream<ModelEvent, ProviderError>
+}
+
+// Folds the frames into events, one step per frame. The step gets the state so far and returns the new state
+// and the events this frame completed. A step that throws, for example on malformed JSON, becomes a ProviderError.
+const reduce =
+  <S>(initial: S, step: (state: S, frame: Frame) => readonly [S, ModelEvent[]]) =>
+  (frames: Stream.Stream<Frame, ProviderError>): Stream.Stream<ModelEvent, ProviderError> =>
+    frames.pipe(
+      Stream.mapAccumEffect(
+        () => initial,
+        (state, frame) =>
+          Effect.try({
+            try: () => step(state, frame),
+            catch: (error) => new ProviderError({ reason: `Could not read the stream: ${messageOf(error)}` }),
+          }),
+      ),
+    )
+
+// OpenAI Chat Completions: what Ollama and llama.cpp speak. Only this section knows its wire format.
+// Each chunk carries a `delta`: a piece of text, or a fragment of a tool call. Fragments of one call share an `index`.
+type OpenAIChunk = {
+  choices: {
+    delta: {
+      content?: string | null
+      tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[]
+    }
+    finish_reason: string | null
+  }[]
+}
+
+// A tool call whose arguments are still arriving.
+type PendingCall = { id: string; name: string; arguments: string }
+type OpenAIState = { calls: Record<number, PendingCall> }
+
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+
+const toOpenAIMessages = (message: Message): unknown[] => {
+  if (message.role === "tool") {
+    // One role: "tool" message per result. There is no error flag, so the text carries the failure.
+    return message.content.flatMap((part) =>
+      part.type === "tool-result"
+        ? [{ role: "tool", tool_call_id: part.id, content: part.result.type === "error" ? `Error: ${part.result.value}` : part.result.value }]
+        : [],
+    )
+  }
+  if (message.role === "assistant") {
+    const calls = message.content.filter(isToolCall).map((call) => ({
+      id: call.id,
+      type: "function",
+      // A string input is raw text that did not parse; send it back as it came.
+      function: { name: call.name, arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input) },
+    }))
+    return [{ role: "assistant", content: textOf(message) || null, ...(calls.length ? { tool_calls: calls } : {}) }]
+  }
+  return [{ role: "user", content: textOf(message) }]
+}
+
+// Arguments arrive as a JSON string. If it does not parse, keep the raw text as the input.
+const parseArguments = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+const stepOpenAI = (state: OpenAIState, frame: Frame): readonly [OpenAIState, ModelEvent[]] => {
+  if (frame.data === "[DONE]") return [state, []]
+  const choice = (JSON.parse(frame.data) as OpenAIChunk).choices[0]
+  if (!choice) return [state, []]
+
+  const events: ModelEvent[] = []
+  if (choice.delta.content) events.push({ type: "text-delta", text: choice.delta.content })
+
+  // The id and the name arrive in the first fragment of a call. Later fragments only add to the arguments.
+  let calls = state.calls
+  for (const fragment of choice.delta.tool_calls ?? []) {
+    const call = calls[fragment.index] ?? { id: "", name: "", arguments: "" }
+    calls = {
+      ...calls,
+      [fragment.index]: {
+        id: fragment.id ?? call.id,
+        name: fragment.function?.name ?? call.name,
+        arguments: call.arguments + (fragment.function?.arguments ?? ""),
+      },
+    }
+  }
+
+  // The arguments are complete only when the model says it is done.
+  if (choice.finish_reason) {
+    const done = Object.values(calls)
+    for (const call of done) events.push({ type: "tool-call", id: call.id, name: call.name, input: parseArguments(call.arguments) })
+    events.push({ type: "finish", reason: done.length ? "tool-calls" : "stop" })
+  }
+  return [{ calls }, events]
+}
+
+export const openaiChat: Protocol = {
+  path: "/chat/completions",
+  body: (model, history, tools) => ({
+    model,
+    stream: true,
+    messages: history.flatMap(toOpenAIMessages),
+    reasoning_effort: "none",
+    tools: tools.map(toOpenAITool),
+  }),
+  events: reduce<OpenAIState>({ calls: {} }, stepOpenAI),
+}
+
+// Anthropic Messages: what Claude speaks.
+type AnthropicText = { type: "text"; text: string }
+type AnthropicToolUse = { type: "tool_use"; id: string; name: string; input: unknown }
+type AnthropicBlock = AnthropicText | AnthropicToolUse | { type: string } // e.g. thinking blocks
+
+// The events this agent reads. Each block of the answer is opened, extended by deltas, and closed.
+type AnthropicDelta =
+  | { type: "text_delta"; text: string }
+  | { type: "input_json_delta"; partial_json: string }
+  | { type: "thinking_delta"; thinking: string }
+  | { type: "signature_delta"; signature: string }
+type AnthropicEvent =
+  | { type: "content_block_start"; content_block: AnthropicBlock }
+  | { type: "content_block_delta"; index: number; delta: AnthropicDelta }
+  | { type: "content_block_stop"; index: number }
+  | { type: "message_delta"; delta: { stop_reason: string | null } }
+  | { type: "message_stop" }
+  | { type: "error"; error: { message: string } }
+  | { type: "message_start" | "ping" }
+
+// The blocks received so far, in order, and why the model stopped.
+type AnthropicState = { blocks: AnthropicBlock[]; stop: string | null }
+
+const isText = (block: AnthropicBlock): block is AnthropicText => block.type === "text"
+const isToolUse = (block: AnthropicBlock): block is AnthropicToolUse => block.type === "tool_use"
+
+// Same name and description as every other tool, but the schema is called input_schema.
+const toAnthropicTool = (tool: Tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })
+
+const toAnthropicMessage = (message: Message): unknown => {
+  if (message.role === "tool") {
+    // All the results of a step go back in one user message, and failures carry is_error.
+    return {
+      role: "user",
+      content: message.content.flatMap((part) =>
+        part.type === "tool-result"
+          ? [{ type: "tool_result", tool_use_id: part.id, content: part.result.value, is_error: part.result.type === "error" }]
+          : [],
+      ),
+    }
+  }
+  if (message.role === "assistant") {
+    // Send back exactly what the model produced, thinking blocks included, when we kept it.
+    if (message.native) return { role: "assistant", content: message.native }
+    return {
+      role: "assistant",
+      content: message.content.flatMap((part): unknown[] =>
+        part.type === "text"
+          ? [{ type: "text", text: part.text }]
+          : part.type === "tool-call"
+            ? [{ type: "tool_use", id: part.id, name: part.name, input: part.input }]
+            : [],
+      ),
+    }
+  }
+  return { role: "user", content: textOf(message) }
+}
+
+const stepAnthropic = (state: AnthropicState, frame: Frame): readonly [AnthropicState, ModelEvent[]] => {
+  const event = JSON.parse(frame.data) as AnthropicEvent
+  // The same blocks with the block at `index` extended.
+  const extend = (index: number, extra: (block: AnthropicBlock) => object): AnthropicState => ({
+    ...state,
+    blocks: state.blocks.map((block, i) => (i === index ? { ...block, ...extra(block) } : block)),
+  })
+
+  switch (event.type) {
+    case "content_block_start": {
+      // While a tool_use block is open, its input holds the JSON text received so far.
+      const block = event.content_block.type === "tool_use" ? { ...event.content_block, input: "" } : event.content_block
+      return [{ ...state, blocks: [...state.blocks, block] }, []]
+    }
+    case "content_block_delta": {
+      const delta = event.delta
+      switch (delta.type) {
+        case "text_delta":
+          return [extend(event.index, (block) => ({ text: (isText(block) ? block.text : "") + delta.text })), delta.text ? [{ type: "text-delta", text: delta.text }] : []]
+        case "input_json_delta":
+          return [extend(event.index, (block) => ({ input: String(isToolUse(block) ? block.input : "") + delta.partial_json })), []]
+        case "thinking_delta":
+          return [extend(event.index, (block) => ({ thinking: String((block as { thinking?: string }).thinking ?? "") + delta.thinking })), []]
+        case "signature_delta":
+          return [extend(event.index, () => ({ signature: delta.signature })), []]
+      }
+      return [state, []]
+    }
+    case "content_block_stop": {
+      const block = state.blocks[event.index]
+      if (!block || !isToolUse(block)) return [state, []]
+      // The arguments are complete now. If no argument text arrived, the call has none.
+      const input = parseArguments(String(block.input) || "{}")
+      return [extend(event.index, () => ({ input })), [{ type: "tool-call", id: block.id, name: block.name, input }]]
+    }
+    case "message_delta":
+      return [{ ...state, stop: event.delta.stop_reason }, []]
+    case "message_stop": {
+      const reason = state.stop === "refusal" ? "refusal" : state.blocks.some(isToolUse) ? "tool-calls" : "stop"
+      return [state, [{ type: "finish", reason, native: state.blocks }]]
+    }
+    case "error":
+      throw new Error(event.error.message)
+    default:
+      return [state, []]
+  }
+}
+
+export const anthropicMessages: Protocol = {
+  path: "/v1/messages",
+  body: (model, history, tools) => ({
+    model,
+    stream: true,
+    max_tokens: 16000,
+    messages: history.map(toAnthropicMessage),
+    tools: tools.map(toAnthropicTool),
+  }),
+  events: reduce<AnthropicState>({ blocks: [], stop: null }, stepAnthropic),
+}
+```
+
+`src/provider.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol } from "./protocols"
+import { frames } from "./sse"
+import type { Tool } from "./tool"
+
+type Env = Record<string, string | undefined>
+
+// A route binds a protocol to one provider's endpoint and authentication.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+})
+
+// PROVIDER picks the route. BASE_URL and MODEL override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model })
+}
+
+// A stream that ends without a finish event was cut off.
+const requireFinish = (route: Route) => (events: Stream.Stream<ModelEvent, ProviderError>) =>
+  Stream.suspend(() => {
+    let finished = false
+    return events.pipe(
+      Stream.tap((event) =>
+        Effect.sync(() => {
+          if (event.type === "finish") finished = true
+        }),
+      ),
+      Stream.onEnd(
+        Effect.suspend(() =>
+          finished ? Effect.void : Effect.fail(new ProviderError({ reason: `The stream from ${route.baseUrl} ended before the model finished` })),
+        ),
+      ),
+    )
+  })
+
+// One step: one model call, as a stream of events. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.Stream<ModelEvent, ProviderError> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetch(`${route.baseUrl}${route.protocol.path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...route.headers },
+            body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+          }),
+        catch: unreachable,
+      })
+      const body = response.body
+      if (!response.ok || !body) {
+        const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+        return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+      }
+
+      // From here on, the answer is still being written. A failure now happens in the middle of a reply.
+      const bytes = Stream.fromReadableStream({
+        evaluate: () => body,
+        onError: (error) => new ProviderError({ reason: `The stream from ${route.baseUrl} broke off: ${messageOf(error)}` }),
+      })
+      return route.protocol.events(frames(bytes)).pipe(requireFinish(route))
+    }),
+  )
+```
+
+</details>
+
+### Step 3: Tests for the stream
+
+Step 2 was checked by watching. This step adds tests that run without a server. Save the five recorded streams in `test/fixtures/` (they are at the end of this Part): `ollama-text.sse`, `ollama-tool.sse`, `llamacpp-text.sse`, `llamacpp-tool.sse` and `claude-tool.sse`. The first four were recorded from the servers with curl, as in the commands shown earlier. The last is an Anthropic stream with a thinking block, a text block, a tool call whose arguments arrive in three fragments, and a second tool call with none.
+
+`test/protocols.test.ts` runs each fixture through `frames` and the protocol, and checks the events. One test cuts each fixture in two at every byte position and checks that the events are the same as for the uncut bytes. Another cuts a message in the middle of the letter `é`. The helper `fixture` puts back the blank line that ends the last message of a stream, which a copy of a fixture from this Part can lose:
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Stream } from "effect"
+import { anthropicMessages, openaiChat, type Protocol } from "../src/protocols"
+import { frames } from "../src/sse"
+
+// The last message of a stream ends with a blank line. A fixture copied from a web page can lose it, so it is added back.
+const fixture = async (name: string) => {
+  const text = await Bun.file(new URL(`./fixtures/${name}`, import.meta.url)).text()
+  return new TextEncoder().encode(text.trimEnd() + "\n\n")
+}
+
+// Cuts bytes into pieces at the given positions.
+const cutAt = (bytes: Uint8Array, positions: number[]) =>
+  [0, ...positions].map((start, i) => bytes.slice(start, positions[i] ?? bytes.length))
+
+// Runs recorded bytes through the framing and a protocol.
+const decode = (protocol: Protocol, bytes: Uint8Array, positions: number[] = []) =>
+  Effect.runPromise(protocol.events(frames(Stream.fromIterable(cutAt(bytes, positions)))).pipe(Stream.runCollect))
+
+describe("OpenAI chat protocol", () => {
+  test("Ollama streams text a piece at a time", async () => {
+    const events = await decode(openaiChat, await fixture("ollama-text.sse"))
+
+    expect(events.map((event) => (event.type === "text-delta" ? event.text : event.type))).toEqual([
+      "Hello", ",", " nice", " to", " meet", " you", ".", "finish",
+    ])
+    expect(events.at(-1)).toEqual({ type: "finish", reason: "stop" })
+  })
+
+  test("llama.cpp skips the empty first chunk and ends with a finish", async () => {
+    const events = await decode(openaiChat, await fixture("llamacpp-text.sse"))
+
+    expect(events.map((event) => (event.type === "text-delta" ? event.text : event.type)).join("")).toBe("Hello from an AI assistant.finish")
+  })
+
+  test("llama.cpp sends a tool call in fragments, and one tool-call event comes out", async () => {
+    const events = await decode(openaiChat, await fixture("llamacpp-tool.sse"))
+
+    expect(events).toEqual([
+      { type: "tool-call", id: "lweYCONr7qLC7dbqrULRsZcuyviVrCTP", name: "read_file", input: { path: "notes/todo.txt" } },
+      { type: "finish", reason: "tool-calls" },
+    ])
+  })
+
+  test("Ollama sends a tool call whole, and the events have the same shape", async () => {
+    const events = await decode(openaiChat, await fixture("ollama-tool.sse"))
+
+    expect(events).toEqual([
+      { type: "tool-call", id: "call_erxo8g8t", name: "read_file", input: { path: "notes/todo.txt" } },
+      { type: "finish", reason: "tool-calls" },
+    ])
+  })
+})
+
+describe("Anthropic Messages protocol", () => {
+  test("streams text, assembles tool calls, and keeps every block for replay", async () => {
+    const events = await decode(anthropicMessages, await fixture("claude-tool.sse"))
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "I'll read" },
+      { type: "text-delta", text: " the file." },
+      { type: "tool-call", id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6", name: "read_file", input: { path: "notes/todo.txt" } },
+      { type: "tool-call", id: "toolu_01B2x2gK45rBnl3uOsO8Vq7", name: "list_files", input: {} },
+      {
+        type: "finish",
+        reason: "tool-calls",
+        native: [
+          { type: "thinking", thinking: "The user wants the notes.", signature: "EqQBCgIYAhIM" },
+          { type: "text", text: "I'll read the file." },
+          { type: "tool_use", id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6", name: "read_file", input: { path: "notes/todo.txt" } },
+          { type: "tool_use", id: "toolu_01B2x2gK45rBnl3uOsO8Vq7", name: "list_files", input: {} },
+        ],
+      },
+    ])
+  })
+})
+
+describe("framing", () => {
+  test("the events do not depend on where the bytes are cut", async () => {
+    for (const [protocol, name] of [
+      [openaiChat, "llamacpp-tool.sse"],
+      [anthropicMessages, "claude-tool.sse"],
+    ] as const) {
+      const bytes = await fixture(name)
+      const whole = await decode(protocol, bytes)
+      for (let at = 1; at < bytes.length; at++) {
+        expect(await decode(protocol, bytes, [at])).toEqual(whole)
+      }
+    }
+  })
+
+  test("a character can be split between two pieces", async () => {
+    const bytes = new TextEncoder().encode("data: héllo\n\n")
+    const at = bytes.indexOf(0xc3) + 1 // between the two bytes of é
+
+    const result = await Effect.runPromise(Stream.runCollect(frames(Stream.fromIterable(cutAt(bytes, [at])))))
+
+    expect(result).toEqual([{ event: undefined, data: "héllo" }])
+  })
+
+  test("data lines join with a newline, and comments and unknown fields are ignored", async () => {
+    const bytes = new TextEncoder().encode(": keep-alive\nevent: note\nid: 7\ndata: one\ndata: two\n\n")
+
+    const result = await Effect.runPromise(Stream.runCollect(frames(Stream.fromIterable([bytes]))))
+
+    expect(result).toEqual([{ event: "note", data: "one\ntwo" }])
+  })
+})
+```
+
+`test/provider.test.ts` runs `chat` against a small local server (`Bun.serve` on a free port) that sends a stream, sends one that stops before the end, sends a frame that is not JSON, answers with a 404, or is not running at all. `step` collects the events and the error message, so a test can check both what arrived before the failure and how it ended:
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Stream } from "effect"
+import type { ModelEvent } from "../src/events"
+import { openaiChat } from "../src/protocols"
+import { chat, type Route } from "../src/provider"
+
+const sse = (...lines: string[]) => lines.map((line) => `${line}\n\n`).join("")
+
+const chunk = (delta: object, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}`
+
+// Serves one canned answer, runs one step against it, and reports what arrived and how the step ended:
+// the error message, or an empty string when the step finished.
+const step = async (respond: (request: Request) => Response | Promise<Response>, baseUrl?: string) => {
+  const server = Bun.serve({ port: 0, fetch: respond })
+  const route: Route = { protocol: openaiChat, baseUrl: baseUrl ?? `http://127.0.0.1:${server.port}`, headers: {}, model: "test" }
+  const events: ModelEvent[] = []
+  try {
+    const failure = await Effect.runPromise(
+      Stream.runForEach(chat(route, [], []), (event) => Effect.sync(() => void events.push(event))).pipe(
+        Effect.as(""),
+        Effect.catchTag("ProviderError", (error) => Effect.succeed(error.message)),
+      ),
+    )
+    return { events, failure }
+  } finally {
+    await server.stop(true)
+  }
+}
+
+describe("one step over HTTP", () => {
+  test("asks for a stream and delivers the events", async () => {
+    let sent: { stream?: boolean } = {}
+    const { events, failure } = await step(async (request) => {
+      sent = (await request.json()) as { stream?: boolean }
+      return new Response(sse(chunk({ content: "Hi" }), chunk({ content: "!" }), chunk({}, "stop"), "data: [DONE]"))
+    })
+
+    expect(failure).toBe("")
+    expect(events).toEqual([
+      { type: "text-delta", text: "Hi" },
+      { type: "text-delta", text: "!" },
+      { type: "finish", reason: "stop" },
+    ])
+    expect(sent.stream).toBe(true)
+  })
+
+  test("fails when the stream ends before the model finishes, after delivering what arrived", async () => {
+    const { events, failure } = await step(() => new Response(sse(chunk({ content: "The answer" }), chunk({ content: " is" }))))
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "The answer" },
+      { type: "text-delta", text: " is" },
+    ])
+    expect(failure).toContain("ended before the model finished")
+  })
+
+  test("fails on a frame that is not JSON", async () => {
+    const { failure } = await step(() => new Response(sse(chunk({ content: "ok" }), "data: {oops")))
+
+    expect(failure).toContain("Could not read the stream")
+  })
+
+  test("reports the server's answer when the status is an error", async () => {
+    const { events, failure } = await step(() => new Response("model not found", { status: 404 }))
+
+    expect(events).toEqual([])
+    expect(failure).toContain("answered 404: model not found")
+  })
+
+  test("reports a server that is not running", async () => {
+    const { failure } = await step(() => new Response(""), "http://127.0.0.1:1")
+
+    expect(failure).toContain("Could not reach")
+  })
+})
+```
+
+The loop needs a test too. When the stream fails after some text was printed, the history is dropped and the error is reported. Add this to `test/agent.test.ts`, importing `ProviderError` from `../src/errors`. The scripted step sends one `text-delta` and then fails:
+
+```ts
+  test("ends the line of a reply that breaks off, then drops the turn", async () => {
+    const { history, output } = await run({
+      model: [[{ type: "text-delta", text: "The answer is" }, new ProviderError({ reason: "connection reset" })]],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(output).toContain("Agent: The answer is")
+    expect(output).toContain("[provider error] connection reset")
+  })
+```
+
+Run it before changing anything else. The test fails, and the output shows a problem that Step 2 left in the loop:
+
+```text
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+test/agent.test.ts:
+68 |       model: [[{ type: "text-delta", text: "The answer is" }, new ProviderError({ reason: "connection reset" })]],
+69 |       answers: ["hello"],
+70 |     })
+71 |
+72 |     expect(history).toEqual([])
+73 |     expect(output).toContain("Agent: The answer is")
+                        ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "Agent: The answer is"
+Received: [ "You: ", "Agent: The answer is[provider error] connection reset", "You: " ]
+
+      at <anonymous> (/Users/vladex/PLAYGROUND/opencode/lessons/project/part-7/test/agent.test.ts:73:20)
+(fail) the agent loop > ends the line of a reply that breaks off, then drops the turn [0.29ms]
+
+ 17 pass
+ 1 fail
+ 5372 expect() calls
+Ran 18 tests across 3 files. [163.00ms]
+error: script "test" exited with code 1
+```
+
+The text was written with `write`, which does not end the line. The error then arrives and `repl` prints `[provider error] ...` with `say` on the same line. `step` ended the line only when an event other than text arrived or when the stream finished, and a failed stream does neither. `Effect.ensuring` runs an Effect whatever way the Effect it is attached to ends. Attach `endText` to the stream's `runForEach`:
+
+```ts
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    ).pipe(Effect.ensuring(endText))
+```
+
+and update the comment above `endText`:
+
+```ts
+    // A text block ends when anything else arrives, or when the stream does, even by failing.
+```
+
+`endText` does nothing when the block has already ended, so the normal path is unchanged. Run the tests again:
+
+```text
+$ bun test
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+ 18 pass
+ 0 fail
+ 5373 expect() calls
+Ran 18 tests across 3 files. [153.00ms]
+```
+
+The number of `expect()` calls is large because of the test that cuts each fixture at every byte position.
+
+<details>
+<summary>Stuck? The five fixtures</summary>
+
+`test/fixtures/ollama-text.sse`
+
+```text
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":","},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":" nice"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":" to"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":" meet"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":" you"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-862","object":"chat.completion.chunk","created":1793987151,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+`test/fixtures/ollama-tool.sse`
+
+```text
+data: {"id":"chatcmpl-479","object":"chat.completion.chunk","created":1793987152,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_erxo8g8t","index":0,"type":"function","function":{"name":"read_file","arguments":"{\"path\":\"notes/todo.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-479","object":"chat.completion.chunk","created":1793987152,"model":"qwen3.5:9b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+```
+
+`test/fixtures/llamacpp-text.sse`
+
+```text
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}],"created":1793987166,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":"Hello"}}],"created":1793987166,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":" from"}}],"created":1793987166,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":" an"}}],"created":1793987167,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":" AI"}}],"created":1793987167,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":" assistant"}}],"created":1793987167,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":"."}}],"created":1793987167,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":"stop","index":0,"delta":{}}],"created":1793987167,"id":"chatcmpl-WQdUL5TFNGdNMm1L7L5m0jfKzmPWn6Zw","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk","timings":{"cache_n":0,"prompt_n":18,"prompt_ms":143.024,"prompt_per_token_ms":7.945777777777778,"prompt_per_second":125.8530036916881,"predicted_n":7,"predicted_ms":114.514,"predicted_per_token_ms":16.359142857142857,"predicted_per_second":61.12789702569118}}
+
+data: [DONE]
+```
+
+`test/fixtures/llamacpp-tool.sse`
+
+```text
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}],"created":1793987167,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"id":"lweYCONr7qLC7dbqrULRsZcuyviVrCTP","type":"function","function":{"name":"read_file","arguments":"{"}}]}}],"created":1793987167,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\""}}]}}],"created":1793987167,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"notes"}}]}}],"created":1793987167,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"/todo"}}]}}],"created":1793987167,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":".txt"}}]}}],"created":1793987167,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\""}}]}}],"created":1793987168,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}],"created":1793987168,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}],"created":1793987168,"id":"chatcmpl-LDQSxYMPy3YrglEr3bXmreqlnflOaDxh","model":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M","system_fingerprint":"b9830-c1a1c8ee9","object":"chat.completion.chunk","timings":{"cache_n":0,"prompt_n":278,"prompt_ms":551.249,"prompt_per_token_ms":1.9829100719424462,"prompt_per_second":504.3093048694873,"predicted_n":27,"predicted_ms":489.375,"predicted_per_token_ms":18.125,"predicted_per_second":55.17241379310345}}
+
+data: [DONE]
+```
+
+`test/fixtures/claude-tool.sse`
+
+```text
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":472,"output_tokens":2}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event: ping
+data: {"type":"ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user wants the notes."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIM"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"I'll read"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" the file."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_01T1x1fJ34qAmk2tNTrN7Up6","name":"read_file","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":" \"notes/todo.txt\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: content_block_start
+data: {"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"toolu_01B2x2gK45rBnl3uOsO8Vq7","name":"list_files","input":{}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":3}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":89}}
+
+event: message_stop
+data: {"type":"message_stop"}
+```
+
+</details>
+
+### Step 4: Break things and run it live
+
+**Make the tests fail.** Delete `.pipe(requireFinish(route))` from `chat`. A stream that stops early now looks like a normal end, and the provider test notices:
+
+```text
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+test/provider.test.ts:
+49 |
+50 |     expect(events).toEqual([
+51 |       { type: "text-delta", text: "The answer" },
+52 |       { type: "text-delta", text: " is" },
+53 |     ])
+54 |     expect(failure).toContain("ended before the model finished")
+                         ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "ended before the model finished"
+Received: ""
+
+      at <anonymous> (/Users/vladex/PLAYGROUND/opencode/lessons/project/part-7/test/provider.test.ts:54:21)
+(fail) one step over HTTP > fails when the stream ends before the model finishes, after delivering what arrived [1.16ms]
+
+ 17 pass
+ 1 fail
+ 5373 expect() calls
+Ran 18 tests across 3 files. [149.00ms]
+error: script "test" exited with code 1
+```
+
+Put it back. Then, in `stepOpenAI`, change the line that adds up the arguments to keep only the latest fragment, `arguments: fragment.function?.arguments ?? call.arguments,`. Only the recorded llama.cpp stream fails, with the last fragment (`}`) as the input:
+
+```text
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+test/protocols.test.ts:
+30 |   })
+31 |
+32 |   test("llama.cpp sends a tool call in fragments, and one tool-call event comes out", async () => {
+33 |     const events = await decode(openaiChat, await fixture("llamacpp-tool.sse"))
+34 |
+35 |     expect(events).toEqual([
+                        ^
+error: expect(received).toEqual(expected)
+
+@@ -3,5 +3,3 @@
+      "id": "lweYCONr7qLC7dbqrULRsZcuyviVrCTP",
+-     "input": {
+-       "path": "notes/todo.txt",
+-     },
++     "input": "}",
+      "name": "read_file",
+
+- Expected  - 3
++ Received  + 1
+
+      at <anonymous> (/Users/vladex/PLAYGROUND/opencode/lessons/project/part-7/test/protocols.test.ts:35:20)
+(fail) OpenAI chat protocol > llama.cpp sends a tool call in fragments, and one tool-call event comes out [0.54ms]
+
+ 17 pass
+ 1 fail
+ 5373 expect() calls
+Ran 18 tests across 3 files. [163.00ms]
+error: script "test" exited with code 1
+```
+
+Put it back. None of the scripted-model tests failed in either case; they cover the loop, and these two changes are in the wire.
+
+**Cut a stream off.** The same failures can be produced by hand. In one terminal, start a server that sends one message and then closes the connection:
+
+```ts
+bun -e 'Bun.serve({ port: 9940, fetch: () => new Response("data: {\"choices\":[{\"delta\":{\"content\":\"The answer is\"},\"finish_reason\":null}]}\n\n") })'
+```
+
+In another, point the agent at it:
+
+```text
+$ cd playground && BASE_URL=http://127.0.0.1:9940/v1 bun ../src/index.ts
+You: hello
+Agent: The answer is
+[provider error] The stream from http://127.0.0.1:9940/v1 ended before the model finished
+You: ^D
+```
+
+The text arrived, the line was ended, the error was reported on its own line and the agent is ready for the next prompt. Stop the server and start one that sends a frame that is not JSON after the first one (`data: {oops`):
+
+```text
+$ cd playground && BASE_URL=http://127.0.0.1:9941/v1 bun ../src/index.ts
+You: hello
+Agent: ok
+[provider error] Could not read the stream: JSON Parse error: Expected '}'
+You: ^D
+```
+
+**Run it for real.** Two prompts on Ollama: one that makes the model call tools, and one that makes it write. In the terminal the text of the second answer appears while the model writes it. Here is the finished transcript:
+
+```text
+$ cd playground && bun ../src/index.ts
+You: List the files in this folder, then read notes/todo.txt
+[tool] list_files({"path":"."})
+[tool] read_file({"path":"notes/todo.txt"})
+Agent: I've listed the files in the current folder and read `notes/todo.txt`. Here are the contents:
+
+**Files in this folder:**
+- secret-file.txt
+- README.md
+- notes/
+
+**Notes/todo.txt content:**
+- buy milk
+- water the plants
+You: Write a four-line poem about a robot baking bread.
+Agent: In steel and wire, warm the dough,
+With gears that hum, the heat they know.
+The scent of yeast fills air so blue,
+A bread is made for me and you.
+You: ^D
+```
+
+and the same on llama.cpp, started with `--reasoning off`:
+
+```text
+$ cd playground && PROVIDER=llamacpp bun ../src/index.ts
+You: List the files in this folder, then read notes/todo.txt
+[tool] list_files({"path":"."})
+[tool] read_file({"path":"notes/todo.txt"})
+Agent: The files in this folder are `secret-file.txt`, `README.md`, and the `notes/` directory.
+
+The content of `notes/todo.txt` is:
+- buy milk
+- water the plants
+You: Write a four-line poem about a robot baking bread.
+Agent: With gears that grind and circuits bright,
+It kneads the dough with robotic might.
+The oven hums a digital tune,
+As golden crust begins to moon.
+You: ^D
+```
+
+The tool call from llama.cpp, which arrives in fragments, runs once with its complete arguments.
+
+> **Watch for this.** A variable that is assigned inside a callback is not tracked by the compiler's flow analysis. In the first version of `step`, `finish` was a `let` set inside the `runForEach` callback, and the check `finish !== "tool-calls"` in `turn` failed to compile because the compiler still believed the starting value, `"stop"`. The fix is to keep the value in an object, `outcome`, whose properties the compiler does not narrow.
+
+> **Watch for this.** A frame is complete only at its blank line. A server that stops after the last `data:` line without the blank line gives the agent no frame for it, and the user sees `ended before the model finished` rather than a missing word. If that error appears on a server that seems to work, record its stream with `curl -sN` and look at the end.
+
+> **Result.** The first words of a reply appear after a fraction of a second, on every provider, and the loop does not know which one it is talking to. A reply that breaks off halfway is reported once, on its own line, and leaves the history valid. The decoding of each wire format is a pair of functions that a test can call on bytes recorded from a real server.
+
+### The finished files
+
+These are the files that differ from Part 6, plus the new test files. `messages.ts`, `errors.ts`, `tool.ts`, `tools.ts` and `index.ts` are as Part 6 left them. The fixtures are in the Stuck block of Step 3.
+
+<details>
+<summary>src/events.ts</summary>
+
+`src/events.ts`
+
+```ts
+// What a step produces while the model is answering. The agent builds its message from these events.
+export type FinishReason = "tool-calls" | "stop" | "refusal"
+
+export type ModelEvent =
+  | { type: "text-delta"; text: string }
+  | { type: "tool-call"; id: string; name: string; input: unknown }
+  // The last event of a step. `native` is the provider's own content, kept so the same protocol can send it back.
+  | { type: "finish"; reason: FinishReason; native?: unknown }
+```
+
+</details>
+
+<details>
+<summary>src/sse.ts</summary>
+
+`src/sse.ts`
+
+```ts
+import { Stream } from "effect"
+
+// One server-sent event: the optional name from its `event:` line and the text of its `data:` lines.
+export type Frame = { event?: string; data: string }
+
+// The lines of the event being read so far.
+type Pending = { event?: string; data: string[] }
+
+const step = (pending: Pending, line: string): readonly [Pending, Frame[]] => {
+  // A blank line ends the event. An event with no data lines is dropped.
+  if (line === "") return [{ data: [] }, pending.data.length ? [{ event: pending.event, data: pending.data.join("\n") }] : []]
+
+  // Every other line is `field: value`. A line that starts with a colon is a comment and has no field name.
+  const colon = line.indexOf(":")
+  if (colon <= 0) return [pending, []]
+  const field = line.slice(0, colon)
+  const value = line.slice(colon + 1).replace(/^ /, "")
+
+  if (field === "data") return [{ ...pending, data: [...pending.data, value] }, []]
+  if (field === "event") return [{ ...pending, event: value }, []]
+  return [pending, []]
+}
+
+// Cuts bytes into events. The bytes can be split anywhere, even inside a line or inside a character.
+export const frames = <E>(bytes: Stream.Stream<Uint8Array, E>): Stream.Stream<Frame, E> =>
+  bytes.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.mapAccum((): Pending => ({ data: [] }), step),
+  )
+```
+
+</details>
+
+<details>
+<summary>src/terminal.ts</summary>
+
+`src/terminal.ts`
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import { createInterface } from "node:readline/promises"
+import { InputClosed } from "./errors"
+
+// What the agent needs from the person at the keyboard. Nothing here says readline.
+export class Terminal extends Context.Service<
+  Terminal,
+  {
+    // Asks one question. The type says it can fail: input may have ended.
+    readonly ask: (prompt: string) => Effect.Effect<string, InputClosed>
+    readonly say: (line: string) => Effect.Effect<void>
+    // Prints text without ending the line, so a reply can appear piece by piece.
+    readonly write: (text: string) => Effect.Effect<void>
+  }
+>()("@agent/Terminal") {}
+
+// The real terminal. Building the layer opens readline; the end of the program closes it.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const rl = yield* Effect.acquireRelease(
+      Effect.sync(() => createInterface({ input: process.stdin, output: process.stdout })),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    // A pending question never settles when input ends, so ending input is turned into a rejection.
+    const closed = new Promise<never>((_, reject) => rl.once("close", () => reject(new Error("input closed"))))
+    closed.catch(() => {})
+
+    return Terminal.of({
+      ask: (prompt) =>
+        Effect.tryPromise({
+          try: () => Promise.race([rl.question(prompt), closed]),
+          catch: () => new InputClosed(),
+        }),
+      say: (line) => Effect.sync(() => console.log(line)),
+      write: (text) => Effect.sync(() => void process.stdout.write(text)),
+    })
+  }),
+)
+```
+
+</details>
+
+<details>
+<summary>src/model-client.ts</summary>
+
+`src/model-client.ts`
+
+```ts
+import { Context, Effect, Layer, type Stream } from "effect"
+import type { ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step, as a stream of events. Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Stream.Stream<ModelEvent, ProviderError>
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools) })
+  }),
+)
+```
+
+</details>
+
+<details>
+<summary>src/protocols.ts</summary>
+
+`src/protocols.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import { isToolCall, textOf, type Message } from "./messages"
+import type { Frame } from "./sse"
+import type { Tool } from "./tool"
+
+// A protocol turns the agent's types into one wire format, and the frames that come back into model events.
+export type Protocol = {
+  path: string
+  body: (model: string, history: Message[], tools: Tool[]) => unknown
+  events: (frames: Stream.Stream<Frame, ProviderError>) => Stream.Stream<ModelEvent, ProviderError>
+}
+
+// Folds the frames into events, one step per frame. The step gets the state so far and returns the new state
+// and the events this frame completed. A step that throws, for example on malformed JSON, becomes a ProviderError.
+const reduce =
+  <S>(initial: S, step: (state: S, frame: Frame) => readonly [S, ModelEvent[]]) =>
+  (frames: Stream.Stream<Frame, ProviderError>): Stream.Stream<ModelEvent, ProviderError> =>
+    frames.pipe(
+      Stream.mapAccumEffect(
+        () => initial,
+        (state, frame) =>
+          Effect.try({
+            try: () => step(state, frame),
+            catch: (error) => new ProviderError({ reason: `Could not read the stream: ${messageOf(error)}` }),
+          }),
+      ),
+    )
+
+// OpenAI Chat Completions: what Ollama and llama.cpp speak. Only this section knows its wire format.
+// Each chunk carries a `delta`: a piece of text, or a fragment of a tool call. Fragments of one call share an `index`.
+type OpenAIChunk = {
+  choices: {
+    delta: {
+      content?: string | null
+      tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[]
+    }
+    finish_reason: string | null
+  }[]
+}
+
+// A tool call whose arguments are still arriving.
+type PendingCall = { id: string; name: string; arguments: string }
+type OpenAIState = { calls: Record<number, PendingCall> }
+
+const toOpenAITool = (tool: Tool) => ({
+  type: "function",
+  function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+})
+
+const toOpenAIMessages = (message: Message): unknown[] => {
+  if (message.role === "tool") {
+    // One role: "tool" message per result. There is no error flag, so the text carries the failure.
+    return message.content.flatMap((part) =>
+      part.type === "tool-result"
+        ? [{ role: "tool", tool_call_id: part.id, content: part.result.type === "error" ? `Error: ${part.result.value}` : part.result.value }]
+        : [],
+    )
+  }
+  if (message.role === "assistant") {
+    const calls = message.content.filter(isToolCall).map((call) => ({
+      id: call.id,
+      type: "function",
+      // A string input is raw text that did not parse; send it back as it came.
+      function: { name: call.name, arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input) },
+    }))
+    return [{ role: "assistant", content: textOf(message) || null, ...(calls.length ? { tool_calls: calls } : {}) }]
+  }
+  return [{ role: "user", content: textOf(message) }]
+}
+
+// Arguments arrive as a JSON string. If it does not parse, keep the raw text as the input.
+const parseArguments = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+const stepOpenAI = (state: OpenAIState, frame: Frame): readonly [OpenAIState, ModelEvent[]] => {
+  if (frame.data === "[DONE]") return [state, []]
+  const choice = (JSON.parse(frame.data) as OpenAIChunk).choices[0]
+  if (!choice) return [state, []]
+
+  const events: ModelEvent[] = []
+  if (choice.delta.content) events.push({ type: "text-delta", text: choice.delta.content })
+
+  // The id and the name arrive in the first fragment of a call. Later fragments only add to the arguments.
+  let calls = state.calls
+  for (const fragment of choice.delta.tool_calls ?? []) {
+    const call = calls[fragment.index] ?? { id: "", name: "", arguments: "" }
+    calls = {
+      ...calls,
+      [fragment.index]: {
+        id: fragment.id ?? call.id,
+        name: fragment.function?.name ?? call.name,
+        arguments: call.arguments + (fragment.function?.arguments ?? ""),
+      },
+    }
+  }
+
+  // The arguments are complete only when the model says it is done.
+  if (choice.finish_reason) {
+    const done = Object.values(calls)
+    for (const call of done) events.push({ type: "tool-call", id: call.id, name: call.name, input: parseArguments(call.arguments) })
+    events.push({ type: "finish", reason: done.length ? "tool-calls" : "stop" })
+  }
+  return [{ calls }, events]
+}
+
+export const openaiChat: Protocol = {
+  path: "/chat/completions",
+  body: (model, history, tools) => ({
+    model,
+    stream: true,
+    messages: history.flatMap(toOpenAIMessages),
+    reasoning_effort: "none",
+    tools: tools.map(toOpenAITool),
+  }),
+  events: reduce<OpenAIState>({ calls: {} }, stepOpenAI),
+}
+
+// Anthropic Messages: what Claude speaks.
+type AnthropicText = { type: "text"; text: string }
+type AnthropicToolUse = { type: "tool_use"; id: string; name: string; input: unknown }
+type AnthropicBlock = AnthropicText | AnthropicToolUse | { type: string } // e.g. thinking blocks
+
+// The events this agent reads. Each block of the answer is opened, extended by deltas, and closed.
+type AnthropicDelta =
+  | { type: "text_delta"; text: string }
+  | { type: "input_json_delta"; partial_json: string }
+  | { type: "thinking_delta"; thinking: string }
+  | { type: "signature_delta"; signature: string }
+type AnthropicEvent =
+  | { type: "content_block_start"; content_block: AnthropicBlock }
+  | { type: "content_block_delta"; index: number; delta: AnthropicDelta }
+  | { type: "content_block_stop"; index: number }
+  | { type: "message_delta"; delta: { stop_reason: string | null } }
+  | { type: "message_stop" }
+  | { type: "error"; error: { message: string } }
+  | { type: "message_start" | "ping" }
+
+// The blocks received so far, in order, and why the model stopped.
+type AnthropicState = { blocks: AnthropicBlock[]; stop: string | null }
+
+const isText = (block: AnthropicBlock): block is AnthropicText => block.type === "text"
+const isToolUse = (block: AnthropicBlock): block is AnthropicToolUse => block.type === "tool_use"
+
+// Same name and description as every other tool, but the schema is called input_schema.
+const toAnthropicTool = (tool: Tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })
+
+const toAnthropicMessage = (message: Message): unknown => {
+  if (message.role === "tool") {
+    // All the results of a step go back in one user message, and failures carry is_error.
+    return {
+      role: "user",
+      content: message.content.flatMap((part) =>
+        part.type === "tool-result"
+          ? [{ type: "tool_result", tool_use_id: part.id, content: part.result.value, is_error: part.result.type === "error" }]
+          : [],
+      ),
+    }
+  }
+  if (message.role === "assistant") {
+    // Send back exactly what the model produced, thinking blocks included, when we kept it.
+    if (message.native) return { role: "assistant", content: message.native }
+    return {
+      role: "assistant",
+      content: message.content.flatMap((part): unknown[] =>
+        part.type === "text"
+          ? [{ type: "text", text: part.text }]
+          : part.type === "tool-call"
+            ? [{ type: "tool_use", id: part.id, name: part.name, input: part.input }]
+            : [],
+      ),
+    }
+  }
+  return { role: "user", content: textOf(message) }
+}
+
+const stepAnthropic = (state: AnthropicState, frame: Frame): readonly [AnthropicState, ModelEvent[]] => {
+  const event = JSON.parse(frame.data) as AnthropicEvent
+  // The same blocks with the block at `index` extended.
+  const extend = (index: number, extra: (block: AnthropicBlock) => object): AnthropicState => ({
+    ...state,
+    blocks: state.blocks.map((block, i) => (i === index ? { ...block, ...extra(block) } : block)),
+  })
+
+  switch (event.type) {
+    case "content_block_start": {
+      // While a tool_use block is open, its input holds the JSON text received so far.
+      const block = event.content_block.type === "tool_use" ? { ...event.content_block, input: "" } : event.content_block
+      return [{ ...state, blocks: [...state.blocks, block] }, []]
+    }
+    case "content_block_delta": {
+      const delta = event.delta
+      switch (delta.type) {
+        case "text_delta":
+          return [extend(event.index, (block) => ({ text: (isText(block) ? block.text : "") + delta.text })), delta.text ? [{ type: "text-delta", text: delta.text }] : []]
+        case "input_json_delta":
+          return [extend(event.index, (block) => ({ input: String(isToolUse(block) ? block.input : "") + delta.partial_json })), []]
+        case "thinking_delta":
+          return [extend(event.index, (block) => ({ thinking: String((block as { thinking?: string }).thinking ?? "") + delta.thinking })), []]
+        case "signature_delta":
+          return [extend(event.index, () => ({ signature: delta.signature })), []]
+      }
+      return [state, []]
+    }
+    case "content_block_stop": {
+      const block = state.blocks[event.index]
+      if (!block || !isToolUse(block)) return [state, []]
+      // The arguments are complete now. If no argument text arrived, the call has none.
+      const input = parseArguments(String(block.input) || "{}")
+      return [extend(event.index, () => ({ input })), [{ type: "tool-call", id: block.id, name: block.name, input }]]
+    }
+    case "message_delta":
+      return [{ ...state, stop: event.delta.stop_reason }, []]
+    case "message_stop": {
+      const reason = state.stop === "refusal" ? "refusal" : state.blocks.some(isToolUse) ? "tool-calls" : "stop"
+      return [state, [{ type: "finish", reason, native: state.blocks }]]
+    }
+    case "error":
+      throw new Error(event.error.message)
+    default:
+      return [state, []]
+  }
+}
+
+export const anthropicMessages: Protocol = {
+  path: "/v1/messages",
+  body: (model, history, tools) => ({
+    model,
+    stream: true,
+    max_tokens: 16000,
+    messages: history.map(toAnthropicMessage),
+    tools: tools.map(toAnthropicTool),
+  }),
+  events: reduce<AnthropicState>({ blocks: [], stop: null }, stepAnthropic),
+}
+```
+
+</details>
+
+<details>
+<summary>src/provider.ts</summary>
+
+`src/provider.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol } from "./protocols"
+import { frames } from "./sse"
+import type { Tool } from "./tool"
+
+type Env = Record<string, string | undefined>
+
+// A route binds a protocol to one provider's endpoint and authentication.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b" },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b" },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+  },
+})
+
+// PROVIDER picks the route. BASE_URL and MODEL override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model })
+}
+
+// A stream that ends without a finish event was cut off.
+const requireFinish = (route: Route) => (events: Stream.Stream<ModelEvent, ProviderError>) =>
+  Stream.suspend(() => {
+    let finished = false
+    return events.pipe(
+      Stream.tap((event) =>
+        Effect.sync(() => {
+          if (event.type === "finish") finished = true
+        }),
+      ),
+      Stream.onEnd(
+        Effect.suspend(() =>
+          finished ? Effect.void : Effect.fail(new ProviderError({ reason: `The stream from ${route.baseUrl} ended before the model finished` })),
+        ),
+      ),
+    )
+  })
+
+// One step: one model call, as a stream of events. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.Stream<ModelEvent, ProviderError> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetch(`${route.baseUrl}${route.protocol.path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...route.headers },
+            body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+          }),
+        catch: unreachable,
+      })
+      const body = response.body
+      if (!response.ok || !body) {
+        const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+        return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+      }
+
+      // From here on, the answer is still being written. A failure now happens in the middle of a reply.
+      const bytes = Stream.fromReadableStream({
+        evaluate: () => body,
+        onError: (error) => new ProviderError({ reason: `The stream from ${route.baseUrl} broke off: ${messageOf(error)}` }),
+      })
+      return route.protocol.events(frames(bytes)).pipe(requireFinish(route))
+    }),
+  )
+```
+
+</details>
+
+<details>
+<summary>src/agent.ts</summary>
+
+`src/agent.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { messageOf } from "./errors"
+import type { FinishReason } from "./events"
+import { isToolCall, type Message, type Part, type ToolResultPart } from "./messages"
+import { ModelClient } from "./model-client"
+import { Terminal } from "./terminal"
+import { runTool, Tools, type Tool } from "./tool"
+
+// One step: stream the model's events, show the text as it arrives, and build the assistant message from them.
+const step = (history: Message[], tools: Tool[]) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const content: Part[] = []
+    let text = "" // the text block being written, if any
+    const outcome: { finish: FinishReason; native?: unknown } = { finish: "stop" }
+
+    // A text block ends when anything else arrives, or when the stream does, even by failing.
+    const endText = Effect.suspend(() => {
+      if (!text) return Effect.void
+      content.push({ type: "text", text })
+      text = ""
+      return terminal.say("")
+    })
+
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    ).pipe(Effect.ensuring(endText))
+
+    const message: Message = { role: "assistant", content, ...(outcome.native === undefined ? {} : { native: outcome.native }) }
+    return { message, finish: outcome.finish }
+  })
+
+// One prompt: call the model until it stops asking for tools.
+export const turn = (history: Message[], input: string) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    const tools = yield* Tools
+    history.push({ role: "user", content: [{ type: "text", text: input }] })
+
+    while (true) {
+      const { message, finish } = yield* step(history, tools)
+      history.push(message)
+      if (finish !== "tool-calls") return
+
+      const results: ToolResultPart[] = []
+      for (const call of message.content.filter(isToolCall)) {
+        yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+        const result = yield* runTool(call)
+        if (result.result.type === "error") yield* terminal.say(`[error] ${result.result.value}`)
+        results.push(result)
+      }
+      history.push({ role: "tool", content: results })
+    }
+  })
+
+// The read-eval-print loop: read a line from the user, run a turn on it, print the output, and repeat.
+export const repl = (history: Message[]) =>
+  Effect.gen(function* () {
+    const terminal = yield* Terminal
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+
+      // A turn that fails is dropped from the history, so the next prompt starts from a consistent conversation.
+      const before = history.length
+      const drop = (label: string, reason: string) =>
+        Effect.suspend(() => {
+          history.length = before
+          return terminal.say(`[${label}] ${reason}`)
+        })
+
+      yield* turn(history, input).pipe(
+        Effect.catchTag("ProviderError", (error) => drop("provider error", error.message)),
+        Effect.catchDefect((defect) => drop("bug", messageOf(defect))),
+      )
+    }
+  }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
+```
+
+</details>
+
+<details>
+<summary>test/fakes.ts</summary>
+
+`test/fakes.ts`
+
+```ts
+import { Effect, Layer, Stream } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { ModelEvent } from "../src/events"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import { Terminal } from "../src/terminal"
+
+// What the scripted model streams for one step, in order. A ProviderError makes the stream fail at that point.
+export type Step = Array<ModelEvent | ProviderError>
+
+// A text reply, streamed one word at a time.
+export const reply = (text: string): Step => [
+  ...text.split(/(?<= )/).map((word): ModelEvent => ({ type: "text-delta", text: word })),
+  { type: "finish", reason: "stop" },
+]
+
+export const callTool = (id: string, name: string, input: unknown): Step => [
+  { type: "tool-call", id, name, input },
+  { type: "finish", reason: "tool-calls" },
+]
+
+// A step that fails before sending anything.
+export const fail = (reason: string): Step => [new ProviderError({ reason })]
+
+// A model that follows a script and records the history it was given at each step.
+export const scriptedModel = (steps: Step[]) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const next = steps[requests.length - 1] ?? fail("The script has no reply left for this step")
+          return Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. When they run out, input ends.
+// `output` holds the finished lines; `writes` holds every piece passed to `write`, in order.
+export const scriptedTerminal = (answers: string[]) => {
+  const output: string[] = []
+  const writes: string[] = []
+  const queue = [...answers]
+  let pending = "" // text written since the last line ended
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(pending + prompt)
+          pending = ""
+          const next = queue.shift()
+          return next === undefined ? Effect.fail(new InputClosed()) : Effect.succeed(next)
+        }),
+      say: (line) =>
+        Effect.sync(() => {
+          output.push(pending + line)
+          pending = ""
+        }),
+      write: (text) =>
+        Effect.sync(() => {
+          writes.push(text)
+          pending += text
+        }),
+    }),
+  )
+  return { layer, output, writes }
+}
+```
+
+</details>
+
+<details>
+<summary>test/agent.test.ts</summary>
+
+`test/agent.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { ProviderError } from "../src/errors"
+import type { Message } from "../src/messages"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, fail, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+// Two small tools, so the tests never touch the disk.
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const deleteEverything = defineTool({
+  name: "delete_everything",
+  description: "Pretends to delete everything.",
+  input: Schema.Struct({}),
+  execute: async () => "deleted",
+  confirm: () => "delete everything",
+})
+
+// Runs the loop against a script and returns what the loop and the fakes saw.
+const run = async (script: { model: Step[]; answers: string[] }) => {
+  const model = scriptedModel(script.model)
+  const terminal = scriptedTerminal(script.answers)
+  const history: Message[] = []
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo, deleteEverything]))
+
+  await Effect.runPromise(repl(history).pipe(Effect.provide(layers)))
+  return { history, requests: model.requests, output: terminal.output, writes: terminal.writes }
+}
+
+describe("the agent loop", () => {
+  test("runs a tool call and then answers", async () => {
+    const { history, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("The tool said hi.")],
+      answers: ["say hi"],
+    })
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"])
+    expect(history[2]?.content).toEqual([{ type: "tool-result", id: "call_1", name: "echo", result: { type: "text", value: "hi" } }])
+    expect(output).toContain("Agent: The tool said hi.")
+  })
+
+  test("shows the reply piece by piece", async () => {
+    const { writes } = await run({ model: [reply("Hello there, friend.")], answers: ["hi"] })
+
+    expect(writes).toEqual(["Agent: ", "Hello ", "there, ", "friend."])
+  })
+
+  test("tells the model when the user declines", async () => {
+    const { requests } = await run({
+      model: [callTool("call_1", "delete_everything", {}), reply("Understood, I will not delete anything.")],
+      answers: ["clean up", "n"],
+    })
+
+    // The second request is the step after the tool call: its last message holds the result.
+    const result = requests[1]?.at(-1)?.content[0]
+    expect(result).toMatchObject({ type: "tool-result", result: { type: "error" } })
+    expect(JSON.stringify(result)).toContain("User declined")
+  })
+
+  test("ends the line of a reply that breaks off, then drops the turn", async () => {
+    const { history, output } = await run({
+      model: [[{ type: "text-delta", text: "The answer is" }, new ProviderError({ reason: "connection reset" })]],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(output).toContain("Agent: The answer is")
+    expect(output).toContain("[provider error] connection reset")
+  })
+
+  test("drops a turn whose model call fails", async () => {
+    const { history, output } = await run({
+      model: [fail("connection refused")],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(output).toContain("[provider error] connection refused")
+  })
+})
+```
+
+</details>
+
+<details>
+<summary>test/protocols.test.ts</summary>
+
+`test/protocols.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Stream } from "effect"
+import { anthropicMessages, openaiChat, type Protocol } from "../src/protocols"
+import { frames } from "../src/sse"
+
+// The last message of a stream ends with a blank line. A fixture copied from a web page can lose it, so it is added back.
+const fixture = async (name: string) => {
+  const text = await Bun.file(new URL(`./fixtures/${name}`, import.meta.url)).text()
+  return new TextEncoder().encode(text.trimEnd() + "\n\n")
+}
+
+// Cuts bytes into pieces at the given positions.
+const cutAt = (bytes: Uint8Array, positions: number[]) =>
+  [0, ...positions].map((start, i) => bytes.slice(start, positions[i] ?? bytes.length))
+
+// Runs recorded bytes through the framing and a protocol.
+const decode = (protocol: Protocol, bytes: Uint8Array, positions: number[] = []) =>
+  Effect.runPromise(protocol.events(frames(Stream.fromIterable(cutAt(bytes, positions)))).pipe(Stream.runCollect))
+
+describe("OpenAI chat protocol", () => {
+  test("Ollama streams text a piece at a time", async () => {
+    const events = await decode(openaiChat, await fixture("ollama-text.sse"))
+
+    expect(events.map((event) => (event.type === "text-delta" ? event.text : event.type))).toEqual([
+      "Hello", ",", " nice", " to", " meet", " you", ".", "finish",
+    ])
+    expect(events.at(-1)).toEqual({ type: "finish", reason: "stop" })
+  })
+
+  test("llama.cpp skips the empty first chunk and ends with a finish", async () => {
+    const events = await decode(openaiChat, await fixture("llamacpp-text.sse"))
+
+    expect(events.map((event) => (event.type === "text-delta" ? event.text : event.type)).join("")).toBe("Hello from an AI assistant.finish")
+  })
+
+  test("llama.cpp sends a tool call in fragments, and one tool-call event comes out", async () => {
+    const events = await decode(openaiChat, await fixture("llamacpp-tool.sse"))
+
+    expect(events).toEqual([
+      { type: "tool-call", id: "lweYCONr7qLC7dbqrULRsZcuyviVrCTP", name: "read_file", input: { path: "notes/todo.txt" } },
+      { type: "finish", reason: "tool-calls" },
+    ])
+  })
+
+  test("Ollama sends a tool call whole, and the events have the same shape", async () => {
+    const events = await decode(openaiChat, await fixture("ollama-tool.sse"))
+
+    expect(events).toEqual([
+      { type: "tool-call", id: "call_erxo8g8t", name: "read_file", input: { path: "notes/todo.txt" } },
+      { type: "finish", reason: "tool-calls" },
+    ])
+  })
+})
+
+describe("Anthropic Messages protocol", () => {
+  test("streams text, assembles tool calls, and keeps every block for replay", async () => {
+    const events = await decode(anthropicMessages, await fixture("claude-tool.sse"))
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "I'll read" },
+      { type: "text-delta", text: " the file." },
+      { type: "tool-call", id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6", name: "read_file", input: { path: "notes/todo.txt" } },
+      { type: "tool-call", id: "toolu_01B2x2gK45rBnl3uOsO8Vq7", name: "list_files", input: {} },
+      {
+        type: "finish",
+        reason: "tool-calls",
+        native: [
+          { type: "thinking", thinking: "The user wants the notes.", signature: "EqQBCgIYAhIM" },
+          { type: "text", text: "I'll read the file." },
+          { type: "tool_use", id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6", name: "read_file", input: { path: "notes/todo.txt" } },
+          { type: "tool_use", id: "toolu_01B2x2gK45rBnl3uOsO8Vq7", name: "list_files", input: {} },
+        ],
+      },
+    ])
+  })
+})
+
+describe("framing", () => {
+  test("the events do not depend on where the bytes are cut", async () => {
+    for (const [protocol, name] of [
+      [openaiChat, "llamacpp-tool.sse"],
+      [anthropicMessages, "claude-tool.sse"],
+    ] as const) {
+      const bytes = await fixture(name)
+      const whole = await decode(protocol, bytes)
+      for (let at = 1; at < bytes.length; at++) {
+        expect(await decode(protocol, bytes, [at])).toEqual(whole)
+      }
+    }
+  })
+
+  test("a character can be split between two pieces", async () => {
+    const bytes = new TextEncoder().encode("data: héllo\n\n")
+    const at = bytes.indexOf(0xc3) + 1 // between the two bytes of é
+
+    const result = await Effect.runPromise(Stream.runCollect(frames(Stream.fromIterable(cutAt(bytes, [at])))))
+
+    expect(result).toEqual([{ event: undefined, data: "héllo" }])
+  })
+
+  test("data lines join with a newline, and comments and unknown fields are ignored", async () => {
+    const bytes = new TextEncoder().encode(": keep-alive\nevent: note\nid: 7\ndata: one\ndata: two\n\n")
+
+    const result = await Effect.runPromise(Stream.runCollect(frames(Stream.fromIterable([bytes]))))
+
+    expect(result).toEqual([{ event: "note", data: "one\ntwo" }])
+  })
+})
+```
+
+</details>
+
+<details>
+<summary>test/provider.test.ts</summary>
+
+`test/provider.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Stream } from "effect"
+import type { ModelEvent } from "../src/events"
+import { openaiChat } from "../src/protocols"
+import { chat, type Route } from "../src/provider"
+
+const sse = (...lines: string[]) => lines.map((line) => `${line}\n\n`).join("")
+
+const chunk = (delta: object, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}`
+
+// Serves one canned answer, runs one step against it, and reports what arrived and how the step ended:
+// the error message, or an empty string when the step finished.
+const step = async (respond: (request: Request) => Response | Promise<Response>, baseUrl?: string) => {
+  const server = Bun.serve({ port: 0, fetch: respond })
+  const route: Route = { protocol: openaiChat, baseUrl: baseUrl ?? `http://127.0.0.1:${server.port}`, headers: {}, model: "test" }
+  const events: ModelEvent[] = []
+  try {
+    const failure = await Effect.runPromise(
+      Stream.runForEach(chat(route, [], []), (event) => Effect.sync(() => void events.push(event))).pipe(
+        Effect.as(""),
+        Effect.catchTag("ProviderError", (error) => Effect.succeed(error.message)),
+      ),
+    )
+    return { events, failure }
+  } finally {
+    await server.stop(true)
+  }
+}
+
+describe("one step over HTTP", () => {
+  test("asks for a stream and delivers the events", async () => {
+    let sent: { stream?: boolean } = {}
+    const { events, failure } = await step(async (request) => {
+      sent = (await request.json()) as { stream?: boolean }
+      return new Response(sse(chunk({ content: "Hi" }), chunk({ content: "!" }), chunk({}, "stop"), "data: [DONE]"))
+    })
+
+    expect(failure).toBe("")
+    expect(events).toEqual([
+      { type: "text-delta", text: "Hi" },
+      { type: "text-delta", text: "!" },
+      { type: "finish", reason: "stop" },
+    ])
+    expect(sent.stream).toBe(true)
+  })
+
+  test("fails when the stream ends before the model finishes, after delivering what arrived", async () => {
+    const { events, failure } = await step(() => new Response(sse(chunk({ content: "The answer" }), chunk({ content: " is" }))))
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "The answer" },
+      { type: "text-delta", text: " is" },
+    ])
+    expect(failure).toContain("ended before the model finished")
+  })
+
+  test("fails on a frame that is not JSON", async () => {
+    const { failure } = await step(() => new Response(sse(chunk({ content: "ok" }), "data: {oops")))
+
+    expect(failure).toContain("Could not read the stream")
+  })
+
+  test("reports the server's answer when the status is an error", async () => {
+    const { events, failure } = await step(() => new Response("model not found", { status: 404 }))
+
+    expect(events).toEqual([])
+    expect(failure).toContain("answered 404: model not found")
+  })
+
+  test("reports a server that is not running", async () => {
+    const { failure } = await step(() => new Response(""), "http://127.0.0.1:1")
+
+    expect(failure).toContain("Could not reach")
+  })
+})
+```
+
+</details>
+
+## Sources
+
+The first item is the primary source for this Part. A useful exercise is to find, in OpenCode's client and framing code, where the bytes of a response become frames, where a protocol turns frames into events, and the check that a terminal event arrived. Comparing OpenCode's events with this Part's three gives a second exercise: for each event OpenCode has that the agent does not, what a user interface would show with it. Anthropic's [Streaming Messages](https://platform.claude.com/docs/en/build-with-claude/streaming) page can also be read against `stepAnthropic`: it lists event types this agent ignores, such as `ping`, and says that new ones may be added.
+
+- OpenCode's [ai/src/route/client.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/client.ts) and [ai/src/route/framing.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/framing.ts)
+- OpenCode's [ai/src/schema/events.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/schema/events.ts) and [ai/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/AGENTS.md)
+- The HTML Standard: [Server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) (parsing and interpreting an event stream)
+- Anthropic's [Streaming Messages](https://platform.claude.com/docs/en/build-with-claude/streaming)
+
+This Part completes Stage A: a harness that runs one loop on three providers, with tools as data, errors in the types, services that a test can replace, and a reply that streams. The Session stage (Stage B) comes next, and its Parts are not yet scheduled in [the roadmap](/posts/the-roadmap/).
+
+Measured: the steps above were run on 6 November 2026 in the [Part 1](/posts/the-loop/) test environment with Effect 4.1.0 and Bun 1.4.4. Every step's files were type-checked and run, and the finished files were run on Ollama 0.40.14 and on llama.cpp b9830 (a second llama-server on another port with `--reasoning off`, selected with `BASE_URL`) with piped input and pauses between prompts. The timings in the first section are one run of each agent per server, with the model already loaded, taken from the time the first `Agent:` text reached standard output. Long lines in transcripts are shortened. The snippets in "What streams add" were run on their own. The tests were also run with deliberate changes to confirm that they fail.
