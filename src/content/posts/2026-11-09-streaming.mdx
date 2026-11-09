@@ -24,8 +24,8 @@ The agent from [Part 6](/posts/services-and-layers/) sends a request, waits unti
 
 | Server    | First text appears, Part 6 | First text appears, this Part | Whole reply, this Part |
 | --------- | -------------------------- | ----------------------------- | ---------------------- |
-| Ollama    | 8.7 s                      | 0.1 s                         | 9.4 s                  |
-| llama.cpp | 12.0 s                     | 0.2 s                         | 13.2 s                 |
+| Ollama    | 9.4 s                      | 0.5 s                         | 10.3 s                 |
+| llama.cpp | 14.5 s                     | 0.6 s                         | 16.4 s                 |
 
 Streaming does not make the model faster. The reply finishes at about the same time, and the replies differ in length from run to run, so the last column is only a rough comparison. What changes is when the first words appear: at the start of the reply instead of at the end. The wait grows with the length of the reply and with slower hardware.
 
@@ -33,7 +33,7 @@ This Part changes the agent in three places. The server is asked to send the rep
 
 ## What the server sends
 
-Adding `"stream": true` to the request body changes how the server answers. Instead of one JSON document at the end, it keeps the connection open and writes the reply as a series of small messages. The format is _server-sent events_ (SSE): plain text in which each message is a line that starts with `data:`, followed by a blank line. OpenAI-style servers put one JSON chunk in each message. This is Ollama answering "Say hello in five words." The chunks carry an id, a creation time and the model name as well; the transcripts in this section leave those fields out:
+Adding `"stream": true` to the request body changes how the server answers. Instead of one JSON document at the end, it keeps the connection open and writes the reply as a series of small messages. The format is _server-sent events_ (SSE): plain text in which each message is a line that starts with `data:`, followed by a blank line. OpenAI-style servers put one JSON chunk in each message. This is Ollama answering "Say hello in five words." The chunks carry an id, a creation time, the model name and a few other bookkeeping fields as well; the transcripts in this section leave them out:
 
 ```text
 $ curl -sN http://127.0.0.1:11434/v1/chat/completions -H 'content-type: application/json' \
@@ -138,7 +138,7 @@ $ bun src/ticks.ts
 302 ms: one
 604 ms: two
 907 ms: three
-908 ms: done
+911 ms: done
 ```
 
 The values are handled one at a time, in order, each as soon as it exists. `"done"` prints only after the last one, because `runForEach` is an Effect that completes with the stream.
@@ -275,7 +275,7 @@ Streaming adds failures that a single reply did not have. The connection can dro
 
 The half-written message is not kept in the history. It could contain a tool call without a result, which breaks the pairing of calls and results that the protocols rely on (Part 5 cut failed turns from the history for the same reason). The user can send the prompt again.
 
-A stream that ends without a `finish` event is the one that needs a check, because nothing else fails. OpenCode's client has the same check, `requireTerminalEvent`, and also rejects events that arrive after the terminal one ([ai/src/route/client.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/client.ts#L331-L346)). The agent's `requireFinish` checks only that a `finish` arrived.
+A stream that ends without a `finish` event is the one that needs a check, because nothing else fails. OpenCode's client has the same check, `requireTerminalEvent`, and also rejects events that arrive after the terminal one, other than raw provider frames ([ai/src/route/client.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/client.ts#L331-L346)). The agent's `requireFinish` checks only that a `finish` arrived.
 
 ### 6. Two kinds of test, and what each one covers
 
@@ -343,7 +343,7 @@ Work in the `my-agent` folder from [Part 6](/posts/services-and-layers/), with i
 
 `messages.ts`, `errors.ts`, `tool.ts`, `tools.ts` and `index.ts` do not change. Each step ends with code that type-checks and runs, so the work can stop after any of them.
 
-Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 6 November 2026 (see Measured at the end). The model's wording will differ.
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 6 November 2026, and repeated on 9 November 2026 (see Measured at the end). The model's wording will differ.
 
 ### Step 1: Events in the middle
 
@@ -605,7 +605,6 @@ Replace the model in the failing-model test with `model: [fail("connection refus
 Run `bunx --package typescript tsc --noEmit` and `bun test`, then the agent. The four tests pass and the agent behaves as in Part 6: the loop receives events and the text still appears all at once, because the provider sends them all at once.
 
 ```text
-$ bun test
 $ bun test
 bun test v1.4.4 (38afee6c8)
 
@@ -910,7 +909,7 @@ export const frames = <E>(bytes: Stream.Stream<Uint8Array, E>): Stream.Stream<Fr
   )
 ```
 
-Now `src/protocols.ts`. Replace the imports, the `Reply` type and the `Protocol` type at the top of the file with the new `Protocol`, the `reduce` helper and the types for the OpenAI chunks. A protocol no longer has `decode`; it has `events`, from frames to model events:
+Now `src/protocols.ts`. Replace everything above `toOpenAITool`, which is the imports, the `Reply` type, the `Protocol` type and the `OpenAIResponse` type of a whole reply, with the new `Protocol`, the `reduce` helper and the types for the OpenAI chunks. A protocol no longer has `decode`; it has `events`, from frames to model events:
 
 ```ts
 import { Effect, Stream } from "effect"
@@ -1764,7 +1763,7 @@ error: expect(received).toContain(expected)
 Expected to contain: "Agent: The answer is"
 Received: [ "You: ", "Agent: The answer is[provider error] connection reset", "You: " ]
 
-      at <anonymous> (/Users/vladex/PLAYGROUND/opencode/lessons/project/part-7/test/agent.test.ts:73:20)
+      at <anonymous> (test/agent.test.ts:73:20)
 (fail) the agent loop > ends the line of a reply that breaks off, then drops the turn [0.29ms]
 
  17 pass
@@ -1804,7 +1803,6 @@ and update the comment above `endText`:
 `endText` does nothing when the block has already ended, so the normal path is unchanged. Run the tests again:
 
 ```text
-$ bun test
 $ bun test
 bun test v1.4.4 (38afee6c8)
 
@@ -1981,7 +1979,7 @@ error: expect(received).toContain(expected)
 Expected to contain: "ended before the model finished"
 Received: ""
 
-      at <anonymous> (/Users/vladex/PLAYGROUND/opencode/lessons/project/part-7/test/provider.test.ts:54:21)
+      at <anonymous> (test/provider.test.ts:54:21)
 (fail) one step over HTTP > fails when the stream ends before the model finishes, after delivering what arrived [1.16ms]
 
  17 pass
@@ -1998,12 +1996,12 @@ $ bun test
 bun test v1.4.4 (38afee6c8)
 
 test/protocols.test.ts:
-30 |   })
-31 |
-32 |   test("llama.cpp sends a tool call in fragments, and one tool-call event comes out", async () => {
-33 |     const events = await decode(openaiChat, await fixture("llamacpp-tool.sse"))
-34 |
-35 |     expect(events).toEqual([
+34 |   })
+35 |
+36 |   test("llama.cpp sends a tool call in fragments, and one tool-call event comes out", async () => {
+37 |     const events = await decode(openaiChat, await fixture("llamacpp-tool.sse"))
+38 |
+39 |     expect(events).toEqual([
                         ^
 error: expect(received).toEqual(expected)
 
@@ -2018,13 +2016,13 @@ error: expect(received).toEqual(expected)
 - Expected  - 3
 + Received  + 1
 
-      at <anonymous> (/Users/vladex/PLAYGROUND/opencode/lessons/project/part-7/test/protocols.test.ts:35:20)
-(fail) OpenAI chat protocol > llama.cpp sends a tool call in fragments, and one tool-call event comes out [0.54ms]
+      at <anonymous> (test/protocols.test.ts:39:20)
+(fail) OpenAI chat protocol > llama.cpp sends a tool call in fragments, and one tool-call event comes out [0.37ms]
 
  17 pass
  1 fail
  5373 expect() calls
-Ran 18 tests across 3 files. [163.00ms]
+Ran 18 tests across 3 files. [173.00ms]
 error: script "test" exited with code 1
 ```
 
@@ -2032,7 +2030,7 @@ Put it back. None of the scripted-model tests failed in either case; they cover 
 
 **Cut a stream off.** The same failures can be produced by hand. In one terminal, start a server that sends one message and then closes the connection:
 
-```ts
+```sh
 bun -e 'Bun.serve({ port: 9940, fetch: () => new Response("data: {\"choices\":[{\"delta\":{\"content\":\"The answer is\"},\"finish_reason\":null}]}\n\n") })'
 ```
 
@@ -3090,4 +3088,17 @@ The first item is the primary source for this Part. A useful exercise is to find
 
 This Part completes Stage A: a harness that runs one loop on three providers, with tools as data, errors in the types, services that a test can replace, and a reply that streams. The Session stage (Stage B) comes next, and its Parts are not yet scheduled in [the roadmap](/posts/the-roadmap/).
 
-Measured: the steps above were run on 6 November 2026 in the [Part 1](/posts/the-loop/) test environment with Effect 4.1.0 and Bun 1.4.4. Every step's files were type-checked and run, and the finished files were run on Ollama 0.40.14 and on llama.cpp b9830 (a second llama-server on another port with `--reasoning off`, selected with `BASE_URL`) with piped input and pauses between prompts. The timings in the first section are one run of each agent per server, with the model already loaded, taken from the time the first `Agent:` text reached standard output. Long lines in transcripts are shortened. The snippets in "What streams add" were run on their own. The tests were also run with deliberate changes to confirm that they fail.
+Measured: the steps above were run on 6 November 2026 and again on 9 November 2026 in the [Part 1](/posts/the-loop/) test environment (Ollama 0.40.14, llama.cpp b9830) with Effect 4.1.0, Bun 1.4.4 and TypeScript 7.0.2. Every state of the steps was type-checked and the tests were run. The finished files were run on Ollama and on llama.cpp (a second llama-server on another port with `--reasoning off`, selected with `BASE_URL`) with piped input and pauses between prompts. The timings in the first section are from the 9 November runs, with the model already loaded: the time from writing the prompt to standard input until `Agent:` first reached standard output, and until the next `You:` prompt. Two runs per server of the Part 6 agent gave 9.4 to 10.0 s on Ollama and 13.6 to 14.5 s on llama.cpp; the Part 7 agent showed its first text after 0.5 s on Ollama and 0.6 s on llama.cpp, and finished the reply in 8.8 to 10.3 s and 14.9 to 16.4 s. The table shows the last run of each. The replies differed in length from run to run (about 440 to 540 words). Runs of the 18 tests (3 files) took 150 to 180 ms. Long lines in transcripts are shortened. The snippets in "What streams add" were run on their own.
+
+Checked:
+
+- the `Part7_Streaming` tag on the remote (commit `bd618fd`): its fixtures and its `events.ts`, `sse.ts`, `terminal.ts`, `provider.ts`, `test/fakes.ts`, `test/protocols.test.ts` and `test/provider.test.ts` equal the finished files above; `model-client.ts` and `agent.ts` differ in one comment and a trailing comma, `agent.test.ts` in a blank line and the order of the tests, and the Snapshot's `protocols.ts` still has an unused `OpenAIResponse` type that the steps remove
+- Part 6's files with the edits of Steps 1 to 3 applied as worded: the files after Steps 1 and 2 equal the "Stuck?" files (apart from trailing commas in `provider.ts`), every state type-checks, four tests pass after Steps 1 and 2, the new test fails as shown before the `Effect.ensuring` fix, and all 18 tests pass after it
+- the finished files type-check on Effect 4.1.0, and the two deliberate breakages in Step 4 fail as shown (durations differ, and Bun prints the full path in the `at` line)
+- every snippet in "What streams add" run on its own: the output is as shown, with the last line of the first one at 911 ms instead of 908 ms
+- the three `curl` requests of "What the server sends" repeated on Ollama and llama.cpp: Ollama sends the tool call in one chunk with complete arguments and llama.cpp in fragments, as shown; the Ollama text differed in its last word, and the fixtures are the recordings in the Snapshot and were not recorded again
+- the agent on Ollama and on llama.cpp with the file listing and the poem, and against the two local servers of "Cut a stream off": the transcripts match in form and the error lines are as shown, and the model's wording differed
+- in Effect 4.1.0's declarations, `effect/encoding/Sse` is marked `@stability unstable` and `Stream.mapAccum` has an `onHalt` option
+- at OpenCode commit `97be25f046`: `requireTerminalEvent` at `ai/src/route/client.ts` lines 331 to 346, the event union at `ai/src/schema/events.ts` lines 313 to 331, the `ai.stream`/`ai.generate` rule in `ai/AGENTS.md`, and `framing.ts` importing `makeParser` from `effect/encoding/Sse`
+- the rules of server-sent events against the HTML Standard, and the event flow, the `ping` event, the delta types and the sentence that new event types may be added against Anthropic's Streaming Messages page
+- the Part numbers and titles against the Series file, and the Stage A count against the Forewords of Parts 3 to 6
