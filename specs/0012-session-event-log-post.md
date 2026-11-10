@@ -1,0 +1,65 @@
+# 0012 · Part 8 of the agent Series: "The session as an event log"
+
+Status: planned
+
+Product spec only. The Post will be `src/content/posts/2026-11-10-the-session-as-an-event-log.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md), [spec 0007](0007-tools-as-data-post.md), [spec 0008](0008-providers-behind-one-interface-post.md), [spec 0009](0009-why-effect-post.md), [spec 0010](0010-services-and-layers-post.md) and [spec 0011](0011-streaming-post.md) for how Parts 1–7 were ported.
+
+## Problem statement
+
+Part 7 ends with an agent that streams its replies, but whose conversation is an array in memory: when the process ends, the messages go with it, and so does the knowledge of which tool calls had finished. Part 2's roadmap asks what is lost when Ctrl-C stops an agent halfway through a task, what the smallest thing is that must be on disk to get it back, and what reloading the history before every step buys given that it is slower. The first Part of Stage B (Session) answers them: every fact is appended to a SQLite file as it happens, the history is rebuilt from that file before each step, and a restart finishes the turn the last run left unfinished. Vlad finished that Part as a lesson in his OpenCode fork (`lessons/0008-the-session-as-an-event-log.html`), with the code tagged in the Companion repo as `Part8_persistent_session`. It needs to become Part 8, reading and looking like Parts 1–7.
+
+The Series' `planned` list is already empty, so the Series page needs no change beyond showing Part 8.
+
+## Solution
+
+A faithful port of the lesson as one Post, lightly edited for the blog, with the same kinds of edits as specs 0006 to 0011. It is a Draft until Vlad has read it, then published.
+
+- **Front matter**: category Agentic AI, tags `agents`, `effect`, `typescript`, `sqlite`, `drizzle`, `ollama`, Series _Building an agent from scratch_, Part 8, title "The session as an event log" (sentence case, the name Part 2's roadmap uses), Snapshot `Part8_persistent_session`, spelled as the tag is on the remote. `pubDate` is 2026-11-10. The Foreword calls it the first Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/) and links the Snapshot in a plain sentence, like Parts 1 and 3 to 7 ([spec 0005](0005-companion-repo.md)). There is no "your prediction" section.
+- **Content**: what the Part 7 agent forgets, the two questions of Part 2 answered, and a table of where a process can die, what the file then holds and what the next run has to do; a short introduction to Drizzle (declared tables, Drizzle Kit, migrations applied at startup, the Effect driver, the release-candidate line and the pinned versions); four words (session, session event, event log, history) and how a session event differs from a model event; the six decisions in the rewrite (four events, each a fact that cannot be worked out from the others; the history as a fold of the events; the history rebuilt before every step, with OpenCode's projection tables as the contrast; a failed turn as an event; unfinished tool calls answered with an error and never run again; rows checked when they are read); what this leaves for later; the six quizzes; the hands-on build in seven steps (the log table, the Session service, the agent on the log, a failed turn as an event, resuming what the last run left unfinished, tests for the fold and the file with deliberate breakages, then killing the agent and running it live including the cost of the reload) with the finished files collapsed; callouts; Sources.
+- **Vocabulary**: "Part", not "post", "lesson" or "module" (for a Part), so the lesson's "this post" becomes "this Part". Other Parts are italic titles with their number, unlinked; Parts 1–7 are linked. Session, session event, event log, history, fold, migration and WAL mode are defined inline, and the lesson's "the glossary has four new terms" becomes a definition in the Post; `GLOSSARY.md` does not change. The Post reuses Part 2's note that this "session" is agent vocabulary, unrelated to a Series on this blog. "Part" never means a message part (those appear only as code identifiers such as `TextPart`), and "Tag" appears only inside code identifiers such as `catchTag`.
+- **Quizzes**: the lesson's six "Check yourself" questions as `<Quiz>` ([spec 0004](0004-quiz-component.md)).
+- **Stance**: the Post describes what the event log does in this agent, what each kind of test covers and what OpenCode does differently. It does not argue that event sourcing or Drizzle suit other programs.
+- **Tone**: applies to Part 8 only; Parts 1–7 are left as published. "I" appears only for measured facts and the Foreword's sentence about the Companion repo; claims are attributed or hedged; verdict-style sentences are descriptions; imperatives appear only where the reader acts (build steps, callouts). Specific edits to the lesson: "The rule here, never run a call that has no result, is a simpler policy" becomes a description of the policy and how it differs from OpenCode's; the heading "A restart answers unfinished tool calls with an error, and never runs them again" is softened to say what the restart does; "Nothing else needs saving" is hedged, since it holds for the four chosen events; the garbled paragraph on the cost of the reload is rewritten around the re-measured numbers, and its comparison with the model's context window is cut or re-derived; "The agent itself already works" and the "Result" callout are rewritten as descriptions of what was verified.
+- **Commands**: as in the lesson. Step 1 adds a `db:generate` script to `package.json` and runs `bun run db:generate --name event_log`; later steps say `bun run typecheck` and `bun run test`; the finished `package.json` stays in the collapsed files. Parts 1–7 only showed `bunx --package typescript tsc --noEmit` and `bun test`, so one sentence at the first `bun run typecheck` says that the scripts are the ones in the finished `package.json` below.
+- **Corrections to the lesson**: the closing material that names "Part 9" and "Part 10" and describes Parts 9 and 10 is replaced. The Post says this Part starts Stage B, and names the later topics as the roadmap does ("Inbox vs. execution", "Context limits and compaction") with no Part numbers and nothing added to the Series' `planned` list; the one-writer-per-session limit stays in "What this leaves for later" as a limit, not as a Part. The Series stays Ongoing.
+- **Sources**: OpenCode is linked at commit `97be25f046`, as in Parts 5 to 7, including the line anchors the lesson uses if they hold at that commit. The first item is the primary source: `session/runner/step.ts`, `session/history.ts` and `session/execution/restart.ts`. Then `session/sql.ts`, `database/database.ts` and `AGENTS.md`, then Drizzle's Bun:SQLite guide. The sentence saying that Parts 9 and 10 take OpenCode's inbox and compaction "one at a time" is removed. The comparison with OpenCode is phrased as a suggested exercise, as in Parts 6 and 7. The Post makes no statement about the Claude route beyond what the Snapshot's tests show, and shows no Claude transcript.
+- **Cut**: the lesson-pack scaffolding (navigation, reference and glossary links, the kicker).
+- **Series**: unchanged; the page shows Parts 1–8 written and nothing planned.
+- **Earlier Parts**: unchanged. Part 2's roadmap entry (including its `bun:sqlite` hint and the line that Stage B Parts are not yet scheduled) and Part 7's closing sentence stay as published. The Post explains its own use of Drizzle and does not mention the roadmap's `bun:sqlite`.
+
+### Claims
+
+The Post states only what is checked before publishing, and anything that cannot be re-run is cut or hedged instead of carried over from the lesson:
+
+- the `Part8_persistent_session` tag on the remote: its `src`, `test` and `drizzle` files equal the Post's finished files; the differences in `package.json` (`bun check`, `@effect/tsgo`) and in the migration folder's timestamp are noted, not hidden; the starting point matches Part 7's finished files
+- Steps 1–7 replayed on Part 7's finished files, with every state type-checking, the files after each step equal to the "Stuck?" files, and Step 3 failing exactly the two tests the Post says it fails
+- the finished files type-checking and the nineteen tests passing on Effect 4.1.0, and the deliberate breakages of Step 6 failing as shown
+- `drizzle-orm` and `drizzle-kit` 1.0.0-rc.5 and `@effect/sql-sqlite-bun` 4.1.0 installing, and the `db:generate` output
+- the live runs on Ollama and llama.cpp, and the SIGKILL during a tool call with its two runs, including that the shell command kept running after the agent was killed; the Post says the model's wording differs and what could not be re-run
+- the read-cost table (100, 1,000 and 10,000 events) re-measured, and any comparison with a step's duration or the context window stated only if derived from those measurements
+- the statements about WAL mode and about the second writer failing with `UNIQUE constraint failed: event.session_id, event.seq`
+- OpenCode links, line anchors and quotations at `97be25f046`: the AGENTS.md "irreducible" rule, "Tool execution interrupted", "Continue from where you left off without repeating completed work", the at-least-once comment in `restart.ts`, and the statement that OpenCode projects events into message tables instead of folding them on each read
+- the Part numbers and titles against the Series file, and the "Part 2 asked…" statements against Part 2
+
+## Steps
+
+1. Port the lesson as a Draft Post (`draft: true`), with the front matter, Foreword, vocabulary, commands, tone edits, Sources and closing described above.
+2. Verify the Claims; correct the Post and note what was measured, checked and not re-run (Test environment, Measured and Checked lines, as in Part 7).
+3. Publish: `draft` off after Vlad has read it; reduce this spec to product intent.
+
+## User stories
+
+1. As a reader who finished Part 7, I want to see what the agent loses when its process ends and where a process can die, so I understand what has to be on disk.
+2. As a reader, I want to know why the log has four events, what each records and why text pieces are not among them, so I can judge the design instead of copying it.
+3. As a reader, I want the history rebuilt from the log before every step, with its cost measured, so I know what the reload buys and what it costs.
+4. As a reader, I want to know what happens to a failed turn and to a tool call that has no result after a crash, and why the agent never runs such a call again, so a restart is safe.
+5. As a reader unfamiliar with Drizzle, I want a short introduction to what it is for and what differs here (the Effect driver, the release candidate, the pinned versions), so I can follow the code.
+6. As a reader following along, I want each build step to end with code that type-checks and runs, and to know which tests fail on purpose, so I can stop after any of them.
+7. As a reader, I want to kill the agent in the middle of a tool call and see the next run pick the turn up, so I believe the log works.
+8. As a reader, I want to know which tests cover the fold, the file and the restart, and what they cannot show, so I don't mistake a passing test for a working agent.
+9. As a reader, I want the code as it stood when the Part was written, through the Snapshot link.
+10. As a reader, I want the prose to describe and attribute rather than boast, argue for a pattern in general, or instruct where I'm not acting, so the Part reads like the others.
+
+## Out of scope
+
+The lesson's reference pages (tool design, agent architecture, glossary), an agentic-AI glossary, new components, a Claude transcript, recall quizzes from earlier Parts, any change to Parts 1–7, scheduling or numbering Stage B Parts, saving a prompt separately from running it, compaction, concurrent writers, OpenCode's projection tables and claim machinery, a session list or switcher beyond the `SESSION` variable, advice on adopting event sourcing or Drizzle in other projects.
