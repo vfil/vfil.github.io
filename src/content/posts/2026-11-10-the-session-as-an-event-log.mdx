@@ -7,7 +7,6 @@ tags: [agents, effect, typescript, sqlite, drizzle, ollama]
 series: building-an-agent-from-scratch
 part: 8
 snapshot: Part8_persistent_session
-draft: true
 ---
 
 import Quiz from '../../components/Quiz.astro';
@@ -165,7 +164,7 @@ Work in the `my-agent` folder from [Part 7](/posts/streaming/). This Part adds f
 
 `events.ts`, `sse.ts`, `terminal.ts`, `model-client.ts`, `protocols.ts`, `provider.ts`, `tool.ts`, `tools.ts` and the test files for the model, protocols and provider do not change. Each step ends with code that type-checks and runs, so the work can stop after any of them. Step 3 ends with two failing tests on purpose, and step 4 fixes them.
 
-Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, drizzle-orm and drizzle-kit 1.0.0-rc.5 and @effect/sql-sqlite-bun 4.1.0, on 9 November 2026, and repeated on 10 November 2026 (see Measured at the end). The model's wording will differ.
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, drizzle-orm and drizzle-kit 1.0.0-rc.5 and @effect/sql-sqlite-bun 4.1.0, on 9 November 2026. The model's wording will differ.
 
 ### Step 1: The log table
 
@@ -3158,20 +3157,3 @@ The first item is the primary source for this Part. OpenCode's versions are full
 - Drizzle's [Get started with Drizzle and Bun:SQLite](https://orm.drizzle.team/docs/get-started/bun-sqlite-new)
 
 This Part starts Stage B. The session now outlives the process. Two other topics of the stage, listed in [the roadmap](/posts/the-roadmap/) as _Inbox vs. execution_ and _Context limits and compaction_, are not covered here, and their Parts are not yet scheduled.
-
-Measured: the steps above were run on 9 November 2026 and again on 10 November 2026 in the [Part 1](/posts/the-loop/) test environment (Ollama 0.40.14, llama.cpp b9830) with Effect 4.1.0, Bun 1.4.4, TypeScript 7.0.2, drizzle-orm and drizzle-kit 1.0.0-rc.5 and @effect/sql-sqlite-bun 4.1.0. Every state of the steps was type-checked and the tests were run, with the "Stuck?" files applied where Checked says so. The finished files were run on Ollama and on llama.cpp (a second llama-server on another port with `--reasoning off`, selected with `BASE_URL`) with piped input and pauses between prompts. The crash was a SIGKILL sent to the agent process during a tool call, and the transcript shows the two runs it needed. The reload timings are the median of twenty reads on a file database after a warm-up read, of logs made of the repeated four-event cycle described above; two runs gave 0.16 to 0.17 ms, 0.9 to 1.1 ms and 8.0 to 8.4 ms, and the table shows the last run. The sizes are those of the database file after the program closed it. Runs of the 34 tests (6 files) took 230 to 240 ms. Long lines in transcripts are shortened. The tests were also run with the two deliberate changes shown in step 6, to confirm that they fail.
-
-Checked:
-
-- the `Part8_persistent_session` Snapshot on the remote (commit `21e0520`): its `src` and `test` files equal the finished files above apart from the missing newline at the end of each file, and `agent.test.ts` has the same tests in a different order; its `drizzle` folder holds the same SQL under another timestamp (`20261110100328_event_log`); its `package.json` differs (the name `sigma-agent`, the scripts `typecheck` as `bun check` and `prepare`, and `@effect/tsgo` and `typescript` 7.0.2 as dependencies) and is not the one shown above; `events.ts`, `sse.ts`, `terminal.ts`, `model-client.ts`, `protocols.ts`, `provider.ts`, `tool.ts`, `tools.ts` and the tests of the model, protocols and provider are the files of the `Part7_Streaming` Snapshot
-- the starting point: Part 7's Snapshot type-checks and its 18 tests pass, as Step 1 says
-- Steps 1 to 6 on Part 7's files: the install and `bun run db:generate` output of Step 1, the `SessionCorrupt` addition to `errors.ts` as worded, and then the files of each "Stuck?" block applied in order. Every state type-checks. The tests give 18 passes after Steps 1 and 2; after Step 3, 4 passes and 2 failures in `agent.test.ts` (17 and 2 in the whole suite), the two failures being the ones named; 19 passes after Step 4, 25 after Step 5 and 34 after Step 6. The other edits described in words in Steps 3 to 5 were not applied one by one, because the "Stuck?" files were applied in their place
-- the finished files type-check on Effect 4.1.0, and the two deliberate changes of Step 6 fail as shown (31 passes and 3 failures, then 29 passes and 5 failures; durations differ)
-- the script of Step 2 prints the history shown, and `sqlite3` shows the three rows with the same byte counts; the `-wal` and `-shm` files appear next to the database, which reports `wal` as its journal mode
-- the agent on Ollama (the file listing, a restart that answers from the log, a turn that fails against a port where nothing listens, and a SIGKILL during a tool call followed by a restart) and the file listing and restart on llama.cpp: the events in the file are as shown, the shell command of the crash finished after the agent was killed, and the model's wording differs
-- a second writer on the same session fails with `UNIQUE constraint failed: event.session_id, event.seq` as the cause, and a run without the `drizzle` folder fails with an `ENOENT` error from the migrator
-- the reload table, re-measured as described above; the comparison with a step's duration uses Part 7's timings
-- OpenCode's links, line anchors and quotations at `97be25f046`: the two `AGENTS.md` rules and its `snake_case` convention, the claims, inbox and compaction named in the Sources (`restart.ts`, `inbox.ts`, `compaction.ts`), `Tool execution interrupted`, the restart prompt, the at-least-once comment, the message tables in `sql.ts` that `history.ts` loads from, and the 1.0.0-rc.5 Drizzle versions in OpenCode's `package.json`
-- the Drizzle pages open, and the Part numbers, titles and the statements about Parts 2, 4, 5 and 6 match the Series and the Parts themselves
-
-Not re-run: the transcripts were recorded on 9 November 2026 and have the wording of that run; the 10 November runs differ in the model's wording only. The crash was not repeated on llama.cpp.

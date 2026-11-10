@@ -1,18 +1,18 @@
 # 0012 · Part 8 of the agent Series: "The session as an event log"
 
-Status: in progress (Steps 1 and 2 done; Step 3, publishing, waits for Vlad to read the Draft)
+Status: implemented (2026-11-10), published
 
-Product spec only. The Post will be `src/content/posts/2026-11-10-the-session-as-an-event-log.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md), [spec 0007](0007-tools-as-data-post.md), [spec 0008](0008-providers-behind-one-interface-post.md), [spec 0009](0009-why-effect-post.md), [spec 0010](0010-services-and-layers-post.md) and [spec 0011](0011-streaming-post.md) for how Parts 1–7 were ported.
+Product spec only. The Post is `src/content/posts/2026-11-10-the-session-as-an-event-log.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md), [spec 0007](0007-tools-as-data-post.md), [spec 0008](0008-providers-behind-one-interface-post.md), [spec 0009](0009-why-effect-post.md), [spec 0010](0010-services-and-layers-post.md) and [spec 0011](0011-streaming-post.md) for how Parts 1–7 were ported.
 
 ## Problem statement
 
-Part 7 ends with an agent that streams its replies, but whose conversation is an array in memory: when the process ends, the messages go with it, and so does the knowledge of which tool calls had finished. Part 2's roadmap asks what is lost when Ctrl-C stops an agent halfway through a task, what the smallest thing is that must be on disk to get it back, and what reloading the history before every step buys given that it is slower. The first Part of Stage B (Session) answers them: every fact is appended to a SQLite file as it happens, the history is rebuilt from that file before each step, and a restart finishes the turn the last run left unfinished. Vlad finished that Part as a lesson in his OpenCode fork (`lessons/0008-the-session-as-an-event-log.html`), with the code tagged in the Companion repo as `Part8_persistent_session`. It needs to become Part 8, reading and looking like Parts 1–7.
+Part 7 ends with an agent that streams its replies, but whose conversation is an array in memory: when the process ends, the messages go with it, and so does the knowledge of which tool calls had finished. Part 2's roadmap asks what is lost when Ctrl-C stops an agent halfway through a task, what the smallest thing is that must be on disk to get it back, and what reloading the history before every step buys given that it is slower. The first Part of Stage B (Session) answers them: every fact is appended to a SQLite file as it happens, the history is rebuilt from that file before each step, and a restart finishes the turn the last run left unfinished. Vlad finished that Part as a lesson in his OpenCode fork (`lessons/0008-the-session-as-an-event-log.html`), with the code tagged in the Companion repo as `Part8_persistent_session`. It needed to become Part 8, reading and looking like Parts 1–7.
 
 The Series' `planned` list is already empty, so the Series page needs no change beyond showing Part 8.
 
 ## Solution
 
-A faithful port of the lesson as one Post, lightly edited for the blog, with the same kinds of edits as specs 0006 to 0011. It is a Draft until Vlad has read it, then published.
+A faithful port of the lesson as one Post, lightly edited for the blog, with the same kinds of edits as specs 0006 to 0011. It was a Draft until Vlad had read it, and is now published.
 
 - **Front matter**: category Agentic AI, tags `agents`, `effect`, `typescript`, `sqlite`, `drizzle`, `ollama`, Series _Building an agent from scratch_, Part 8, title "The session as an event log" (sentence case, the name Part 2's roadmap uses), Snapshot `Part8_persistent_session`, spelled as the tag is on the remote. `pubDate` is 2026-11-10. The Foreword calls it the first Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/) and links the Snapshot in a plain sentence, like Parts 1 and 3 to 7 ([spec 0005](0005-companion-repo.md)). There is no "your prediction" section.
 - **Content**: what the Part 7 agent forgets, the two questions of Part 2 answered, and a table of where a process can die, what the file then holds and what the next run has to do; a short introduction to Drizzle (declared tables, Drizzle Kit, migrations applied at startup, the Effect driver, the release-candidate line and the pinned versions); four words (session, session event, event log, history) and how a session event differs from a model event; the six decisions in the rewrite (four events, each a fact that cannot be worked out from the others; the history as a fold of the events; the history rebuilt before every step, with OpenCode's projection tables as the contrast; a failed turn as an event; unfinished tool calls answered with an error and never run again; rows checked when they are read); what this leaves for later; the six quizzes; the hands-on build in seven steps (the log table, the Session service, the agent on the log, a failed turn as an event, resuming what the last run left unfinished, tests for the fold and the file with deliberate breakages, then killing the agent and running it live including the cost of the reload) with the finished files collapsed; callouts; Sources.
@@ -29,7 +29,7 @@ A faithful port of the lesson as one Post, lightly edited for the blog, with the
 
 ### Claims
 
-The Post states only what is checked before publishing, and anything that cannot be re-run is cut or hedged instead of carried over from the lesson:
+The Post states only what was checked before publishing, and anything that could not be re-run was cut or hedged instead of carried over from the lesson. Its purpose is to teach, so it carries a Test environment line but no Measured, Checked or Not re-run paragraphs:
 
 - the `Part8_persistent_session` tag on the remote: its `src`, `test` and `drizzle` files equal the Post's finished files; the differences in `package.json` (`bun check`, `@effect/tsgo`) and in the migration folder's timestamp are noted, not hidden; the starting point matches Part 7's finished files
 - Steps 1–7 replayed on Part 7's finished files, with every state type-checking, the files after each step equal to the "Stuck?" files, and Step 3 failing exactly the two tests the Post says it fails
@@ -40,12 +40,6 @@ The Post states only what is checked before publishing, and anything that cannot
 - the statements about WAL mode and about the second writer failing with `UNIQUE constraint failed: event.session_id, event.seq`
 - OpenCode links, line anchors and quotations at `97be25f046`: the AGENTS.md "irreducible" rule, "Tool execution interrupted", "Continue from where you left off without repeating completed work", the at-least-once comment in `restart.ts`, and the statement that OpenCode projects events into message tables instead of folding them on each read
 - the Part numbers and titles against the Series file, and the "Part 2 asked…" statements against Part 2
-
-## Steps
-
-1. Port the lesson as a Draft Post (`draft: true`), with the front matter, Foreword, vocabulary, commands, tone edits, Sources and closing described above.
-2. Verify the Claims; correct the Post and note what was measured, checked and not re-run (Test environment, Measured and Checked lines, as in Part 7).
-3. Publish: `draft` off after Vlad has read it; reduce this spec to product intent.
 
 ## User stories
 
