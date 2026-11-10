@@ -1,6 +1,6 @@
 # 0012 · Part 8 of the agent Series: "The session as an event log"
 
-Status: planned
+Status: in progress (Steps 1 and 2 done; Step 3, publishing, waits for Vlad to read the Draft)
 
 Product spec only. The Post will be `src/content/posts/2026-11-10-the-session-as-an-event-log.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md), [spec 0007](0007-tools-as-data-post.md), [spec 0008](0008-providers-behind-one-interface-post.md), [spec 0009](0009-why-effect-post.md), [spec 0010](0010-services-and-layers-post.md) and [spec 0011](0011-streaming-post.md) for how Parts 1–7 were ported.
 
@@ -33,7 +33,7 @@ The Post states only what is checked before publishing, and anything that cannot
 
 - the `Part8_persistent_session` tag on the remote: its `src`, `test` and `drizzle` files equal the Post's finished files; the differences in `package.json` (`bun check`, `@effect/tsgo`) and in the migration folder's timestamp are noted, not hidden; the starting point matches Part 7's finished files
 - Steps 1–7 replayed on Part 7's finished files, with every state type-checking, the files after each step equal to the "Stuck?" files, and Step 3 failing exactly the two tests the Post says it fails
-- the finished files type-checking and the nineteen tests passing on Effect 4.1.0, and the deliberate breakages of Step 6 failing as shown
+- the finished files type-checking and the tests passing on Effect 4.1.0 (19 after Step 4, 34 in the finished suite), and the deliberate breakages of Step 6 failing as shown
 - `drizzle-orm` and `drizzle-kit` 1.0.0-rc.5 and `@effect/sql-sqlite-bun` 4.1.0 installing, and the `db:generate` output
 - the live runs on Ollama and llama.cpp, and the SIGKILL during a tool call with its two runs, including that the shell command kept running after the agent was killed; the Post says the model's wording differs and what could not be re-run
 - the read-cost table (100, 1,000 and 10,000 events) re-measured, and any comparison with a step's duration or the context window stated only if derived from those measurements
