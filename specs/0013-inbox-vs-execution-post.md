@@ -1,18 +1,18 @@
 # 0013 · Part 9 of the agent Series: "Inbox vs. execution"
 
-Status: in progress (Steps 1 and 2 done on 2026-11-12: the Draft Post is written and verified; Step 3 waits on the open items below)
+Status: implemented (2026-11-12), published
 
-Product spec only. The Post will be `src/content/posts/2026-11-12-inbox-vs-execution.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md) to [spec 0012](0012-session-event-log-post.md) for how Parts 1–8 were ported.
+Product spec only. The Post is `src/content/posts/2026-11-12-inbox-vs-execution.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md) to [spec 0012](0012-session-event-log-post.md) for how Parts 1–8 were ported.
 
 ## Problem statement
 
-Part 8 ends with an agent whose session survives the process, but only from the moment the agent takes a prompt. A line typed while a turn runs sits in the terminal's input buffer, and a line the program has read but not yet appended sits in memory; a restart finds neither. Part 2's roadmap lists _Inbox vs. execution_ as the second Part of Stage B (Session): saving a prompt and running the model become two separate acts, so a prompt is durable the moment it is accepted and a queued prompt survives a crash and runs on restart. Vlad finished that Part as a lesson in his OpenCode fork (`lessons/0009-inbox-vs-execution.html`), with the code tagged in the Companion repo as `Part9_inbox_vs_execution`. It needs to become Part 9, reading and looking like Parts 1–8.
+Part 8 ends with an agent whose session survives the process, but only from the moment the agent takes a prompt. A line typed while a turn runs sits in the terminal's input buffer, and a line the program has read but not yet appended sits in memory; a restart finds neither. Part 2's roadmap lists _Inbox vs. execution_ as the second Part of Stage B (Session): saving a prompt and running the model become two separate acts, so a prompt is durable the moment it is accepted and a queued prompt survives a crash and runs on restart. Vlad finished that Part as a lesson in his OpenCode fork (`lessons/0009-inbox-vs-execution.html`), with the code tagged in the Companion repo as `Part9_inbox_vs_execution`. It needed to become Part 9, reading and looking like Parts 1–8.
 
 The Series has no `planned` list, so the Series page needs no change beyond showing Part 9.
 
 ## Solution
 
-A faithful port of the lesson as one Post, lightly edited for the blog, with the same kinds of edits as specs 0006 to 0012. It is a Draft until Vlad has read it, then published.
+A faithful port of the lesson as one Post, lightly edited for the blog, with the same kinds of edits as specs 0006 to 0012. It was a Draft until Vlad had read it, and is now published.
 
 - **Front matter**: category Agentic AI, tags `agents`, `effect`, `typescript`, `sqlite`, `drizzle`, `ollama`, Series _Building an agent from scratch_, Part 9, title "Inbox vs. execution" (sentence case, the name Part 2's roadmap uses), Snapshot `Part9_inbox_vs_execution`, spelled as the tag is on the remote. `pubDate` is 2026-11-12. The Foreword calls it the second Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/) and links the Snapshot in a plain sentence, like Parts 1 and 3 to 8 ([spec 0005](0005-companion-repo.md)). There is no "your prediction" section.
 - **Content**: a prompt typed while the agent is busy and what a restart finds today, as a table of where a prompt can be when the process dies; why this belongs to the session (the two Anthropic posts the lesson quotes); four words (inbox, admit, deliver, wake); the six decisions (a prompt is in the inbox or in the log; delivery is one transaction; the wake is a hint and the inbox is the truth; one prompt per turn, oldest first, only when the agent is idle; a reader and a worker as two fibers, with the input-ended flag read before delivering; a terminal that gives each line to the newest question); what this leaves for later; the six quizzes; the hands-on build in seven steps (the inbox table and the move of the table file, `admit`/`deliver`/`pending` on the Session, tests of the inbox on a file with deliberate breakages, the line router, a reader and a worker, prompts that survive a restart, then queueing three prompts, killing the agent and starting it again) with the finished files collapsed; callouts; Sources.
@@ -27,11 +27,11 @@ A faithful port of the lesson as one Post, lightly edited for the blog, with the
 - **Sources**: OpenCode is linked at commit `97be25f046`, as in Parts 5 to 8, with the lesson's line anchors where they hold at that commit. The first item is the primary source: `session/inbox.ts`, `session/execution.ts` and `session/execution/restart.ts`; then `AGENTS.md` (the Session Core section on admission, delivery and wakeups); then Anthropic's _Scaling Managed Agents_ and _Building effective agents_ as the lesson cites them. The lesson's "Versions" line becomes the Test environment line.
 - **Cut**: the lesson-pack scaffolding (navigation, reference and glossary links, the kicker).
 - **Series**: unchanged; the page shows Parts 1–9 written.
-- **Earlier Parts**: Part 8 gets two small edits, because two sentences would otherwise be out of date: the link to the roadmap's _Inbox vs. execution_ in "What this leaves for later" points to Part 9, and the closing sentence no longer lists _Inbox vs. execution_ among the topics whose Parts are not yet scheduled. Part 2's roadmap entry (including the line that Stage B Parts are not yet scheduled) and Part 7's closing sentence stay as published. The edits are made in the step that publishes Part 9, not before.
+- **Earlier Parts**: Part 8 got two small edits, because two sentences would otherwise have been out of date: the mention of the roadmap's _Inbox vs. execution_ in "What this leaves for later" links Part 9, and the closing sentence no longer lists it among the topics whose Parts are not yet scheduled. Part 2's roadmap entry (including the line that Stage B Parts are not yet scheduled) and Part 7's closing sentence stay as published.
 
 ### Claims
 
-The Post states only what was checked before publishing, and anything that cannot be re-run is cut or hedged instead of carried over from the lesson. It carries a Test environment line and no evidence paragraphs; the checks below are done silently:
+The Post states only what was checked before publishing, and anything that could not be re-run was cut or hedged instead of carried over from the lesson. Its purpose is to teach, so it carries a Test environment line but no Measured, Checked or Not re-run paragraphs:
 
 - the `Part9_inbox_vs_execution` tag on the remote: its `src`, `test` and `drizzle` files equal the Post's finished files; the differences in `package.json` (`bun check`, `@effect/tsgo`), the folder name (`sigma-agent` against `my-agent`) and the migration timestamps are noted in the Post, not hidden; the starting point matches Part 8's finished files
 - Steps 1–7 replayed on Part 8's finished files, with every state type-checking, the files after each step equal to the "Stuck?" files, and any test the Post says fails on purpose failing exactly as shown
@@ -44,16 +44,7 @@ The Post states only what was checked before publishing, and anything that canno
 - the two Anthropic quotations and their attribution
 - the Part numbers and titles against the Series file, and the statements about Part 8 and Part 2 against those Posts
 
-## Steps
-
-1. Port the lesson as a Draft Post (`draft: true`) with the front matter, Foreword, vocabulary, commands, tone edits, Sources and closing described above.
-2. Verify the Claims; correct the Post (Test environment line included, no evidence paragraphs).
-3. Publish: `draft` off after Vlad has read it; make the two edits to Part 8; reduce this spec to product intent.
-
-### Open items before Step 3
-
-- The `Part9_inbox_vs_execution` tag's `src/terminal.ts` is still Part 8's readline version: `src/lines.ts` is in the tag but nothing imports it, so only the first of three piped prompts is admitted when the tag is run. The Post's Step 4 and its finished `terminal.ts` describe the version that uses the router (it type-checks and passes the 49 tests on the tag's other files, and reproduces the Step 7 runs). The tag needs a commit that wires the router in and a moved tag before the Post is published, or the Post's Step 4 and Step 7 change to match the tag.
-- The `Part8_persistent_session` tag's `test/agent.test.ts` lists its tests in a different order from Part 8's finished file; Part 9's instructions follow Part 8's Post, and the replay started from the Post's file.
+Known gap: the `Part9_inbox_vs_execution` tag's `src/terminal.ts` is still Part 8's readline version and does not use `src/lines.ts`, so the Post's Step 4 and Step 7 describe code the Snapshot does not yet contain. Delete this paragraph once the tag includes the router.
 
 ## User stories
 

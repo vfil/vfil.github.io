@@ -7,7 +7,6 @@ tags: [agents, effect, typescript, sqlite, drizzle, ollama]
 series: building-an-agent-from-scratch
 part: 9
 snapshot: Part9_inbox_vs_execution
-draft: true
 ---
 
 import Quiz from '../../components/Quiz.astro';
@@ -30,7 +29,7 @@ This Part changes where a prompt is kept first. A prompt is meant to be safe fro
 
 Anthropic's article on [Managed Agents](https://www.anthropic.com/research/managed-agents), which [Part 2](/posts/the-roadmap/) introduced, describes the session as "the append-only log of everything that happened", kept apart from the harness, the loop that calls the model. Because the log sits outside the harness, the article says, "nothing in the harness needs to survive a crash": a new one can be started, read the log and "resume from the last event". [Part 8](/posts/the-session-as-an-event-log/) built that log for what the agent did. This Part applies the same thought to what the user asked.
 
-The other article cited in [Part 1](/posts/the-loop/), [Building effective agents](https://www.anthropic.com/research/building-effective-agents), notes that agents "can pause for human feedback at checkpoints or when encountering blockers". Human input arrives at the human's pace and not at the agent's. A user may type while a tool runs, think of a correction a minute after pressing Enter, or send three requests in a row. For an agent that listens only between turns, each of those is a chance to lose the line. An agent with an inbox keeps the line.
+The other article cited in [Part 1](/posts/the-loop/), [Building effective agents](https://www.anthropic.com/research/building-effective-agents), notes that agents "can pause for human feedback at checkpoints or when encountering blockers". Human input arrives at the human's pace and not at the agent's. A user may type while a tool runs, think of a correction a minute after pressing Enter, or send three requests in a row. For an agent that listens only between turns, each of those is a chance to lose the line, which an inbox is there to prevent.
 
 ### What a restart finds today
 
@@ -50,7 +49,7 @@ The agent changes in four places. A new table holds the prompts that wait. The s
 
 ### Four words
 
-Four terms are used from here on. The _inbox_ holds the prompts a session has accepted and not yet run, oldest first. To _admit_ a prompt is to put it into the inbox. To _deliver_ a prompt is to move the oldest one out of the inbox and into the event log as a `prompt` event, which starts a turn. A _wake_ is a signal that tells the agent to look at the inbox. A prompt is always in exactly one of two places, the inbox or the event log, and never in both.
+Four terms are used from here on. The _inbox_ holds the prompts a session has accepted and not yet run, oldest first. To _admit_ a prompt is to put it into the inbox. To _deliver_ a prompt is to move the oldest one out of the inbox and into the event log as a `prompt` event, which starts a turn. A _wake_ is a signal that tells the agent to look at the inbox. In this design a prompt is in exactly one of two places, the inbox or the event log, and never in both.
 
 ### Six decisions in the design
 
@@ -68,7 +67,7 @@ With the two statements in one transaction, the prompt is in the inbox or in the
 
 ### 3. The wake is a hint, and the inbox is the truth
 
-When a prompt is admitted, the code that runs prompts has to find out. That is the job of the wake. The wake carries no prompt. It means "look at the inbox", and the prompt itself is in the table. Two consequences follow. Several wakes in a row can be merged into one, because the worker reads the inbox until it is empty anyway. And a missed wake delays a prompt at most until the next look, because the worker looks again after every turn, and at startup it looks at everything that was left behind.
+When a prompt is admitted, the code that runs prompts has to find out. That is the job of the wake. The wake carries no prompt. It means "look at the inbox", and the prompt itself is in the table. Two consequences follow. Several wakes in a row can be merged into one (OpenCode's word for this is to _coalesce_ them), because the worker reads the inbox until it is empty anyway. And a missed wake delays a prompt at most until the next look, because the worker looks again after every turn, and at startup it looks at everything that was left behind.
 
 OpenCode uses the same word and the same idea. Its execution service has a method `wake` with the comment "Registers newly recorded work. Repeated wakeups may coalesce" ([session/execution.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution.ts#L24-L25)). In the agent here the wake is a small Effect `Queue` that holds at most one item.
 
@@ -84,7 +83,7 @@ Each half runs as a _fiber_, which is Effect's lightweight thread: an independen
 
 ### 6. The terminal gives each line to the newest question
 
-Two places in the agent can now ask the user something at the same time: the reader, with `You: `, and a tool that needs approval, with `Allow: ... [y/N]`. The terminal from [Part 8](/posts/the-session-as-an-event-log/) used readline's `question` for both, and two things happen with that under Bun 1.4.4. When two questions are open, the first line typed goes to the older one, so a `y` meant for the approval would be admitted as a new prompt. And a line that arrives while no question is open is dropped, so when several lines are piped in, only the first one is read.
+Two places in the agent can now ask the user something at the same time: the reader, with `You: `, and a tool that needs approval, with `Allow: ... [y/N]`. The terminal from [Part 8](/posts/the-session-as-an-event-log/) used readline's `question` for both, and two things were observed with that under Bun 1.4.4. When two questions are open, the first line typed goes to the older one, so a `y` meant for the approval would be admitted as a new prompt. And a line that arrives while no question is open is dropped, so when several lines are piped in, only the first one is read.
 
 A small router, `makeLines`, replaces that. It keeps lines that nobody has asked for yet, hands a line to the newest open question (the one printed last is the one the user is answering), and fails all open questions when the input ends. The `Terminal` service keeps the same three methods, so nothing that uses it changes.
 
@@ -95,51 +94,51 @@ A prompt that always kills the process is delivered once and then resumed on eve
 ## Check yourself
 
 <Quiz
-  question={"The user types three prompts into the running agent, and the process is killed while it works on the first. Where are the other two?"}
+  question="The user types three prompts into the running agent, and the process is killed while it works on the first. Where are the other two?"
   options={["Nowhere: only the prompt being run is saved", "In the `inbox` table, still waiting", "In the terminal's input buffer", "In the event log, as `prompt` events"]}
   correct={1}
-  right={"Right. Each line was admitted the moment it was typed, so the rows are in the file. The next run finds them and runs them after the first prompt's turn."}
-  wrong={"A prompt goes into the log only when it is delivered, which happens when the agent is idle. Before that it is an inbox row, and the row is written as soon as the line is read."}
+  right="Right. Each line was admitted the moment it was typed, so the rows are in the file. The next run finds them and runs them after the first prompt's turn."
+  wrong="A prompt goes into the log only when it is delivered, which happens when the agent is idle. Before that it is an inbox row, and the row is written as soon as the line is read."
 />
 
 <Quiz
-  question={"Why are the delete from the inbox and the insert into the log one transaction?"}
+  question="Why are the delete from the inbox and the insert into the log one transaction?"
   options={["Because SQLite cannot run two statements in a row otherwise", "So the reader and the worker can use the same connection", "So a kill between them cannot lose the prompt or deliver it twice", "To make the delivery faster"]}
   correct={2}
-  right={"Right. With the two statements applied together or not at all, the prompt is in the inbox or in the log at every moment."}
-  wrong={"SQLite runs statements one after another without a transaction too, and a transaction is not faster. The reason is the moment between the statements: a kill there would leave the prompt in neither place or in both."}
+  right="Right. With the two statements applied together or not at all, the prompt is in the inbox or in the log at every moment."
+  wrong="SQLite runs statements one after another without a transaction too, and a transaction is not faster. The reason is the moment between the statements: a kill there would leave the prompt in neither place or in both."
 />
 
 <Quiz
-  question={"What does a wake carry?"}
+  question="What does a wake carry?"
   options={["The id of the inbox row", "The number of prompts that are waiting", "Nothing: it only tells the worker to look at the inbox", "The text of the prompt that was admitted"]}
   correct={2}
-  right={"Right. The prompt is in the table, and the wake is only a hint. That is why wakes can merge, and why a missed wake costs little."}
-  wrong={"If the wake carried the prompt, a lost wake would lose the prompt. It carries nothing, and the worker reads the inbox itself."}
+  right="Right. The prompt is in the table, and the wake is only a hint. That is why wakes can merge, and why a missed wake costs little."
+  wrong="If the wake carried the prompt, a lost wake would lose the prompt. It carries nothing, and the worker reads the inbox itself."
 />
 
 <Quiz
-  question={"A prompt is typed while a turn is running. When does the model see it?"}
+  question="A prompt is typed while a turn is running. When does the model see it?"
   options={["At the next step of the running turn", "Only after the agent is restarted", "After the turn ends, when the worker delivers it", "Immediately, in the step that is streaming"]}
   correct={2}
-  right={"Right. The agent delivers only when it is idle, one prompt per turn. Delivering inside a running turn is what OpenCode calls steering, and it is not built here."}
-  wrong={"The history of a turn does not change while the turn runs. The new prompt waits in the inbox until the worker finishes the current turn and delivers the oldest prompt."}
+  right="Right. The agent delivers only when it is idle, one prompt per turn. Delivering inside a running turn is what OpenCode calls steering, and it is not built here."
+  wrong="The history of a turn does not change while the turn runs. The new prompt waits in the inbox until the worker finishes the current turn and delivers the oldest prompt."
 />
 
 <Quiz
-  question={"The worker reads `inputEnded` before it calls `deliver`. What could go wrong if it read the flag after?"}
+  question="The worker reads `inputEnded` before it calls `deliver`. What could go wrong if it read the flag after?"
   options={["It could wait for a wake that never comes, with the input still open", "It could quit without running a prompt that was admitted just before the input ended", "It could deliver the same prompt twice", "It could run a prompt before the previous turn ends"]}
   correct={1}
-  right={"Right. The delivery finds the inbox empty, then the last prompt is admitted and the input ends, and the worker sees the flag and returns. Reading the flag first closes that gap."}
-  wrong={"The order only matters for the end of input. After a delivery finds nothing, the flag may have been set in the meantime together with a new row, and the worker must not trust an answer that is older than the flag."}
+  right="Right. The delivery finds the inbox empty, then the last prompt is admitted and the input ends, and the worker sees the flag and returns. Reading the flag first closes that gap."
+  wrong="The order only matters for the end of input. After a delivery finds nothing, the flag may have been set in the meantime together with a new row, and the worker must not trust an answer that is older than the flag."
 />
 
 <Quiz
-  question={"The reader is waiting at `You: ` while a tool asks `Allow: run ... [y/N]`. The user types `y`. Who receives the line?"}
+  question="The reader is waiting at `You: ` while a tool asks `Allow: run ... [y/N]`. The user types `y`. Who receives the line?"
   options={["Neither: the line is dropped because two questions are open", "The tool's question, because it is the newest open question", "Both, and each decides for itself", "The reader, because it asked first"]}
   correct={1}
-  right={"Right. The router hands a line to the newest open question. The approval was printed last, so it is the one the user is answering."}
-  wrong={"With readline's own `question`, the older question would take the line and the `y` would become a prompt. The router changes that: the newest open question gets the line."}
+  right="Right. The router hands a line to the newest open question. The approval was printed last, so it is the one the user is answering."
+  wrong="With readline's own `question`, the older question would take the line and the `y` would become a prompt. The router changes that: the newest open question gets the line."
 />
 
 ## Your turn: the inbox
@@ -157,7 +156,7 @@ The work happens in the `my-agent` folder from [Part 8](/posts/the-session-as-an
 | `test/fakes.ts`, `test/agent.test.ts`                                        | The fake terminal can hold back an answer and answer approvals from their own list; two new loop tests |
 | `test/resume.test.ts`                                                        | Three tests for a restart with prompts in the inbox                                                    |
 
-The other source files, `index.ts` included, do not change. Each step ends with the finished versions of its files, in a block that can be opened when a file does not match.
+The other source files, `index.ts` included, do not change. In the Snapshot the project folder is called `sigma-agent`, its `package.json` runs the type check as `bun check` (with `@effect/tsgo`), and its migration folder has a different timestamp. Each step ends with the finished versions of its files, in a block that can be opened when a file does not match.
 
 Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, `qwen3.5:9b`) with Effect 4.1.0, drizzle-orm and drizzle-kit 1.0.0-rc.5 and @effect/sql-sqlite-bun 4.1.0, on 12 November 2026. The model's wording will differ, and long lines in the transcripts are shortened.
 
@@ -219,10 +218,10 @@ $ bun run db:generate --name inbox
 $ drizzle-kit generate --name inbox
 No config path provided, using default 'drizzle.config.ts'
 Reading config file '/path/to/my-agent/drizzle.config.ts'
-[✓] Your SQL migration ➜ drizzle/20261111091451_inbox/migration.sql 🚀
+[✓] Your SQL migration ➜ drizzle/20261112194458_inbox/migration.sql 🚀
 ```
 
-The generated file `drizzle/20261111091451_inbox/migration.sql` contains:
+The generated file `drizzle/20261112194458_inbox/migration.sql` contains:
 
 ```sql
 CREATE TABLE `inbox` (
@@ -939,7 +938,7 @@ test/lines.test.ts:
  1 fail
 ```
 
-> **Watch for this.** Because the reader takes every line as soon as it can, piped input is read ahead. If three prompts are piped in and the first needs an approval, no line is left for it by the time the tool asks. The question then fails because the input has ended, and the tool is declined, exactly as it was in [Part 8](/posts/the-session-as-an-event-log/) when the input ended during a turn. An approval is meant for a person at the keyboard.
+> **Watch for this.** Because the reader takes every line as soon as it can, piped input is read ahead. If three prompts are piped in and the first needs an approval, no line is left for it by the time the tool asks. The question then fails because the input has ended, and the tool is declined, exactly as it was in [Part 8](/posts/the-session-as-an-event-log/) when the input ended during a turn. In this agent an approval expects a person at the keyboard.
 
 <details>
 <summary>Stuck? The finished lines.ts, terminal.ts and lines.test.ts</summary>
@@ -2032,7 +2031,7 @@ $ sqlite3 my-agent.db "select count(*) from inbox"
 
 Three small additions fit the design and are not built here:
 
-- **Idempotent admission.** `admit` could take an id from the caller and ignore a second admission with the same id. A client that retries a submit after a timeout would then not queue the same prompt twice. OpenCode works this way: reusing an inbox item id is idempotent, and the first admission wins.
+- **Idempotent admission.** `admit` could take an id from the caller and ignore a second admission with the same id. A client that retries a submit after a timeout would then not queue the same prompt twice. OpenCode works this way: reusing an inbox item id is idempotent, and the first admission wins ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L209)).
 - **Cancelling a waiting prompt.** Since the inbox is a table, a prompt can be removed from it before it is delivered. A `cancel(id)` that deletes the row, and a way to list the rows with their ids, would be enough.
 - **A line editor.** The terminal could redraw the `You: ` prompt and the text typed so far after each piece of output, so a reply no longer lands in the middle of a line being typed. That is a terminal user interface feature, and it would also bring back the arrow keys that readline's editing used to provide.
 
@@ -2064,7 +2063,7 @@ export default defineConfig({
 <details>
 <summary>Stuck? The migration for the inbox table</summary>
 
-`drizzle/20261111091451_inbox/migration.sql`
+`drizzle/20261112194458_inbox/migration.sql`
 
 ```sql
 CREATE TABLE `inbox` (
