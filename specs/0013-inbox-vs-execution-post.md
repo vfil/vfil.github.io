@@ -1,6 +1,6 @@
 # 0013 · Part 9 of the agent Series: "Inbox vs. execution"
 
-Status: planned
+Status: in progress (Steps 1 and 2 done on 2026-11-12: the Draft Post is written and verified; Step 3 waits on the open items below)
 
 Product spec only. The Post will be `src/content/posts/2026-11-12-inbox-vs-execution.mdx` in the Series `src/content/series/building-an-agent-from-scratch.md`; see [GLOSSARY.md](../GLOSSARY.md) for Post, Draft, Series, Part, Planned Part, Tag, Companion repo and Snapshot, and [spec 0003](0003-agent-loop-post.md), [spec 0006](0006-roadmap-post.md) to [spec 0012](0012-session-event-log-post.md) for how Parts 1–8 were ported.
 
@@ -49,6 +49,11 @@ The Post states only what was checked before publishing, and anything that canno
 1. Port the lesson as a Draft Post (`draft: true`) with the front matter, Foreword, vocabulary, commands, tone edits, Sources and closing described above.
 2. Verify the Claims; correct the Post (Test environment line included, no evidence paragraphs).
 3. Publish: `draft` off after Vlad has read it; make the two edits to Part 8; reduce this spec to product intent.
+
+### Open items before Step 3
+
+- The `Part9_inbox_vs_execution` tag's `src/terminal.ts` is still Part 8's readline version: `src/lines.ts` is in the tag but nothing imports it, so only the first of three piped prompts is admitted when the tag is run. The Post's Step 4 and its finished `terminal.ts` describe the version that uses the router (it type-checks and passes the 49 tests on the tag's other files, and reproduces the Step 7 runs). The tag needs a commit that wires the router in and a moved tag before the Post is published, or the Post's Step 4 and Step 7 change to match the tag.
+- The `Part8_persistent_session` tag's `test/agent.test.ts` lists its tests in a different order from Part 8's finished file; Part 9's instructions follow Part 8's Post, and the replay started from the Post's file.
 
 ## User stories
 
