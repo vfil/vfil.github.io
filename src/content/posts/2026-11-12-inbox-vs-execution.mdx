@@ -1,0 +1,3047 @@
+---
+title: 'Inbox vs. execution'
+description: 'After Part 8 a prompt typed while the agent is busy, or left behind by a crash, is lost. A SQLite inbox that accepts each prompt as it is typed, and a worker that runs it later, lets it wait its turn and survive a restart.'
+pubDate: 2026-11-12
+category: agentic-ai
+tags: [agents, effect, typescript, sqlite, drizzle, ollama]
+series: building-an-agent-from-scratch
+part: 9
+snapshot: Part9_inbox_vs_execution
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+This Part separates accepting a prompt from running it. Each line the user types is saved in the SQLite file from [Part 8](/posts/the-session-as-an-event-log/) as soon as it is read, and the agent runs it later, when it is free. A prompt typed while a turn runs waits its turn, and one that is still waiting when the process is killed is there on the next start. It is the second Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/).
+
+The code for this Part is available as the [`Part9_inbox_vs_execution` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part9_inbox_vs_execution), the repo where I build this agent in parallel.
+
+## A prompt typed while the agent is busy
+
+Suppose the agent is in the middle of a refactor. It has read a dozen files, edited three of them, and started the test suite, which will take a few minutes. While it works, the user remembers one more thing and types a second line: "also update the changelog". A moment later the terminal is closed, or the laptop goes to sleep and the process is killed.
+
+With the agent from [Part 8](/posts/the-session-as-an-event-log/), that second line is gone. Nothing was reading the keyboard while the turn ran, so the line was sitting in the terminal's own input buffer, outside the program. The log from [Part 8](/posts/the-session-as-an-event-log/) is durable, but it starts at the moment the agent takes a prompt. Everything the user handed over before that moment depends on the process staying alive.
+
+This Part changes where a prompt is kept first. A prompt is meant to be safe from the moment the user hands it over, whether or not the agent can do anything with it yet. A mail slot in a door works this way: a letter that drops through the slot is delivered, whether or not anyone is home to read it, and reading it is a separate act that happens later. For the agent, _accepting_ a prompt becomes its own step, a write to the SQLite file, and _running_ a prompt becomes a second step that starts when the agent is free. OpenCode's AGENTS.md states the rule as "Keep durable prompt admission separate from model execution" ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208)).
+
+### Why this belongs to the session
+
+Anthropic's article on [Managed Agents](https://www.anthropic.com/research/managed-agents), which [Part 2](/posts/the-roadmap/) introduced, describes the session as "the append-only log of everything that happened", kept apart from the harness, the loop that calls the model. Because the log sits outside the harness, the article says, "nothing in the harness needs to survive a crash": a new one can be started, read the log and "resume from the last event". [Part 8](/posts/the-session-as-an-event-log/) built that log for what the agent did. This Part applies the same thought to what the user asked.
+
+The other article cited in [Part 1](/posts/the-loop/), [Building effective agents](https://www.anthropic.com/research/building-effective-agents), notes that agents "can pause for human feedback at checkpoints or when encountering blockers". Human input arrives at the human's pace and not at the agent's. A user may type while a tool runs, think of a correction a minute after pressing Enter, or send three requests in a row. For an agent that listens only between turns, each of those is a chance to lose the line, which an inbox is there to prevent.
+
+### What a restart finds today
+
+This table lists the places a prompt can be when the process dies, and what the next run finds:
+
+| The prompt is...                                | It lives in...              | The next run...                                                   |
+| ----------------------------------------------- | --------------------------- | ----------------------------------------------------------------- |
+| typed while a turn runs                         | the terminal's input buffer | never sees it                                                     |
+| read by the program, not yet appended           | the process's memory        | never sees it                                                     |
+| appended as a `prompt` event, turn not finished | the file                    | finishes the turn ([Part 8](/posts/the-session-as-an-event-log/)) |
+
+The first two rows are the ones this Part changes. The second row is a short gap: between the moment the program has the text in memory and the moment the `prompt` event is in the file, one insert wide, but it is there. After this Part, the first two rows end up in the same place as the third: in the file, where a restart can find them.
+
+The agent changes in four places. A new table holds the prompts that wait. The session gets methods to put a prompt into it and take one out. The terminal learns to share the keyboard between two readers. And the REPL, the read-eval-print loop that reads a line, runs a turn on it, prints the output and asks again, splits into a reader that accepts prompts and a worker that runs them.
+
+## The inbox
+
+### Four words
+
+Four terms are used from here on. The _inbox_ holds the prompts a session has accepted and not yet run, oldest first. To _admit_ a prompt is to put it into the inbox. To _deliver_ a prompt is to move the oldest one out of the inbox and into the event log as a `prompt` event, which starts a turn. A _wake_ is a signal that tells the agent to look at the inbox. In this design a prompt is in exactly one of two places, the inbox or the event log, and never in both.
+
+### Six decisions in the design
+
+### 1. A prompt is in the inbox or in the log, and the log keeps its meaning
+
+The event log from [Part 8](/posts/the-session-as-an-event-log/) records facts that happened: the user said this, the model answered that. A prompt that waits has not been answered by anyone yet, so it is not that kind of fact. The inbox is a second table with one row per waiting prompt, and a row is deleted when its prompt is delivered. The table is a to-do list, and the log is the record of what was done.
+
+The other way to do this is to add two events to the log, "prompt queued" and "prompt delivered", and work out the waiting prompts by folding the log. That would need no second table. It would also make accepting a prompt a write to the log, whose event numbers are counted by one writer ([Part 8](/posts/the-session-as-an-event-log/)), and it would put prompts in the log that the model has not yet seen. OpenCode keeps a separate table for the same reason. Its AGENTS.md says: "`Session.prompt(...)` publishes `session.inbox.enqueued`, whose projection inserts one durable `session_inbox` row [...] `session_inbox` stores only unconsumed work" ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208)).
+
+### 2. Delivery is one transaction
+
+Delivering a prompt takes two statements: delete the row from the inbox, and insert the `prompt` event into the log. A _transaction_ is a group of statements that SQLite applies as a whole or not at all, even if the process is killed in the middle. Without one, a kill between the two statements has two possible outcomes. If the delete came first, the prompt is in neither place and is lost. If the insert came first, the prompt is in both and runs twice.
+
+With the two statements in one transaction, the prompt is in the inbox or in the log at every moment. OpenCode does the same with its own tables: "Delivery publishes `session.inbox.delivered`; its projection consumes the inbox row and inserts the visible message in the same transaction" (same paragraph of AGENTS.md).
+
+### 3. The wake is a hint, and the inbox is the truth
+
+When a prompt is admitted, the code that runs prompts has to find out. That is the job of the wake. The wake carries no prompt. It means "look at the inbox", and the prompt itself is in the table. Two consequences follow. Several wakes in a row can be merged into one (OpenCode's word for this is to _coalesce_ them), because the worker reads the inbox until it is empty anyway. And a missed wake delays a prompt at most until the next look, because the worker looks again after every turn, and at startup it looks at everything that was left behind.
+
+OpenCode uses the same word and the same idea. Its execution service has a method `wake` with the comment "Registers newly recorded work. Repeated wakeups may coalesce" ([session/execution.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution.ts#L24-L25)). In the agent here the wake is a small Effect `Queue` that holds at most one item.
+
+### 4. One prompt per turn, oldest first, and only when the agent is idle
+
+The worker delivers a prompt only after the previous turn has ended. A prompt typed in the middle of a turn waits, so the model never finds a new user message in the history halfway through its own work. OpenCode names this delivery mode "queue". It has a second mode, "steer", that delivers a prompt at a step boundary inside a running turn, and in OpenCode prompts steer by default ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L214), [session/inbox.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/inbox.ts#L52-L57), [the two modes](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/inbox.ts#L262-L279)). The agent here has only the first mode.
+
+### 5. A reader and a worker
+
+The REPL splits in two halves that do not wait for each other. The _reader_ asks for a line, admits it, rings the wake and asks again. It never waits for the model. The _worker_ first finishes an interrupted turn, the way [Part 8](/posts/the-session-as-an-event-log/) does, and then repeats: deliver the oldest prompt, run its turn, and when the inbox is empty wait for a wake.
+
+Each half runs as a _fiber_, which is Effect's lightweight thread: an independent task that the runtime pauses while it waits for something and resumes later. The program ends when the input has ended and the inbox is empty, so the worker finishes the queued prompts first. One detail matters for that rule. The worker reads the flag "input has ended" before it delivers. If it read the flag after, a prompt admitted just before the end could be missed: the delivery finds the inbox empty, the reader admits the last prompt and ends the input, and the worker sees the flag set and quits without running it.
+
+### 6. The terminal gives each line to the newest question
+
+Two places in the agent can now ask the user something at the same time: the reader, with `You: `, and a tool that needs approval, with `Allow: ... [y/N]`. The terminal from [Part 8](/posts/the-session-as-an-event-log/) used readline's `question` for both, and two things were observed with that under Bun 1.4.4. When two questions are open, the first line typed goes to the older one, so a `y` meant for the approval would be admitted as a new prompt. And a line that arrives while no question is open is dropped, so when several lines are piped in, only the first one is read.
+
+A small router, `makeLines`, replaces that. It keeps lines that nobody has asked for yet, hands a line to the newest open question (the one printed last is the one the user is answering), and fails all open questions when the input ends. The `Terminal` service keeps the same three methods, so nothing that uses it changes.
+
+### What this leaves for later
+
+A prompt that always kills the process is delivered once and then resumed on every start, so the agent can crash in a loop. The `resume` from [Part 8](/posts/the-session-as-an-event-log/) has the same limit. A line typed while the model is streaming appears after the `You: ` prompt that is already on screen, in the middle of the reply. Steering a running turn is not built. And a session never shrinks, so a long task will eventually outgrow the model's context window, which the roadmap's _Context limits and compaction_ covers.
+
+## Check yourself
+
+<Quiz
+  question="The user types three prompts into the running agent, and the process is killed while it works on the first. Where are the other two?"
+  options={["Nowhere: only the prompt being run is saved", "In the `inbox` table, still waiting", "In the terminal's input buffer", "In the event log, as `prompt` events"]}
+  correct={1}
+  right="Right. Each line was admitted the moment it was typed, so the rows are in the file. The next run finds them and runs them after the first prompt's turn."
+  wrong="A prompt goes into the log only when it is delivered, which happens when the agent is idle. Before that it is an inbox row, and the row is written as soon as the line is read."
+/>
+
+<Quiz
+  question="Why are the delete from the inbox and the insert into the log one transaction?"
+  options={["Because SQLite cannot run two statements in a row otherwise", "So the reader and the worker can use the same connection", "So a kill between them cannot lose the prompt or deliver it twice", "To make the delivery faster"]}
+  correct={2}
+  right="Right. With the two statements applied together or not at all, the prompt is in the inbox or in the log at every moment."
+  wrong="SQLite runs statements one after another without a transaction too, and a transaction is not faster. The reason is the moment between the statements: a kill there would leave the prompt in neither place or in both."
+/>
+
+<Quiz
+  question="What does a wake carry?"
+  options={["The id of the inbox row", "The number of prompts that are waiting", "Nothing: it only tells the worker to look at the inbox", "The text of the prompt that was admitted"]}
+  correct={2}
+  right="Right. The prompt is in the table, and the wake is only a hint. That is why wakes can merge, and why a missed wake costs little."
+  wrong="If the wake carried the prompt, a lost wake would lose the prompt. It carries nothing, and the worker reads the inbox itself."
+/>
+
+<Quiz
+  question="A prompt is typed while a turn is running. When does the model see it?"
+  options={["At the next step of the running turn", "Only after the agent is restarted", "After the turn ends, when the worker delivers it", "Immediately, in the step that is streaming"]}
+  correct={2}
+  right="Right. The agent delivers only when it is idle, one prompt per turn. Delivering inside a running turn is what OpenCode calls steering, and it is not built here."
+  wrong="The history of a turn does not change while the turn runs. The new prompt waits in the inbox until the worker finishes the current turn and delivers the oldest prompt."
+/>
+
+<Quiz
+  question="The worker reads `inputEnded` before it calls `deliver`. What could go wrong if it read the flag after?"
+  options={["It could wait for a wake that never comes, with the input still open", "It could quit without running a prompt that was admitted just before the input ended", "It could deliver the same prompt twice", "It could run a prompt before the previous turn ends"]}
+  correct={1}
+  right="Right. The delivery finds the inbox empty, then the last prompt is admitted and the input ends, and the worker sees the flag and returns. Reading the flag first closes that gap."
+  wrong="The order only matters for the end of input. After a delivery finds nothing, the flag may have been set in the meantime together with a new row, and the worker must not trust an answer that is older than the flag."
+/>
+
+<Quiz
+  question="The reader is waiting at `You: ` while a tool asks `Allow: run ... [y/N]`. The user types `y`. Who receives the line?"
+  options={["Neither: the line is dropped because two questions are open", "The tool's question, because it is the newest open question", "Both, and each decides for itself", "The reader, because it asked first"]}
+  correct={1}
+  right="Right. The router hands a line to the newest open question. The approval was printed last, so it is the one the user is answering."
+  wrong="With readline's own `question`, the older question would take the line and the `y` would become a prompt. The router changes that: the newest open question gets the line."
+/>
+
+## Your turn: the inbox
+
+The work happens in the `my-agent` folder from [Part 8](/posts/the-session-as-an-event-log/), and every path in this Part is relative to that folder. This Part creates three new files and a migration, moves one file, and changes seven existing ones. Before each snippet, the text names the file it belongs to and says whether to create the file, replace something in it, or add to it:
+
+| File                                                                         | Change                                                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `src/session-table.ts` → `src/db/schema.ts`, `drizzle.config.ts`, `drizzle/` | The table file moves, the `inbox` table is added, and a second migration is generated                  |
+| `src/session.ts`                                                             | `Session` gains `admit`, `deliver` and `pending`                                                       |
+| `test/inbox.test.ts`                                                         | New. The inbox on a file                                                                               |
+| `src/lines.ts`, `test/lines.test.ts`                                         | New. The line router and its tests                                                                     |
+| `src/terminal.ts`                                                            | `TerminalLive` reads lines through the router                                                          |
+| `src/agent.ts`                                                               | `turn` is removed, and `repl` becomes a reader and a worker                                            |
+| `test/fakes.ts`, `test/agent.test.ts`                                        | The fake terminal can hold back an answer and answer approvals from their own list; two new loop tests |
+| `test/resume.test.ts`                                                        | Three tests for a restart with prompts in the inbox                                                    |
+
+The other source files, `index.ts` included, do not change. In the Snapshot the project folder is called `sigma-agent`, its `package.json` runs the type check as `bun check` (with `@effect/tsgo`), and its migration folder has a different timestamp. Each step ends with the finished versions of its files, in a block that can be opened when a file does not match.
+
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, `qwen3.5:9b`) with Effect 4.1.0, drizzle-orm and drizzle-kit 1.0.0-rc.5 and @effect/sql-sqlite-bun 4.1.0, on 12 November 2026. The model's wording will differ, and long lines in the transcripts are shortened.
+
+### Step 1: The inbox table
+
+[Part 8](/posts/the-session-as-an-event-log/) kept the event table in `src/session-table.ts`. The file is about to hold two tables, so the singular name no longer fits. The file moves to `src/db/schema.ts`.
+
+The move touches three places. The file changes folder, the import in `src/session.ts` follows it, and the config tells Drizzle Kit where to look. First, in the `my-agent` folder, move the file:
+
+```bash
+mkdir src/db
+mv src/session-table.ts src/db/schema.ts
+```
+
+Next, in `src/session.ts`, find the import of the table file near the top. It currently reads `import { EventTable } from "./session-table"`. Replace that line with:
+
+```ts
+import { EventTable, InboxTable } from "./db/schema"
+```
+
+Last, open `drizzle.config.ts` in the project folder, next to `package.json`. It exists from [Part 8](/posts/the-session-as-an-event-log/). Replace its contents with the version below, in which only the `schema` line is different:
+
+```ts
+import { defineConfig } from "drizzle-kit"
+
+export default defineConfig({
+  dialect: "sqlite",
+  schema: "./src/db/schema.ts",
+  out: "./drizzle",
+})
+```
+
+1. `src/db/schema.ts` holds the same `EventTable` as before. Only the folder and the file name change.
+2. `src/session.ts` imports from `./db/schema`. It already imports `EventTable`; `InboxTable` is added to the same line, since Step 2 uses it.
+3. `schema` in `drizzle.config.ts` is the path Drizzle Kit reads the tables from. It takes a file, a folder or a glob, so a project with many tables can later point it at a folder instead.
+4. The first migration is not affected. Drizzle Kit stores the table definitions in its snapshots, not the path of the file they came from, so generating a migration after the move reports no schema changes.
+
+The inbox is declared next to the event table. Open `src/db/schema.ts` and add this at the bottom of the file, after `EventTable`. The imports at the top already cover it. Each row is one waiting prompt:
+
+```ts
+// The inbox: the prompts a session has accepted and not yet run. A row is deleted when its prompt is delivered.
+// `id` counts up, so the lowest id is the oldest prompt.
+export const InboxTable = sqliteTable("inbox", {
+  id: integer().primaryKey({ autoIncrement: true }),
+  session_id: text().notNull(),
+  text: text().notNull(),
+})
+```
+
+1. `InboxTable` is a second table in the same SQLite file as `EventTable`, so one transaction can touch both.
+2. `id` is an integer that the database fills in and counts up (`autoIncrement`). Because it only grows, the row with the lowest `id` is the oldest prompt, and that is the order of delivery.
+3. `session_id` says which session the prompt belongs to, as in the event table, so one file can hold the inboxes of several sessions.
+4. `text` is the prompt itself. There is no column for a time or a status: a row exists while the prompt waits, and it is deleted when the prompt is delivered.
+
+Drizzle Kit compares the declared tables with the last snapshot and writes only the difference. Run the generator from the `my-agent` folder, and name the migration `inbox`. The command creates a new folder under `drizzle/` and writes the SQL file for you, so there is nothing to type into it. The first migration stays as it was:
+
+```text
+$ bun run db:generate --name inbox
+$ drizzle-kit generate --name inbox
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '/path/to/my-agent/drizzle.config.ts'
+[✓] Your SQL migration ➜ drizzle/20261112194458_inbox/migration.sql 🚀
+```
+
+The generated file `drizzle/20261112194458_inbox/migration.sql` contains:
+
+```sql
+CREATE TABLE `inbox` (
+	`id` integer PRIMARY KEY AUTOINCREMENT,
+	`session_id` text NOT NULL,
+	`text` text NOT NULL
+);
+```
+
+The folder name starts with the time of generation, so it differs from run to run. The migrations run in that order when the agent opens the file, so a database written by [Part 8](/posts/the-session-as-an-event-log/) gets the new table the first time Part 9 opens it, and keeps its events.
+
+<details>
+<summary>Stuck? The finished src/db/schema.ts</summary>
+
+`src/db/schema.ts`
+
+```ts
+import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
+
+// The event log: one row per session event. `seq` orders the events of a session.
+export const EventTable = sqliteTable(
+  "event",
+  {
+    session_id: text().notNull(),
+    seq: integer().notNull(),
+    type: text().notNull(),
+    data: text({ mode: "json" }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.session_id, table.seq] })],
+)
+
+// The inbox: the prompts a session has accepted and not yet run. A row is deleted when its prompt is delivered.
+// `id` counts up, so the lowest id is the oldest prompt.
+export const InboxTable = sqliteTable("inbox", {
+  id: integer().primaryKey({ autoIncrement: true }),
+  session_id: text().notNull(),
+  text: text().notNull(),
+})
+```
+
+</details>
+
+### Step 2: Admit, deliver and pending
+
+The agent needs three new things from its session. All of the changes in this step are in `src/session.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). First, in the import from `drizzle-orm` near the top, add `count` to the list, since `pending` uses it:
+
+```ts
+import { asc, count, eq, max } from "drizzle-orm"
+```
+
+Next, find the `Session` class and replace it, comment and all, with the version below. It is the service definition with the three new members and what each promises:
+
+```ts
+// What the agent needs from its session: accept prompts, append facts, and read the facts back.
+export class Session extends Context.Service<
+  Session,
+  {
+    readonly id: string
+    // Saves a prompt in the inbox. From this moment it survives a restart, whether or not the model ever sees it.
+    readonly admit: (text: string) => Effect.Effect<void>
+    // Moves the oldest prompt out of the inbox and into the log as a `prompt` event, in one indivisible act.
+    // Returns its text, or undefined when the inbox is empty.
+    readonly deliver: Effect.Effect<string | undefined>
+    // How many prompts wait in the inbox.
+    readonly pending: Effect.Effect<number>
+    readonly append: (event: SessionEvent) => Effect.Effect<void>
+    // Every call reads the log again.
+    readonly events: Effect.Effect<SessionEvent[], SessionCorrupt>
+    readonly history: Effect.Effect<Message[], SessionCorrupt>
+  }
+>()("@agent/Session") {}
+```
+
+1. `admit` takes the text of a prompt and writes it to the inbox. When the Effect has finished, the prompt is in the file. Nothing in its type can fail, because a disk failure is a defect, as it is for `append`.
+2. `deliver` is an Effect and not a function. Each time it runs, it moves the oldest prompt of this session from the inbox to the log and returns its text, or returns `undefined` when there is nothing to deliver.
+3. `pending` counts the rows in the inbox of this session. The agent uses it once, at startup, to tell the user what an earlier run left behind.
+4. The rest of the service is as in [Part 8](/posts/the-session-as-an-event-log/). The comments on the three new members are the contract the tests in step 3 check.
+
+The implementation is also in `src/session.ts`, inside the generator of `SessionLive`. First, find the line `const thisSession = eq(EventTable.session_id, options.id)` and add a second condition right below it, for the rows of this session's inbox:
+
+```ts
+      const thisInbox = eq(InboxTable.session_id, options.id)
+```
+
+Then find the line `return Session.of({ id: options.id, append, events, history: Effect.map(events, toHistory) })` at the end of the generator. Replace that one line with the code below, which defines the new pieces first and then returns the service with the three new members added:
+
+```ts
+      const admit = (text: string) =>
+        db.insert(InboxTable).values({ session_id: options.id, text }).pipe(Effect.asVoid, Effect.orDie)
+
+      // Deleting the inbox row and inserting the `prompt` event happen in one transaction: both take effect,
+      // or neither does. A crash between the two statements cannot lose the prompt or deliver it twice.
+      const deliver = Effect.suspend(() => {
+        const next = seq + 1
+        return db
+          .transaction((tx) =>
+            Effect.gen(function* () {
+              const [oldest] = yield* tx.select().from(InboxTable).where(thisInbox).orderBy(asc(InboxTable.id)).limit(1)
+              if (!oldest) return undefined
+              yield* tx.delete(InboxTable).where(eq(InboxTable.id, oldest.id))
+              yield* tx
+                .insert(EventTable)
+                .values({ session_id: options.id, seq: next, type: "prompt", data: encode({ type: "prompt", text: oldest.text }) })
+              return oldest.text
+            }),
+          )
+          .pipe(
+            // The number is used up only once the transaction has committed.
+            Effect.tap((text) =>
+              Effect.sync(() => {
+                if (text !== undefined) seq = next
+              }),
+            ),
+            Effect.orDie,
+          )
+      })
+
+      const pending = db.select({ waiting: count() }).from(InboxTable).where(thisInbox).pipe(
+        Effect.map(([row]) => row?.waiting ?? 0),
+        Effect.orDie,
+      )
+
+      return Session.of({ id: options.id, admit, deliver, pending, append, events, history: Effect.map(events, toHistory) })
+```
+
+1. `thisInbox` is the condition "this session's rows", defined once like `thisSession` and used by the queries on the inbox.
+2. `admit` is one insert. The id and the order come from the database.
+3. `deliver` starts with `const next = seq + 1`, the number the new `prompt` event will have. The counter itself is not moved yet.
+4. `db.transaction` runs the generator it is given inside a SQLite transaction. The generator reads the oldest inbox row of this session, deletes it, inserts the `prompt` event with the number `next`, and returns the text. If the inbox is empty it returns `undefined` and changes nothing.
+5. If any statement throws, SQLite undoes the others, and the Effect fails. The failure is turned into a defect by `Effect.orDie`, like every other disk problem.
+6. The counter `seq` is set to `next` only after the transaction has committed. A delivery that is undone does not use up a number, so the log has no gap.
+7. `pending` is a `count(*)` over this session's inbox rows.
+8. `Session.of` now returns the three new members next to the old ones.
+
+A short script shows the three methods together. It is a throwaway check and not part of the project: run it from a terminal in the `my-agent` folder, and it saves nothing as a file. It admits two prompts, delivers one, and prints the counts and the log after each move:
+
+```bash
+bun -e '
+import { Effect } from "effect"
+import { Session, SessionLive } from "./src/session"
+
+const program = Effect.gen(function* () {
+  const session = yield* Session
+  yield* session.admit("List the files")
+  yield* session.admit("Read notes/todo.txt")
+  console.log("pending after two admits:", yield* session.pending)
+  console.log("log after two admits:    ", (yield* session.events).length, "events")
+  console.log("delivered:", yield* session.deliver)
+  console.log("pending after one deliver:", yield* session.pending)
+  console.log("log after one deliver:    ", JSON.stringify(yield* session.events))
+})
+
+await Effect.runPromise(program.pipe(Effect.provide(SessionLive({ path: "try.db", id: "demo" }))))
+'
+```
+
+```text
+pending after two admits: 2
+log after two admits:     0 events
+delivered: List the files
+pending after one deliver: 1
+log after one deliver:     [{"type":"prompt","text":"List the files"}]
+```
+
+The file is plain SQLite, so the second prompt can be seen where it waits, and the first one where it moved to:
+
+```text
+$ sqlite3 -header -column try.db "select * from inbox"
+id  session_id  text
+--  ----------  -------------------
+2   demo        Read notes/todo.txt
+
+$ sqlite3 -header -column try.db "select session_id, seq, type from event"
+session_id  seq  type
+----------  ---  ------
+demo        1    prompt
+```
+
+`try.db` and its `-wal` and `-shm` files can be deleted afterwards.
+
+<details>
+<summary>Stuck? The finished session.ts</summary>
+
+`src/session.ts`
+
+```ts
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { asc, count, eq, max } from "drizzle-orm"
+import * as SQLiteBunDrizzle from "drizzle-orm/effect-sqlite-bun"
+import { migrate } from "drizzle-orm/effect-sqlite-bun/migrator"
+import { Context, Effect, Layer, Schema } from "effect"
+import { SessionCorrupt } from "./errors"
+import { toHistory } from "./history"
+import type { Message } from "./messages"
+import { SessionEvent } from "./session-event"
+import { EventTable, InboxTable } from "./db/schema"
+
+// What the agent needs from its session: accept prompts, append facts, and read the facts back.
+export class Session extends Context.Service<
+  Session,
+  {
+    readonly id: string
+    // Saves a prompt in the inbox. From this moment it survives a restart, whether or not the model ever sees it.
+    readonly admit: (text: string) => Effect.Effect<void>
+    // Moves the oldest prompt out of the inbox and into the log as a `prompt` event, in one indivisible act.
+    // Returns its text, or undefined when the inbox is empty.
+    readonly deliver: Effect.Effect<string | undefined>
+    // How many prompts wait in the inbox.
+    readonly pending: Effect.Effect<number>
+    readonly append: (event: SessionEvent) => Effect.Effect<void>
+    // Every call reads the log again.
+    readonly events: Effect.Effect<SessionEvent[], SessionCorrupt>
+    readonly history: Effect.Effect<Message[], SessionCorrupt>
+  }
+>()("@agent/Session") {}
+
+const migrationsFolder = new URL("../drizzle", import.meta.url).pathname
+const decode = Schema.decodeUnknownEffect(SessionEvent)
+const encode = Schema.encodeSync(SessionEvent)
+
+// The real session: a SQLite file. Building the layer opens the file and applies the migrations;
+// the end of the program closes it. A disk failure is a defect, not something the agent can handle.
+export const SessionLive = (options: { path: string; id: string }) =>
+  Layer.effect(
+    Session,
+    Effect.gen(function* () {
+      const db = yield* SQLiteBunDrizzle.makeWithDefaults()
+      yield* migrate(db, { migrationsFolder })
+
+      const thisSession = eq(EventTable.session_id, options.id)
+      const thisInbox = eq(InboxTable.session_id, options.id)
+
+      // The numbering continues where the log stops. One process writes a session, so it can count for itself.
+      const [last] = yield* db.select({ seq: max(EventTable.seq) }).from(EventTable).where(thisSession)
+      let seq = last?.seq ?? 0
+
+      // A row that no longer matches the schema stops the read and says which event it was.
+      const readEvent = (row: typeof EventTable.$inferSelect) =>
+        decode(row.data).pipe(
+          Effect.mapError((error) => new SessionCorrupt({ session: options.id, seq: row.seq, problem: error.message })),
+        )
+
+      const events = db.select().from(EventTable).where(thisSession).orderBy(asc(EventTable.seq)).pipe(
+        Effect.flatMap(Effect.forEach(readEvent)),
+        Effect.catchTag("EffectDrizzleQueryError", Effect.die),
+      )
+
+      const append = (event: SessionEvent) =>
+        Effect.suspend(() =>
+          db.insert(EventTable).values({ session_id: options.id, seq: ++seq, type: event.type, data: encode(event) }),
+        ).pipe(Effect.asVoid, Effect.orDie)
+
+      const admit = (text: string) =>
+        db.insert(InboxTable).values({ session_id: options.id, text }).pipe(Effect.asVoid, Effect.orDie)
+
+      // Deleting the inbox row and inserting the `prompt` event happen in one transaction: both take effect,
+      // or neither does. A crash between the two statements cannot lose the prompt or deliver it twice.
+      const deliver = Effect.suspend(() => {
+        const next = seq + 1
+        return db
+          .transaction((tx) =>
+            Effect.gen(function* () {
+              const [oldest] = yield* tx.select().from(InboxTable).where(thisInbox).orderBy(asc(InboxTable.id)).limit(1)
+              if (!oldest) return undefined
+              yield* tx.delete(InboxTable).where(eq(InboxTable.id, oldest.id))
+              yield* tx
+                .insert(EventTable)
+                .values({ session_id: options.id, seq: next, type: "prompt", data: encode({ type: "prompt", text: oldest.text }) })
+              return oldest.text
+            }),
+          )
+          .pipe(
+            // The number is used up only once the transaction has committed.
+            Effect.tap((text) =>
+              Effect.sync(() => {
+                if (text !== undefined) seq = next
+              }),
+            ),
+            Effect.orDie,
+          )
+      })
+
+      const pending = db.select({ waiting: count() }).from(InboxTable).where(thisInbox).pipe(
+        Effect.map(([row]) => row?.waiting ?? 0),
+        Effect.orDie,
+      )
+
+      return Session.of({ id: options.id, admit, deliver, pending, append, events, history: Effect.map(events, toHistory) })
+    }).pipe(Effect.orDie),
+  ).pipe(Layer.provide(SqliteClient.layer({ filename: options.path }).pipe(Layer.orDie)))
+```
+
+</details>
+
+### Step 3: Test the inbox on a file, then break it
+
+The inbox tests use a real file in a temporary folder, like the session tests from [Part 8](/posts/the-session-as-an-event-log/). Create a new file, `test/inbox.test.ts`, and start it with the imports, the setup and the helper `using`. The helper opens the file, runs some code, and closes the file again, which is one run of the agent. Then come the first two tests, which check the order and the move from the inbox to the log:
+
+```ts
+import { Database } from "bun:sqlite"
+import { afterEach, beforeEach, expect, test } from "bun:test"
+import { Effect, Exit } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Session, SessionLive } from "../src/session"
+
+let path: string
+let dir: string
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "agent-inbox-"))
+  path = join(dir, "agent.db")
+})
+afterEach(() => rm(dir, { recursive: true, force: true }))
+
+// Opens the file, runs `use`, and closes the file again, like one run of the agent.
+const using = <A, E>(id: string, use: (session: Session["Service"]) => Effect.Effect<A, E>) =>
+  Effect.runPromise(Effect.gen(function* () { return yield* use(yield* Session) }).pipe(Effect.provide(SessionLive({ path, id }))))
+
+test("delivers the prompts in the order they were admitted, then reports an empty inbox", async () => {
+  const delivered = await using("s", (session) =>
+    Effect.gen(function* () {
+      yield* session.admit("one")
+      yield* session.admit("two")
+      return [yield* session.deliver, yield* session.deliver, yield* session.deliver]
+    }),
+  )
+  expect(delivered).toEqual(["one", "two", undefined])
+})
+
+test("moves a prompt from the inbox to the log", async () => {
+  const { before, after, events } = await using("s", (session) =>
+    Effect.gen(function* () {
+      yield* session.admit("hello")
+      const before = { pending: yield* session.pending, events: (yield* session.events).length }
+      yield* session.deliver
+      const after = { pending: yield* session.pending }
+      return { before, after, events: yield* session.events }
+    }),
+  )
+  expect(before).toEqual({ pending: 1, events: 0 })
+  expect(after).toEqual({ pending: 0 })
+  expect(events).toEqual([{ type: "prompt", text: "hello" }])
+})
+```
+
+1. `beforeEach` gives every test its own temporary folder and file, and `afterEach` removes it.
+2. `using` runs a function against a `Session` built on that file. Calling it twice is the same as stopping the agent and starting it again.
+3. The first test admits "one" and "two" and delivers three times. The answers are the two texts in the order they were admitted, then `undefined` for the empty inbox.
+4. The second test reads the state before and after one delivery. Before, the prompt is in the inbox and the log is empty. After, the inbox is empty and the log has exactly one `prompt` event with the same text.
+
+Two more tests go in the same file, below the first two. They check that a prompt survives closing and opening the file, and that two sessions in one file do not see each other's prompts:
+
+```ts
+test("keeps an admitted prompt after the file is closed and opened again", async () => {
+  await using("s", (session) => session.admit("still here"))
+  expect(await using("s", (session) => session.pending)).toBe(1)
+  expect(await using("s", (session) => session.deliver)).toBe("still here")
+})
+
+test("keeps the inboxes of two sessions apart", async () => {
+  await using("a", (session) => session.admit("for a"))
+  await using("b", (session) => session.admit("for b"))
+  expect(await using("b", (session) => session.deliver)).toBe("for b")
+  expect(await using("b", (session) => session.deliver)).toBeUndefined()
+  expect(await using("a", (session) => session.pending)).toBe(1)
+})
+```
+
+1. The first test admits a prompt in one run of the agent and reads it back in two later runs. Each call to `using` closes the file when it returns, so the prompt was read from disk and not from memory.
+2. The second test admits one prompt in session `a` and one in session `b`. Delivering from `b` returns only its own prompt, then `undefined`, and the prompt for `a` is still waiting.
+
+The behavior that matters for the transaction only shows when something goes wrong in the middle of a delivery. The test below goes at the end of the same file and makes it go wrong on purpose. Another writer takes event number 1 after the session has opened. The session still counts from 0, so the insert in `deliver` is refused by the table's primary key:
+
+```ts
+test("a delivery that fails leaves the prompt in the inbox", async () => {
+  await using("s", (session) => session.admit("must not be lost"))
+
+  const outcome = await Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      // A second writer takes event number 1 after this session opened, so the insert in `deliver` is refused.
+      const intruder = new Database(path)
+      intruder.run(`insert into event (session_id, seq, type, data) values ('s', 1, 'prompt', '{"type":"prompt","text":"intruder"}')`)
+      intruder.close()
+      const exit = yield* Effect.exit(session.deliver)
+      return { failed: Exit.isFailure(exit), pending: yield* session.pending }
+    }).pipe(Effect.provide(SessionLive({ path, id: "s" }))),
+  )
+
+  expect(outcome).toEqual({ failed: true, pending: 1 })
+})
+```
+
+1. One prompt is admitted and the file is closed.
+2. A second connection to the file, opened with `bun:sqlite` and used outside the session, inserts an event with `seq` 1 for this session. The session was opened before that and does not know about it.
+3. `deliver` runs inside `Effect.exit`, which turns a failure into a value the test can look at. The insert gets the number 1, the table refuses it, and the transaction is undone.
+4. The test expects two things: the delivery failed, and the prompt is still counted by `pending`. If the delete had survived the failed insert, `pending` would be 0 and the prompt would be lost.
+
+Run the file from the `my-agent` folder. All five tests pass:
+
+```text
+$ bun test test/inbox.test.ts
+bun test v1.4.4 (38afee6c8)
+
+ 5 pass
+ 0 fail
+ 10 expect() calls
+Ran 5 tests across 1 file. [131.00ms]
+```
+
+One way to see what the transaction is for is to take it away. This is a temporary change to `src/session.ts`: replace the whole `const deliver = ...` definition inside `SessionLive` with the version below, and keep the original text at hand to put back. It runs the same three steps one after another, with no transaction around them:
+
+```ts
+      // The same three steps, one after another, with no transaction around them.
+      const deliver = Effect.gen(function* () {
+        const next = seq + 1
+        const [oldest] = yield* db.select().from(InboxTable).where(thisInbox).orderBy(asc(InboxTable.id)).limit(1)
+        if (!oldest) return undefined
+        yield* db.delete(InboxTable).where(eq(InboxTable.id, oldest.id))
+        yield* db
+          .insert(EventTable)
+          .values({ session_id: options.id, seq: next, type: "prompt", data: encode({ type: "prompt", text: oldest.text }) })
+        seq = next
+        return oldest.text
+      }).pipe(Effect.orDie)
+```
+
+With this version in place of the real one, the failed insert comes after the delete, and the last test fails:
+
+```text
+$ bun test test/inbox.test.ts
+test/inbox.test.ts:
+error: expect(received).toEqual(expected)
+@@ -2,3 +2,3 @@
+    "failed": true,
+-   "pending": 1,
++   "pending": 0,
+(fail) a delivery that fails leaves the prompt in the inbox [10.40ms]
+
+ 4 pass
+ 1 fail
+```
+
+The delivery failed, as before, and the prompt was gone from the inbox without being in the log. That is the outcome the transaction rules out. Restoring the real `deliver` brings all five tests back to green.
+
+<details>
+<summary>Stuck? The finished inbox.test.ts</summary>
+
+`test/inbox.test.ts`
+
+```ts
+import { Database } from "bun:sqlite"
+import { afterEach, beforeEach, expect, test } from "bun:test"
+import { Effect, Exit } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Session, SessionLive } from "../src/session"
+
+let path: string
+let dir: string
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "agent-inbox-"))
+  path = join(dir, "agent.db")
+})
+afterEach(() => rm(dir, { recursive: true, force: true }))
+
+// Opens the file, runs `use`, and closes the file again, like one run of the agent.
+const using = <A, E>(id: string, use: (session: Session["Service"]) => Effect.Effect<A, E>) =>
+  Effect.runPromise(Effect.gen(function* () { return yield* use(yield* Session) }).pipe(Effect.provide(SessionLive({ path, id }))))
+
+test("delivers the prompts in the order they were admitted, then reports an empty inbox", async () => {
+  const delivered = await using("s", (session) =>
+    Effect.gen(function* () {
+      yield* session.admit("one")
+      yield* session.admit("two")
+      return [yield* session.deliver, yield* session.deliver, yield* session.deliver]
+    }),
+  )
+  expect(delivered).toEqual(["one", "two", undefined])
+})
+
+test("moves a prompt from the inbox to the log", async () => {
+  const { before, after, events } = await using("s", (session) =>
+    Effect.gen(function* () {
+      yield* session.admit("hello")
+      const before = { pending: yield* session.pending, events: (yield* session.events).length }
+      yield* session.deliver
+      const after = { pending: yield* session.pending }
+      return { before, after, events: yield* session.events }
+    }),
+  )
+  expect(before).toEqual({ pending: 1, events: 0 })
+  expect(after).toEqual({ pending: 0 })
+  expect(events).toEqual([{ type: "prompt", text: "hello" }])
+})
+
+test("keeps an admitted prompt after the file is closed and opened again", async () => {
+  await using("s", (session) => session.admit("still here"))
+  expect(await using("s", (session) => session.pending)).toBe(1)
+  expect(await using("s", (session) => session.deliver)).toBe("still here")
+})
+
+test("keeps the inboxes of two sessions apart", async () => {
+  await using("a", (session) => session.admit("for a"))
+  await using("b", (session) => session.admit("for b"))
+  expect(await using("b", (session) => session.deliver)).toBe("for b")
+  expect(await using("b", (session) => session.deliver)).toBeUndefined()
+  expect(await using("a", (session) => session.pending)).toBe(1)
+})
+
+test("a delivery that fails leaves the prompt in the inbox", async () => {
+  await using("s", (session) => session.admit("must not be lost"))
+
+  const outcome = await Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      // A second writer takes event number 1 after this session opened, so the insert in `deliver` is refused.
+      const intruder = new Database(path)
+      intruder.run(`insert into event (session_id, seq, type, data) values ('s', 1, 'prompt', '{"type":"prompt","text":"intruder"}')`)
+      intruder.close()
+      const exit = yield* Effect.exit(session.deliver)
+      return { failed: Exit.isFailure(exit), pending: yield* session.pending }
+    }).pipe(Effect.provide(SessionLive({ path, id: "s" }))),
+  )
+
+  expect(outcome).toEqual({ failed: true, pending: 1 })
+})
+```
+
+</details>
+
+### Step 4: A terminal that two readers can share
+
+The reader will ask for lines at the same time as a tool may ask for an approval, so the terminal needs the router from decision 6. The router is a small piece of plain code with no Effect services in it, and it gets its own file. Create `src/lines.ts`. It starts with two imports, then the type that says what the router offers, and then `makeLines`, which builds one:
+
+```ts
+import { Effect } from "effect"
+import { InputClosed } from "./errors"
+
+// Hands the lines the user types to whoever is asking for one.
+// - A line that arrives while nobody is asking waits, and the next question receives it.
+// - When several questions are open, the newest one receives the line: it was printed last, so it is the one being answered.
+// - When input ends, every open question fails with InputClosed, and so does every later one once the waiting lines are used up.
+export interface Lines {
+  readonly push: (line: string) => void
+  readonly end: () => void
+  readonly next: Effect.Effect<string, InputClosed>
+}
+
+export const makeLines = (): Lines => {
+  const waiting: string[] = []
+  const asking: Array<(answer: Effect.Effect<string, InputClosed>) => void> = []
+  let ended = false
+
+  return {
+    push: (line) => {
+      const asker = asking.pop()
+      if (asker) asker(Effect.succeed(line))
+      else waiting.push(line)
+    },
+    end: () => {
+      ended = true
+      for (const asker of asking.splice(0)) asker(Effect.fail(new InputClosed()))
+    },
+    next: Effect.callback<string, InputClosed>((resume) => {
+      const line = waiting.shift()
+      if (line !== undefined) return resume(Effect.succeed(line))
+      if (ended) return resume(Effect.fail(new InputClosed()))
+      asking.push(resume)
+      // A question that is interrupted stops asking, so it cannot take a line meant for the next one.
+      return Effect.sync(() => {
+        const index = asking.indexOf(resume)
+        if (index >= 0) asking.splice(index, 1)
+      })
+    }),
+  }
+}
+```
+
+1. `Lines` has three parts. `push` is called with each line that was typed, `end` is called once when the input ends, and `next` is an Effect that produces one line, or fails with `InputClosed`.
+2. `waiting` holds lines that arrived when nobody was asking. `asking` holds one callback for each open question, oldest first. `ended` remembers that the input is over.
+3. `push` takes the newest open question with `asking.pop()` and gives it the line. If no question is open, the line goes to the back of `waiting`.
+4. `end` marks the input as ended and fails every open question with `InputClosed`, the error that [Part 5](/posts/why-effect/) introduced for this case.
+5. `next` first looks at `waiting`, so lines typed ahead are used in order. After that, if the input has ended, it fails. Otherwise it registers itself as an open question.
+6. `Effect.callback` builds an Effect from a function that calls `resume` later. The Effect it returns from the function is the cleanup, which runs if the question is interrupted. It removes the question from `asking`, so an interrupted question cannot take a line that belongs to the next one.
+
+Now `src/terminal.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/), uses the router. Two changes are needed. In the imports at the top, the readline import changes from `"node:readline/promises"` to `"node:readline"`, since the callback style is all that is needed now, and an import for the router is added after the one from `./errors`. Replace the last two import lines, the readline and `./errors` ones, with these three:
+
+```ts
+import { createInterface } from "node:readline"
+import { InputClosed } from "./errors"
+import { makeLines } from "./lines"
+```
+
+Then replace the whole `TerminalLive` definition, from its comment to the closing parenthesis, with the version below. The `Terminal` class above it stays as it is. `TerminalLive` feeds the router with readline's lines and keeps the three methods:
+
+```ts
+// The real terminal. Building the layer starts reading standard input; the end of the program stops it.
+// readline only cuts the input into lines. It is given no output, so the terminal itself echoes what is typed,
+// and a reply that is printed while the user types cannot disturb a line readline is redrawing.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const lines = makeLines()
+
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const rl = createInterface({ input: process.stdin })
+        rl.on("line", lines.push)
+        rl.on("close", lines.end)
+        return rl
+      }),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    return Terminal.of({
+      ask: (prompt) => Effect.sync(() => void process.stdout.write(prompt)).pipe(Effect.andThen(lines.next)),
+      say: (line) => Effect.sync(() => console.log(line)),
+      write: (text) => Effect.sync(() => void process.stdout.write(text)),
+    })
+  }),
+)
+```
+
+1. `makeLines()` creates one router for the whole program. The promise that [Part 8](/posts/the-session-as-an-event-log/) built to turn the end of input into a rejection is gone, because the router already fails its questions when the input ends.
+2. `Effect.acquireRelease` opens readline when the layer is built and closes it when the program ends, as before. The readline interface is created with only `input`. That makes it cut the input into lines and nothing else: it does not echo, and it does not redraw the line. The terminal itself shows what is typed.
+3. Each `line` event goes to `lines.push`, and the `close` event, which Ctrl-D and the end of piped input both produce, goes to `lines.end`.
+4. `ask` prints the prompt and then waits for `lines.next`. The prompt is printed by the terminal service and not by readline, so a prompt printed while a reply streams does not clash with readline's own redrawing.
+5. `say` and `write` are as in [Part 8](/posts/the-session-as-an-event-log/). Without readline's line editing, the arrow keys do not recall earlier lines. The terminal's own editing, such as Backspace, still works.
+
+The router has its own tests, with no readline and no model. Create `test/lines.test.ts` and start it with the imports and a small helper, `settle`, that waits a few milliseconds and is used by the fifth test. Then add the first four tests, which check the rules: lines typed ahead are kept, a waiting question receives the next line, the newest question wins, and the end of input fails what is left:
+
+```ts
+import { expect, test } from "bun:test"
+import { Effect, Fiber } from "effect"
+import { makeLines } from "../src/lines"
+import { InputClosed } from "../src/errors"
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+test("keeps lines that arrive before anyone asks, in order", async () => {
+  const lines = makeLines()
+  lines.push("one")
+  lines.push("two")
+  expect(await Effect.runPromise(lines.next)).toBe("one")
+  expect(await Effect.runPromise(lines.next)).toBe("two")
+})
+
+test("gives a line to the question that is waiting", async () => {
+  const lines = makeLines()
+  const answer = Effect.runPromise(lines.next)
+  lines.push("hello")
+  expect(await answer).toBe("hello")
+})
+
+test("gives the line to the newest of several open questions", async () => {
+  const lines = makeLines()
+  const reader = Effect.runPromise(lines.next) // "You: "
+  const confirm = Effect.runPromise(lines.next) // "Allow? [y/N]"
+  lines.push("y")
+  expect(await confirm).toBe("y")
+  lines.push("next prompt")
+  expect(await reader).toBe("next prompt")
+})
+
+test("fails the open questions when input ends, after the waiting lines are used", async () => {
+  const lines = makeLines()
+  lines.push("last")
+  lines.end()
+  expect(await Effect.runPromise(lines.next)).toBe("last")
+  expect(await Effect.runPromise(Effect.flip(lines.next))).toBeInstanceOf(InputClosed)
+
+  const open = makeLines()
+  const pending = Effect.runPromise(Effect.flip(open.next))
+  open.end()
+  expect(await pending).toBeInstanceOf(InputClosed)
+})
+```
+
+1. In the first test, two lines arrive before any question. The two questions that follow receive them in the order they were typed.
+2. In the second test, a question is already open when the line arrives, and it receives the line.
+3. In the third test, `reader` and `confirm` stand for the two questions in the agent. The newest one, `confirm`, receives the first line, and `reader` receives the second.
+4. In the fourth test, the line that was typed before the end is still delivered, and only then does `next` fail with `InputClosed`. A question that was open when the input ended fails too.
+
+A fifth test goes at the end of the same file. It checks that a question that is interrupted stops asking and does not take the next line:
+
+```ts
+test("an interrupted question does not take the next line", async () => {
+  const lines = makeLines()
+  const first = Effect.runFork(lines.next)
+  await settle()
+  await Effect.runPromise(Fiber.interrupt(first))
+  const second = Effect.runPromise(lines.next)
+  lines.push("for the second")
+  expect(await second).toBe("for the second")
+})
+```
+
+1. `Effect.runFork` starts a question as a fiber, and `settle` gives it time to register as open.
+2. `Fiber.interrupt` cancels that question, which runs the cleanup from `next` and removes it from `asking`.
+3. A second question is then opened and a line is pushed. The second question receives it.
+
+Run the file with `bun test test/lines.test.ts`. All five tests pass. The rule the router exists for is that the newest question wins. As a temporary experiment, change `asking.pop()` to `asking.shift()` in `src/lines.ts`, which makes the oldest one win, as readline's own `question` did. The third test then waits for a line that went to the other question, and it ends with a timeout. Change it back afterwards:
+
+```text
+$ bun test test/lines.test.ts
+test/lines.test.ts:
+(fail) gives the line to the newest of several open questions [5000.00ms]
+  ^ this test timed out after 5000ms.
+
+ 4 pass
+ 1 fail
+```
+
+> **Watch for this.** Because the reader takes every line as soon as it can, piped input is read ahead. If three prompts are piped in and the first needs an approval, no line is left for it by the time the tool asks. The question then fails because the input has ended, and the tool is declined, exactly as it was in [Part 8](/posts/the-session-as-an-event-log/) when the input ended during a turn. In this agent an approval expects a person at the keyboard.
+
+<details>
+<summary>Stuck? The finished lines.ts, terminal.ts and lines.test.ts</summary>
+
+`src/lines.ts`
+
+```ts
+import { Effect } from "effect"
+import { InputClosed } from "./errors"
+
+// Hands the lines the user types to whoever is asking for one.
+// - A line that arrives while nobody is asking waits, and the next question receives it.
+// - When several questions are open, the newest one receives the line: it was printed last, so it is the one being answered.
+// - When input ends, every open question fails with InputClosed, and so does every later one once the waiting lines are used up.
+export interface Lines {
+  readonly push: (line: string) => void
+  readonly end: () => void
+  readonly next: Effect.Effect<string, InputClosed>
+}
+
+export const makeLines = (): Lines => {
+  const waiting: string[] = []
+  const asking: Array<(answer: Effect.Effect<string, InputClosed>) => void> = []
+  let ended = false
+
+  return {
+    push: (line) => {
+      const asker = asking.pop()
+      if (asker) asker(Effect.succeed(line))
+      else waiting.push(line)
+    },
+    end: () => {
+      ended = true
+      for (const asker of asking.splice(0)) asker(Effect.fail(new InputClosed()))
+    },
+    next: Effect.callback<string, InputClosed>((resume) => {
+      const line = waiting.shift()
+      if (line !== undefined) return resume(Effect.succeed(line))
+      if (ended) return resume(Effect.fail(new InputClosed()))
+      asking.push(resume)
+      // A question that is interrupted stops asking, so it cannot take a line meant for the next one.
+      return Effect.sync(() => {
+        const index = asking.indexOf(resume)
+        if (index >= 0) asking.splice(index, 1)
+      })
+    }),
+  }
+}
+```
+
+`src/terminal.ts`
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import { createInterface } from "node:readline"
+import { InputClosed } from "./errors"
+import { makeLines } from "./lines"
+
+// What the agent needs from the person at the keyboard. Nothing here says readline.
+export class Terminal extends Context.Service<
+  Terminal,
+  {
+    // Asks one question. The type says it can fail: input may have ended.
+    readonly ask: (prompt: string) => Effect.Effect<string, InputClosed>
+    readonly say: (line: string) => Effect.Effect<void>
+    // Prints text without ending the line, so a reply can appear piece by piece.
+    readonly write: (text: string) => Effect.Effect<void>
+  }
+>()("@agent/Terminal") {}
+
+// The real terminal. Building the layer starts reading standard input; the end of the program stops it.
+// readline only cuts the input into lines. It is given no output, so the terminal itself echoes what is typed,
+// and a reply that is printed while the user types cannot disturb a line readline is redrawing.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const lines = makeLines()
+
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const rl = createInterface({ input: process.stdin })
+        rl.on("line", lines.push)
+        rl.on("close", lines.end)
+        return rl
+      }),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    return Terminal.of({
+      ask: (prompt) => Effect.sync(() => void process.stdout.write(prompt)).pipe(Effect.andThen(lines.next)),
+      say: (line) => Effect.sync(() => console.log(line)),
+      write: (text) => Effect.sync(() => void process.stdout.write(text)),
+    })
+  }),
+)
+```
+
+`test/lines.test.ts`
+
+```ts
+import { expect, test } from "bun:test"
+import { Effect, Fiber } from "effect"
+import { makeLines } from "../src/lines"
+import { InputClosed } from "../src/errors"
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+test("keeps lines that arrive before anyone asks, in order", async () => {
+  const lines = makeLines()
+  lines.push("one")
+  lines.push("two")
+  expect(await Effect.runPromise(lines.next)).toBe("one")
+  expect(await Effect.runPromise(lines.next)).toBe("two")
+})
+
+test("gives a line to the question that is waiting", async () => {
+  const lines = makeLines()
+  const answer = Effect.runPromise(lines.next)
+  lines.push("hello")
+  expect(await answer).toBe("hello")
+})
+
+test("gives the line to the newest of several open questions", async () => {
+  const lines = makeLines()
+  const reader = Effect.runPromise(lines.next) // "You: "
+  const confirm = Effect.runPromise(lines.next) // "Allow? [y/N]"
+  lines.push("y")
+  expect(await confirm).toBe("y")
+  lines.push("next prompt")
+  expect(await reader).toBe("next prompt")
+})
+
+test("fails the open questions when input ends, after the waiting lines are used", async () => {
+  const lines = makeLines()
+  lines.push("last")
+  lines.end()
+  expect(await Effect.runPromise(lines.next)).toBe("last")
+  expect(await Effect.runPromise(Effect.flip(lines.next))).toBeInstanceOf(InputClosed)
+
+  const open = makeLines()
+  const pending = Effect.runPromise(Effect.flip(open.next))
+  open.end()
+  expect(await pending).toBeInstanceOf(InputClosed)
+})
+
+test("an interrupted question does not take the next line", async () => {
+  const lines = makeLines()
+  const first = Effect.runFork(lines.next)
+  await settle()
+  await Effect.runPromise(Fiber.interrupt(first))
+  const second = Effect.runPromise(lines.next)
+  lines.push("for the second")
+  expect(await second).toBe("for the second")
+})
+```
+
+</details>
+
+### Step 5: A reader and a worker
+
+All of the changes in this step are in `src/agent.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). `step`, `run` and `resume` stay exactly as they are. Make three changes to the file, from top to bottom:
+
+1. In the first line, the import from `"effect"`, add `Queue`. The line becomes `import { Effect, Queue, Stream } from "effect"`.
+2. Delete `turn`, the function with the comment "One prompt: record it, then run steps until the turn is over". It sits between `run` and `interrupted`. The `prompt` event is now appended by `deliver`, so nothing needs it.
+3. At the bottom of the file, replace the whole `repl`, from its comment to the last line of the file, with the code below. The small function `queued` goes just above it.
+
+```ts
+const queued = (count: number) => `${count} queued prompt${count === 1 ? "" : "s"}`
+
+// The read-eval-print loop, in two halves that do not wait for each other.
+// - The reader asks for a line, saves it in the inbox, and asks again, even while a turn is running.
+// - The worker finishes an interrupted turn, then delivers one prompt at a time and runs its turn.
+// The reader rings a bell after each prompt. The ring carries no prompt: it only tells the worker to look at the inbox.
+export const repl = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+
+  // A turn that fails is recorded as failed, so the next prompt starts from a consistent history.
+  const failed = (label: string, reason: string) =>
+    session.append({ type: "turn-failed", reason }).pipe(Effect.andThen(terminal.say(`[${label}] ${reason}`)))
+  const guarded = <R>(work: Effect.Effect<void, ProviderError | SessionCorrupt | InputClosed, R>) =>
+    work.pipe(
+      Effect.catchTag("ProviderError", (error) => failed("provider error", error.message)),
+      Effect.catchDefect((defect) => failed("bug", messageOf(defect))),
+    )
+
+  // At most one ring waits at a time: two rings in a row mean the same thing as one.
+  const wake = yield* Queue.dropping<void>(1)
+  let inputEnded = false
+
+  const reader = Effect.gen(function* () {
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+      yield* session.admit(input)
+      yield* terminal.say("[queued]")
+      yield* Queue.offer(wake, undefined)
+    }
+  }).pipe(
+    Effect.catchTag("InputClosed", () => Effect.sync(() => void (inputEnded = true))),
+    Effect.andThen(Queue.offer(wake, undefined)),
+  )
+
+  // What the last run left in the inbox, counted before the reader can add anything.
+  const left = yield* session.pending
+  if (left > 0) yield* terminal.say(`[${queued(left)} from an earlier run]`)
+
+  yield* Effect.forkChild(reader)
+  yield* guarded(resume)
+
+  while (true) {
+    // Read before delivering: a prompt admitted before the input ended is then always found by the delivery below.
+    const ended = inputEnded
+    if ((yield* session.deliver) !== undefined) {
+      yield* guarded(run)
+      continue
+    }
+    if (ended) return
+    yield* Queue.take(wake)
+  }
+})
+```
+
+1. `queued` only builds the words "1 queued prompt" or "2 queued prompts".
+2. `failed` and `guarded` are as in [Part 8](/posts/the-session-as-an-event-log/): a provider error or a defect during a turn is recorded as `turn-failed`, and the loop goes on.
+3. `wake` is a queue that holds at most one item (`Queue.dropping(1)`). Offering to a full queue does nothing, which is the merging of wakes from decision 3. `inputEnded` is a plain flag.
+4. The `reader` loops: ask, admit, print `[queued]`, ring the wake. Admitting comes before the acknowledgement, so `[queued]` means the prompt is in the file.
+5. When `ask` fails with `InputClosed`, the reader sets `inputEnded` and rings once more, so a worker that is waiting wakes up and sees the end.
+6. At startup, before the reader exists, the agent counts the inbox and prints one line if an earlier run left prompts behind. Counting first means the line speaks only about earlier runs.
+7. `Effect.forkChild(reader)` starts the reader as a fiber that belongs to the REPL. If the REPL ends or fails, the reader is interrupted with it.
+8. `guarded(resume)` comes next and finishes a turn that a killed process left open, as in [Part 8](/posts/the-session-as-an-event-log/). The reader is already running, so lines can be typed while that happens.
+9. The worker loop reads `inputEnded` first, then calls `deliver`. If a prompt came out, `guarded(run)` runs its turn and the loop starts again. If nothing came out and the input has ended, the REPL returns. Otherwise the worker waits for the next ring.
+
+The tests need a few changes. Because the reader takes every typed line at once, an answer meant for an approval can no longer be taken from the same list as the prompts. Open `test/fakes.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). It exports `scriptedModel` and `scriptedTerminal`, and the rest of the file (`Step`, `reply`, `callTool`, `fail`) stays as it is. Replace those two functions, with the comments above them, with the versions below. The fake terminal answers questions that start with `Allow` from their own list. An answer can also be a promise, for a line the user types later, and the fake model can hold a step back until a promise settles:
+
+```ts
+// A model that follows a script and records the history it was given at each step.
+// `beforeStep` runs when a step starts and holds the stream back until its promise settles.
+export const scriptedModel = (steps: Step[], beforeStep?: (request: number) => Promise<void>) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const request = requests.length
+          const next = steps[request - 1] ?? fail("The script has no reply left for this step")
+          const events = Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+          return beforeStep ? Stream.unwrap(Effect.promise(() => beforeStep(request)).pipe(Effect.as(events))) : events
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. An answer can be a promise, for a line the user types later.
+// When the answers run out, input ends.
+// Questions that start with "Allow" are answered from `confirmations` instead, so a confirmation reaches the
+// tool that asked even though the reader has already taken every prompt, as the live terminal does.
+// `output` holds the finished lines; `writes` holds every piece passed to `write`, in order.
+export const scriptedTerminal = (answers: Array<string | Promise<string>>, confirmations: string[] = []) => {
+  const output: string[] = []
+  const writes: string[] = []
+  const queue = [...answers]
+  const confirm = [...confirmations]
+  let pending = "" // text written since the last line ended
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(pending + prompt)
+          pending = ""
+          const next = (prompt.startsWith("Allow") ? confirm : queue).shift()
+          if (next === undefined) return Effect.fail(new InputClosed())
+          return typeof next === "string" ? Effect.succeed(next) : Effect.promise(() => next)
+        }),
+      say: (line) =>
+        Effect.sync(() => {
+          output.push(pending + line)
+          pending = ""
+        }),
+      write: (text) =>
+        Effect.sync(() => {
+          writes.push(text)
+          pending += text
+        }),
+    }),
+  )
+  return { layer, output, writes }
+}
+```
+
+1. `scriptedModel` takes an optional `beforeStep`. When a step starts, the stream waits for that function's promise, which lets a test do something at a precise moment of a turn.
+2. `scriptedTerminal` takes `answers` for the reader and `confirmations` for approvals. Without this, the reader would use up the answer meant for the approval, as readline's `question` would.
+3. An answer that is a promise is waited for with `Effect.promise`, so the reader stays at its question until the test "types" the line.
+4. When a list runs out, the fake fails with `InputClosed`, like the end of the input.
+
+`test/agent.test.ts` keeps its six tests and gets three changes. First, the `run` helper near the top takes the new options and passes them on to the fakes. Replace the `const run = async (script: ...) => {` header and its first two lines, up to `const terminal = scriptedTerminal(script.answers)`, with:
+
+```ts
+const run = async (script: {
+  model: Step[]
+  answers: Array<string | Promise<string>>
+  confirmations?: string[]
+  beforeStep?: (request: number) => Promise<void>
+}) => {
+  const model = scriptedModel(script.model, script.beforeStep)
+  const terminal = scriptedTerminal(script.answers, script.confirmations)
+```
+
+The rest of `run` stays as it is. Second, in the existing test "tells the model when the user declines", the approval answer moves out of `answers` and into `confirmations`. Change the two lines
+
+```ts
+      answers: ["clean up", "n"],
+```
+
+to
+
+```ts
+      answers: ["clean up"],
+      confirmations: ["n"],
+```
+
+Third, add two new tests inside the `describe("the agent loop", ...)` block, after the last existing test, "drops a turn whose model call fails". The indentation below is that of a test inside the block:
+
+```ts
+  test("saves every prompt first, then runs them one at a time in the order they came", async () => {
+    const { events, requests, output } = await run({
+      model: [reply("First."), reply("Second."), reply("Third.")],
+      answers: ["one", "two", "three"],
+    })
+
+    expect(output.filter((line) => line === "[queued]")).toHaveLength(3)
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual([
+      "one", "step-finished", "two", "step-finished", "three", "step-finished",
+    ])
+    expect(requests[2]?.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant", "user"])
+  })
+
+  test("a prompt typed while a turn runs is saved at once and runs after the turn", async () => {
+    let typeSecond!: (line: string) => void
+    const second = new Promise<string>((resolve) => (typeSecond = resolve))
+
+    const { events, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("First done."), reply("Second done.")],
+      answers: ["first", second],
+      // The user types while the model is working on the second step of the first turn.
+      beforeStep: async (request) => {
+        if (request !== 2) return
+        typeSecond("second")
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      },
+    })
+
+    expect(output.indexOf("[queued]", output.indexOf("[queued]") + 1)).toBeLessThan(output.indexOf("Agent: First done."))
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual([
+      "first", "step-finished", "tool-result", "step-finished", "second", "step-finished",
+    ])
+    expect(output).toContain("Agent: Second done.")
+  })
+```
+
+1. In the first test, three prompts are typed at once. The test expects three `[queued]` lines, and a log in which each `prompt` is followed by the `step-finished` that answers it before the next `prompt` appears. The last request shows the whole conversation in order.
+2. The second test types a prompt while the first turn is still running. The first turn has two steps: a tool call and an answer. When the second step starts, `beforeStep` lets the user "type" the second line and then waits a few milliseconds, so the reader can admit it.
+3. The first assertion compares positions in the output. The second `[queued]` must come before the first turn's answer, which shows that the line was accepted while the turn ran.
+4. The second assertion checks that the second prompt entered the log only after the first turn's last step, and that its answer was printed. The prompt waited in the inbox for the turn to end.
+
+```text
+$ bun test test/agent.test.ts
+bun test v1.4.4 (38afee6c8)
+
+ 8 pass
+ 0 fail
+ 19 expect() calls
+Ran 8 tests across 1 file. [94.00ms]
+```
+
+The second test depends on the reader running next to the worker. If the REPL ran the reader to the end first, the way [Part 8](/posts/the-session-as-an-event-log/) read its input, the reader would wait for a line that only the running turn can cause. As a temporary experiment, replace `yield* Effect.forkChild(reader)` with `yield* reader` in `src/agent.ts` and run `bun test test/agent.test.ts` again:
+
+```text
+$ bun test test/agent.test.ts
+test/agent.test.ts:
+(fail) the agent loop > a prompt typed while a turn runs is saved at once and runs after the turn [5000.02ms]
+  ^ this test timed out after 5000ms.
+
+ 7 pass
+ 1 fail
+```
+
+Change it back to `yield* Effect.forkChild(reader)` before moving on.
+
+<details>
+<summary>Stuck? The finished agent.ts, fakes.ts and agent.test.ts</summary>
+
+`src/agent.ts`
+
+```ts
+import { Effect, Queue, Stream } from "effect"
+import { messageOf, type InputClosed, type ProviderError, type SessionCorrupt } from "./errors"
+import type { FinishReason } from "./events"
+import { unansweredCalls } from "./history"
+import { isToolCall, type Message, type Part } from "./messages"
+import { ModelClient } from "./model-client"
+import { Session } from "./session"
+import { Terminal } from "./terminal"
+import { runTool, Tools, type Tool } from "./tool"
+
+// One step: reload the history from the log, stream the model's events, show the text as it arrives,
+// and append the finished message to the log.
+const step = (tools: Tool[]) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const session = yield* Session
+    const history = yield* session.history
+    const content: Part[] = []
+    let text = "" // the text block being written, if any
+    const outcome: { finish: FinishReason; native?: unknown } = { finish: "stop" }
+
+    // A text block ends when anything else arrives, or when the stream does, even by failing.
+    const endText = Effect.suspend(() => {
+      if (!text) return Effect.void
+      content.push({ type: "text", text })
+      text = ""
+      return terminal.say("")
+    })
+
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    ).pipe(Effect.ensuring(endText))
+
+    const message: Message = { role: "assistant", content, ...(outcome.native === undefined ? {} : { native: outcome.native }) }
+    yield* session.append({ type: "step-finished", message, finish: outcome.finish })
+    return { message, finish: outcome.finish }
+  })
+
+// Steps until the model stops asking for tools. Each result is appended as soon as its tool finishes.
+const run = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const tools = yield* Tools
+
+  while (true) {
+    const { message, finish } = yield* step(tools)
+    if (finish !== "tool-calls") return
+
+    for (const call of message.content.filter(isToolCall)) {
+      yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const part = yield* runTool(call)
+      if (part.result.type === "error") yield* terminal.say(`[error] ${part.result.value}`)
+      yield* session.append({ type: "tool-result", part })
+    }
+  }
+})
+
+const interrupted =
+  "The agent stopped before this tool finished, so it may or may not have run. Check the current state before repeating it."
+
+// A restart can find a turn that did not finish. Tool calls without a result get an error result instead of
+// running again, since a command that already ran must not run twice. Then the turn continues.
+const resume = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const calls = unansweredCalls(yield* session.history)
+  if (calls === undefined) return
+
+  yield* terminal.say(`[resuming session ${session.id}]`)
+  for (const call of calls) {
+    yield* terminal.say(`[interrupted] ${call.name}(${JSON.stringify(call.input)})`)
+    yield* session.append({
+      type: "tool-result",
+      part: { type: "tool-result", id: call.id, name: call.name, result: { type: "error", value: interrupted } },
+    })
+  }
+  yield* run
+})
+
+const queued = (count: number) => `${count} queued prompt${count === 1 ? "" : "s"}`
+
+// The read-eval-print loop, in two halves that do not wait for each other.
+// - The reader asks for a line, saves it in the inbox, and asks again, even while a turn is running.
+// - The worker finishes an interrupted turn, then delivers one prompt at a time and runs its turn.
+// The reader rings a bell after each prompt. The ring carries no prompt: it only tells the worker to look at the inbox.
+export const repl = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+
+  // A turn that fails is recorded as failed, so the next prompt starts from a consistent history.
+  const failed = (label: string, reason: string) =>
+    session.append({ type: "turn-failed", reason }).pipe(Effect.andThen(terminal.say(`[${label}] ${reason}`)))
+  const guarded = <R>(work: Effect.Effect<void, ProviderError | SessionCorrupt | InputClosed, R>) =>
+    work.pipe(
+      Effect.catchTag("ProviderError", (error) => failed("provider error", error.message)),
+      Effect.catchDefect((defect) => failed("bug", messageOf(defect))),
+    )
+
+  // At most one ring waits at a time: two rings in a row mean the same thing as one.
+  const wake = yield* Queue.dropping<void>(1)
+  let inputEnded = false
+
+  const reader = Effect.gen(function* () {
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+      yield* session.admit(input)
+      yield* terminal.say("[queued]")
+      yield* Queue.offer(wake, undefined)
+    }
+  }).pipe(
+    Effect.catchTag("InputClosed", () => Effect.sync(() => void (inputEnded = true))),
+    Effect.andThen(Queue.offer(wake, undefined)),
+  )
+
+  // What the last run left in the inbox, counted before the reader can add anything.
+  const left = yield* session.pending
+  if (left > 0) yield* terminal.say(`[${queued(left)} from an earlier run]`)
+
+  yield* Effect.forkChild(reader)
+  yield* guarded(resume)
+
+  while (true) {
+    // Read before delivering: a prompt admitted before the input ended is then always found by the delivery below.
+    const ended = inputEnded
+    if ((yield* session.deliver) !== undefined) {
+      yield* guarded(run)
+      continue
+    }
+    if (ended) return
+    yield* Queue.take(wake)
+  }
+})
+```
+
+`test/fakes.ts`
+
+```ts
+import { Effect, Layer, Stream } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { ModelEvent } from "../src/events"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import { Terminal } from "../src/terminal"
+
+// What the scripted model streams for one step, in order. A ProviderError makes the stream fail at that point.
+export type Step = Array<ModelEvent | ProviderError>
+
+// A text reply, streamed one word at a time.
+export const reply = (text: string): Step => [
+  ...text.split(/(?<= )/).map((word): ModelEvent => ({ type: "text-delta", text: word })),
+  { type: "finish", reason: "stop" },
+]
+
+export const callTool = (id: string, name: string, input: unknown): Step => [
+  { type: "tool-call", id, name, input },
+  { type: "finish", reason: "tool-calls" },
+]
+
+// A step that fails before sending anything.
+export const fail = (reason: string): Step => [new ProviderError({ reason })]
+
+// A model that follows a script and records the history it was given at each step.
+// `beforeStep` runs when a step starts and holds the stream back until its promise settles.
+export const scriptedModel = (steps: Step[], beforeStep?: (request: number) => Promise<void>) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const request = requests.length
+          const next = steps[request - 1] ?? fail("The script has no reply left for this step")
+          const events = Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+          return beforeStep ? Stream.unwrap(Effect.promise(() => beforeStep(request)).pipe(Effect.as(events))) : events
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. An answer can be a promise, for a line the user types later.
+// When the answers run out, input ends.
+// Questions that start with "Allow" are answered from `confirmations` instead, so a confirmation reaches the
+// tool that asked even though the reader has already taken every prompt, as the live terminal does.
+// `output` holds the finished lines; `writes` holds every piece passed to `write`, in order.
+export const scriptedTerminal = (answers: Array<string | Promise<string>>, confirmations: string[] = []) => {
+  const output: string[] = []
+  const writes: string[] = []
+  const queue = [...answers]
+  const confirm = [...confirmations]
+  let pending = "" // text written since the last line ended
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(pending + prompt)
+          pending = ""
+          const next = (prompt.startsWith("Allow") ? confirm : queue).shift()
+          if (next === undefined) return Effect.fail(new InputClosed())
+          return typeof next === "string" ? Effect.succeed(next) : Effect.promise(() => next)
+        }),
+      say: (line) =>
+        Effect.sync(() => {
+          output.push(pending + line)
+          pending = ""
+        }),
+      write: (text) =>
+        Effect.sync(() => {
+          writes.push(text)
+          pending += text
+        }),
+    }),
+  )
+  return { layer, output, writes }
+}
+```
+
+`test/agent.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { ProviderError } from "../src/errors"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, fail, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+// Two small tools, so the tests never touch the disk.
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const deleteEverything = defineTool({
+  name: "delete_everything",
+  description: "Pretends to delete everything.",
+  input: Schema.Struct({}),
+  execute: async () => "deleted",
+  confirm: () => "delete everything",
+})
+
+// Runs the loop against a script, on a session kept in memory, and returns what the loop and the fakes saw.
+const run = async (script: {
+  model: Step[]
+  answers: Array<string | Promise<string>>
+  confirmations?: string[]
+  beforeStep?: (request: number) => Promise<void>
+}) => {
+  const model = scriptedModel(script.model, script.beforeStep)
+  const terminal = scriptedTerminal(script.answers, script.confirmations)
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo, deleteEverything]), SessionLive({ path: ":memory:", id: "test" }))
+
+  const { history, events } = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      const session = yield* Session
+      return { history: yield* session.history, events: yield* session.events }
+    }).pipe(Effect.provide(layers)),
+  )
+  return { history, events, requests: model.requests, output: terminal.output, writes: terminal.writes }
+}
+
+describe("the agent loop", () => {
+  test("runs a tool call and then answers", async () => {
+    const { history, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("The tool said hi.")],
+      answers: ["say hi"],
+    })
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"])
+    expect(history[2]?.content).toEqual([{ type: "tool-result", id: "call_1", name: "echo", result: { type: "text", value: "hi" } }])
+    expect(output).toContain("Agent: The tool said hi.")
+  })
+
+  test("appends each fact to the log as it happens", async () => {
+    const { events } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("The tool said hi.")],
+      answers: ["say hi"],
+    })
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "step-finished"])
+  })
+
+  test("shows the reply piece by piece", async () => {
+    const { writes } = await run({ model: [reply("Hello there, friend.")], answers: ["hi"] })
+
+    expect(writes).toEqual(["Agent: ", "Hello ", "there, ", "friend."])
+  })
+
+  test("tells the model when the user declines", async () => {
+    const { requests } = await run({
+      model: [callTool("call_1", "delete_everything", {}), reply("Understood, I will not delete anything.")],
+      answers: ["clean up"],
+      confirmations: ["n"],
+    })
+
+    // The second request is the step after the tool call: its last message holds the result.
+    const result = requests[1]?.at(-1)?.content[0]
+    expect(result).toMatchObject({ type: "tool-result", result: { type: "error" } })
+    expect(JSON.stringify(result)).toContain("User declined")
+  })
+
+  test("ends the line of a reply that breaks off, then drops the turn", async () => {
+    const { history, events, output } = await run({
+      model: [[{ type: "text-delta", text: "The answer is" }, new ProviderError({ reason: "connection reset" })]],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(events.map((event) => event.type)).toEqual(["prompt", "turn-failed"])
+    expect(output).toContain("Agent: The answer is")
+    expect(output).toContain("[provider error] connection reset")
+  })
+
+  test("drops a turn whose model call fails", async () => {
+    const { history, output } = await run({
+      model: [fail("connection refused")],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(output).toContain("[provider error] connection refused")
+  })
+
+  test("saves every prompt first, then runs them one at a time in the order they came", async () => {
+    const { events, requests, output } = await run({
+      model: [reply("First."), reply("Second."), reply("Third.")],
+      answers: ["one", "two", "three"],
+    })
+
+    expect(output.filter((line) => line === "[queued]")).toHaveLength(3)
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual([
+      "one", "step-finished", "two", "step-finished", "three", "step-finished",
+    ])
+    expect(requests[2]?.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant", "user"])
+  })
+
+  test("a prompt typed while a turn runs is saved at once and runs after the turn", async () => {
+    let typeSecond!: (line: string) => void
+    const second = new Promise<string>((resolve) => (typeSecond = resolve))
+
+    const { events, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("First done."), reply("Second done.")],
+      answers: ["first", second],
+      // The user types while the model is working on the second step of the first turn.
+      beforeStep: async (request) => {
+        if (request !== 2) return
+        typeSecond("second")
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      },
+    })
+
+    expect(output.indexOf("[queued]", output.indexOf("[queued]") + 1)).toBeLessThan(output.indexOf("Agent: First done."))
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual([
+      "first", "step-finished", "tool-result", "step-finished", "second", "step-finished",
+    ])
+    expect(output).toContain("Agent: Second done.")
+  })
+})
+```
+
+</details>
+
+### Step 6: Prompts that survive a restart
+
+The restart behavior is already in the REPL from step 5: it counts the inbox, finishes an interrupted turn, and then delivers what is left. This step only adds tests, all in `test/resume.test.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). The tests there write what a dead process leaves behind, an event log and an inbox, and start a new agent on the file. The helper `crashAfter` plays the first process. Find it near the top of the file, and replace it with the version below, which takes the events and, new in this part, the prompts that were still in the inbox:
+
+```ts
+// Process one: the events that were written before the crash, and the prompts that were still in the inbox.
+const crashAfter = (events: SessionEvent[], inbox: string[] = []) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      for (const event of events) yield* session.append(event)
+      for (const text of inbox) yield* session.admit(text)
+    }).pipe(Effect.provide(SessionLive({ path: join(dir, "agent.db"), id: "s" }))),
+  )
+```
+
+The existing tests call `crashAfter` with one argument, so they keep working. Three new tests use the second argument. Add them inside the `describe("resuming a session", ...)` block, after the last existing test, "a resumed turn that calls a tool runs it like any other":
+
+```ts
+  test("runs the prompts that were still in the inbox, in order", async () => {
+    await crashAfter([], ["one", "two"])
+
+    const { events, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output).toContain("[2 queued prompts from an earlier run]")
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["one", "step-finished", "two", "step-finished"])
+  })
+
+  test("finishes the interrupted turn before it delivers the next prompt", async () => {
+    await crashAfter([prompt("first")], ["second"])
+
+    const { events, requests, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output.slice(0, 2)).toEqual(["[1 queued prompt from an earlier run]", "[resuming session s]"])
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["first", "step-finished", "second", "step-finished"])
+  })
+
+  test("says nothing about the inbox when it is empty", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { output } = await restart([])
+
+    expect(output.join("\n")).not.toContain("queued prompt")
+  })
+```
+
+1. `crashAfter` appends the given events and then admits the given prompts, which is the state of a file whose process died with work still waiting.
+2. The first test leaves two prompts in the inbox and an empty log. The new agent says "2 queued prompts from an earlier run", delivers both in the order they were admitted, and answers each.
+3. The second test leaves a turn that was cut off after its prompt and a second prompt in the inbox. The output starts with the inbox line and then `[resuming session s]`. The first request to the model holds only the interrupted prompt, so the unfinished turn is completed before the second prompt is delivered.
+4. The third test leaves a finished turn and an empty inbox, and expects no line about queued prompts.
+
+Run the whole suite from the `my-agent` folder:
+
+```text
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+ 49 pass
+ 0 fail
+ 5435 expect() calls
+Ran 49 tests across 8 files. [388.00ms]
+```
+
+<details>
+<summary>Stuck? The finished resume.test.ts</summary>
+
+`test/resume.test.ts`
+
+```ts
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { repl } from "../src/agent"
+import type { SessionEvent } from "../src/session-event"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, reply, scriptedModel, scriptedTerminal } from "./fakes"
+
+// A crash leaves the log as it was at the moment the process died. These tests write that log with
+// `append`, close the file, and start the agent again on it.
+let dir: string
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "agent-session-"))
+})
+afterEach(() => rm(dir, { recursive: true, force: true }))
+
+const ran: string[] = []
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => (ran.push(text), text),
+})
+
+const prompt = (text: string): SessionEvent => ({ type: "prompt", text })
+const calls = (...ids: string[]): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: ids.map((id) => ({ type: "tool-call", id, name: "echo", input: { text: id } })) },
+  finish: "tool-calls",
+})
+const result = (id: string): SessionEvent => ({
+  type: "tool-result",
+  part: { type: "tool-result", id, name: "echo", result: { type: "text", value: id } },
+})
+
+// Process one: the events that were written before the crash, and the prompts that were still in the inbox.
+const crashAfter = (events: SessionEvent[], inbox: string[] = []) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      for (const event of events) yield* session.append(event)
+      for (const text of inbox) yield* session.admit(text)
+    }).pipe(Effect.provide(SessionLive({ path: join(dir, "agent.db"), id: "s" }))),
+  )
+
+// Process two: a new agent on the same file. No input, so it only finishes what it finds.
+const restart = async (modelSteps: Parameters<typeof scriptedModel>[0]) => {
+  const model = scriptedModel(modelSteps)
+  const terminal = scriptedTerminal([])
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo]), SessionLive({ path: join(dir, "agent.db"), id: "s" }))
+  const events = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      return yield* (yield* Session).events
+    }).pipe(Effect.provide(layers)),
+  )
+  return { events, requests: model.requests, output: terminal.output }
+}
+
+describe("resuming a session", () => {
+  test("answers a call that has no result with an error and never runs it again", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go"), calls("a", "b"), result("a")])
+
+    const { events, requests, output } = await restart([reply("Understood.")])
+
+    expect(output[0]).toBe("[resuming session s]")
+    expect(ran).toEqual([])
+    const tool = requests[0]?.at(-1)
+    expect(tool?.role).toBe("tool")
+    expect(tool?.content.map((part) => (part.type === "tool-result" ? [part.id, part.result.type] : []))).toEqual([
+      ["a", "text"],
+      ["b", "error"],
+    ])
+    expect(JSON.stringify(tool)).toContain("stopped before this tool finished")
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "tool-result", "step-finished"])
+  })
+
+  test("continues a turn that stopped right after the prompt", async () => {
+    await crashAfter([prompt("hello")])
+
+    const { requests, output } = await restart([reply("Hi.")])
+
+    expect(output).toContain("Agent: Hi.")
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+  })
+
+  test("continues a turn that stopped between the last result and the next step", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a")])
+
+    const { requests } = await restart([reply("Done.")])
+
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+  })
+
+  test("leaves a finished turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("leaves a failed turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "turn-failed", reason: "connection reset" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("a resumed turn that calls a tool runs it like any other", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go")])
+
+    await restart([callTool("c9", "echo", { text: "again" }), reply("Done.")])
+
+    expect(ran).toEqual(["again"])
+  })
+
+  test("runs the prompts that were still in the inbox, in order", async () => {
+    await crashAfter([], ["one", "two"])
+
+    const { events, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output).toContain("[2 queued prompts from an earlier run]")
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["one", "step-finished", "two", "step-finished"])
+  })
+
+  test("finishes the interrupted turn before it delivers the next prompt", async () => {
+    await crashAfter([prompt("first")], ["second"])
+
+    const { events, requests, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output.slice(0, 2)).toEqual(["[1 queued prompt from an earlier run]", "[resuming session s]"])
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["first", "step-finished", "second", "step-finished"])
+  })
+
+  test("says nothing about the inbox when it is empty", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { output } = await restart([])
+
+    expect(output.join("\n")).not.toContain("queued prompt")
+  })
+})
+```
+
+</details>
+
+### Step 7: Queue three prompts, kill the agent, start it again
+
+This step changes no code. It uses two terminals, both opened in the `my-agent` folder:
+
+- **Terminal 1** runs the agent. Change into the `playground` folder first (`cd playground`), which is where the agent works and where `../src/index.ts` resolves from, as in [Part 8](/posts/the-session-as-an-event-log/).
+- **Terminal 2** stays in `my-agent`. It sends the kill, and it runs the `sqlite3` commands, because the database file `my-agent.db` is in `my-agent`, one folder above the playground.
+
+To get the same numbers as below, delete the database files that earlier runs left, with `rm -f my-agent.db*` in `my-agent`, so the log starts empty.
+
+**A real crash with work waiting.** The tests write the file by hand. This run produces it. In terminal 1, three lines go into the agent at once: a story that takes a while to stream, a question that needs a tool, and a question that needs another one. With piped input the typed lines are not echoed, so the transcript shows them after `You:`, as a terminal would. A few seconds into the story, terminal 2 sends `pkill -9 -f 'bun ../src/index.ts'`. Signal 9, SIGKILL, cannot be caught, so the process ends without running any code.
+
+```text
+$ printf '%s\n' "Write a story of about 300 words about a lighthouse keeper." "List the files in this folder." "What is the second item in notes/todo.txt?" | bun ../src/index.ts
+You: Write a story of about 300 words about a lighthouse keeper.
+[queued]
+You: List the files in this folder.
+[queued]
+You: What is the second item in notes/todo.txt?
+[queued]
+You: Agent: Elias watched the horizon through the grime-streaked window, his eyes tracking the rhyt…
+Every hour, Elias climbed the iron stairs, his joints creaking in unison with the building’s groans…
+A sudden gust threatened to snuff the flame. With a sigh that carried the weight of decades, Elias…
+```
+
+All three prompts were acknowledged before the model wrote its first word, which is the reader working while the worker runs the first turn. After the kill, the log holds the first prompt and nothing else, and the inbox holds the other two:
+
+```text
+$ sqlite3 my-agent.db "select seq || ' ' || type from event"
+1 prompt
+
+$ sqlite3 my-agent.db "select id || ' ' || text from inbox"
+2 List the files in this folder.
+3 What is the second item in notes/todo.txt?
+```
+
+Starting the agent again in terminal 1, from the playground folder and with no input, shows what the restart does. It reports the inbox, finishes the story that the model had not completed (the model is called again, because the partial text was never stored), and then runs the other two prompts in order:
+
+```text
+$ bun ../src/index.ts < /dev/null
+[2 queued prompts from an earlier run]
+[resuming session default]
+You: Agent: The wind didn't just howl; it scoured the granite walls, seeking cracks to exploit and…
+His world was one of relentless rhythm. The great Fresnel lens, a crown of prismatic glass that onc…
+…
+[tool] list_files({"path":"."})
+Agent: Here are the files and folders in the current directory:
+- `secret-file.txt`
+- `README.md`
+- `notes/` (folder)
+[tool] read_file({"path":"notes/todo.txt"})
+Agent: The second item in `notes/todo.txt` is "water the plants".
+```
+
+The log now holds all three turns, and the inbox is empty:
+
+```text
+$ sqlite3 my-agent.db "select seq || ' ' || type from event"
+1 prompt
+2 step-finished
+3 prompt
+4 step-finished
+5 tool-result
+6 step-finished
+7 prompt
+8 step-finished
+9 tool-result
+10 step-finished
+
+$ sqlite3 my-agent.db "select count(*) from inbox"
+0
+```
+
+> **Watch for this.** The prompt that was running when the process died is not in the inbox. It was delivered, so it is in the log, and it is `resume` from [Part 8](/posts/the-session-as-an-event-log/) that finishes it. The inbox holds only the prompts that were never delivered. The two mechanisms cover different rows of the table at the start of this Part.
+
+> **Watch for this.** The `You: ` prompt stays on screen while a reply streams, because the reader is already asking for the next line. In the transcripts, the reply appears on the same line as that prompt. With a real keyboard, the terminal echoes a line typed during a reply wherever the cursor is, which can be in the middle of the reply text. The router collects lines and does not depend on the screen, so the line is read as typed.
+
+> **Result.** In the runs above, a prompt is in the SQLite file as soon as its line has been read, and it moves into the event log only when the agent is ready for it, in one transaction. The reader does not wait for the model, the worker runs one prompt at a time, and a process killed with prompts waiting leaves them in the inbox for the next run.
+
+### Possible extensions
+
+Three small additions fit the design and are not built here:
+
+- **Idempotent admission.** `admit` could take an id from the caller and ignore a second admission with the same id. A client that retries a submit after a timeout would then not queue the same prompt twice. OpenCode works this way: reusing an inbox item id is idempotent, and the first admission wins ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L209)).
+- **Cancelling a waiting prompt.** Since the inbox is a table, a prompt can be removed from it before it is delivered. A `cancel(id)` that deletes the row, and a way to list the rows with their ids, would be enough.
+- **A line editor.** The terminal could redraw the `You: ` prompt and the text typed so far after each piece of output, so a reply no longer lands in the middle of a line being typed. That is a terminal user interface feature, and it would also bring back the arrow keys that readline's editing used to provide.
+
+### OpenCode does more
+
+Three things are left out on purpose. **Execution claims:** OpenCode writes a claim when a turn starts and releases it when the turn ends, so a claim that is still there on startup means a process died in the middle of a turn. The agent here recognises an unfinished turn from the shape of the log, with `unansweredCalls` from [Part 8](/posts/the-session-as-an-event-log/), which covers one process and one session. **Steering:** a prompt can be delivered at a step boundary inside a running turn, as decision 4 describes. **An attempts budget:** a turn that keeps killing the process would be resumed forever, so OpenCode counts the resumes of each turn and, after `maxAttempts` (10 by default), ends the turn as aborted instead ([session/execution/restart.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L26-L34)). The same file states the guarantee: recovery is at-least-once, and local coordination prevents concurrent drains but not repeated external side effects after a crash ([comment](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L53-L54)).
+
+### The finished files
+
+These are the files that differ from [Part 8](/posts/the-session-as-an-event-log/), plus the new test files. `package.json`, the first migration and every other source and test file are as [Part 8](/posts/the-session-as-an-event-log/) left them.
+
+<details>
+<summary>Stuck? drizzle.config.ts</summary>
+
+`drizzle.config.ts`
+
+```ts
+import { defineConfig } from "drizzle-kit"
+
+export default defineConfig({
+  dialect: "sqlite",
+  schema: "./src/db/schema.ts",
+  out: "./drizzle",
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? The migration for the inbox table</summary>
+
+`drizzle/20261112194458_inbox/migration.sql`
+
+```sql
+CREATE TABLE `inbox` (
+	`id` integer PRIMARY KEY AUTOINCREMENT,
+	`session_id` text NOT NULL,
+	`text` text NOT NULL
+);
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/db/schema.ts</summary>
+
+`src/db/schema.ts`
+
+```ts
+import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
+
+// The event log: one row per session event. `seq` orders the events of a session.
+export const EventTable = sqliteTable(
+  "event",
+  {
+    session_id: text().notNull(),
+    seq: integer().notNull(),
+    type: text().notNull(),
+    data: text({ mode: "json" }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.session_id, table.seq] })],
+)
+
+// The inbox: the prompts a session has accepted and not yet run. A row is deleted when its prompt is delivered.
+// `id` counts up, so the lowest id is the oldest prompt.
+export const InboxTable = sqliteTable("inbox", {
+  id: integer().primaryKey({ autoIncrement: true }),
+  session_id: text().notNull(),
+  text: text().notNull(),
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/session.ts</summary>
+
+`src/session.ts`
+
+```ts
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { asc, count, eq, max } from "drizzle-orm"
+import * as SQLiteBunDrizzle from "drizzle-orm/effect-sqlite-bun"
+import { migrate } from "drizzle-orm/effect-sqlite-bun/migrator"
+import { Context, Effect, Layer, Schema } from "effect"
+import { SessionCorrupt } from "./errors"
+import { toHistory } from "./history"
+import type { Message } from "./messages"
+import { SessionEvent } from "./session-event"
+import { EventTable, InboxTable } from "./db/schema"
+
+// What the agent needs from its session: accept prompts, append facts, and read the facts back.
+export class Session extends Context.Service<
+  Session,
+  {
+    readonly id: string
+    // Saves a prompt in the inbox. From this moment it survives a restart, whether or not the model ever sees it.
+    readonly admit: (text: string) => Effect.Effect<void>
+    // Moves the oldest prompt out of the inbox and into the log as a `prompt` event, in one indivisible act.
+    // Returns its text, or undefined when the inbox is empty.
+    readonly deliver: Effect.Effect<string | undefined>
+    // How many prompts wait in the inbox.
+    readonly pending: Effect.Effect<number>
+    readonly append: (event: SessionEvent) => Effect.Effect<void>
+    // Every call reads the log again.
+    readonly events: Effect.Effect<SessionEvent[], SessionCorrupt>
+    readonly history: Effect.Effect<Message[], SessionCorrupt>
+  }
+>()("@agent/Session") {}
+
+const migrationsFolder = new URL("../drizzle", import.meta.url).pathname
+const decode = Schema.decodeUnknownEffect(SessionEvent)
+const encode = Schema.encodeSync(SessionEvent)
+
+// The real session: a SQLite file. Building the layer opens the file and applies the migrations;
+// the end of the program closes it. A disk failure is a defect, not something the agent can handle.
+export const SessionLive = (options: { path: string; id: string }) =>
+  Layer.effect(
+    Session,
+    Effect.gen(function* () {
+      const db = yield* SQLiteBunDrizzle.makeWithDefaults()
+      yield* migrate(db, { migrationsFolder })
+
+      const thisSession = eq(EventTable.session_id, options.id)
+      const thisInbox = eq(InboxTable.session_id, options.id)
+
+      // The numbering continues where the log stops. One process writes a session, so it can count for itself.
+      const [last] = yield* db.select({ seq: max(EventTable.seq) }).from(EventTable).where(thisSession)
+      let seq = last?.seq ?? 0
+
+      // A row that no longer matches the schema stops the read and says which event it was.
+      const readEvent = (row: typeof EventTable.$inferSelect) =>
+        decode(row.data).pipe(
+          Effect.mapError((error) => new SessionCorrupt({ session: options.id, seq: row.seq, problem: error.message })),
+        )
+
+      const events = db.select().from(EventTable).where(thisSession).orderBy(asc(EventTable.seq)).pipe(
+        Effect.flatMap(Effect.forEach(readEvent)),
+        Effect.catchTag("EffectDrizzleQueryError", Effect.die),
+      )
+
+      const append = (event: SessionEvent) =>
+        Effect.suspend(() =>
+          db.insert(EventTable).values({ session_id: options.id, seq: ++seq, type: event.type, data: encode(event) }),
+        ).pipe(Effect.asVoid, Effect.orDie)
+
+      const admit = (text: string) =>
+        db.insert(InboxTable).values({ session_id: options.id, text }).pipe(Effect.asVoid, Effect.orDie)
+
+      // Deleting the inbox row and inserting the `prompt` event happen in one transaction: both take effect,
+      // or neither does. A crash between the two statements cannot lose the prompt or deliver it twice.
+      const deliver = Effect.suspend(() => {
+        const next = seq + 1
+        return db
+          .transaction((tx) =>
+            Effect.gen(function* () {
+              const [oldest] = yield* tx.select().from(InboxTable).where(thisInbox).orderBy(asc(InboxTable.id)).limit(1)
+              if (!oldest) return undefined
+              yield* tx.delete(InboxTable).where(eq(InboxTable.id, oldest.id))
+              yield* tx
+                .insert(EventTable)
+                .values({ session_id: options.id, seq: next, type: "prompt", data: encode({ type: "prompt", text: oldest.text }) })
+              return oldest.text
+            }),
+          )
+          .pipe(
+            // The number is used up only once the transaction has committed.
+            Effect.tap((text) =>
+              Effect.sync(() => {
+                if (text !== undefined) seq = next
+              }),
+            ),
+            Effect.orDie,
+          )
+      })
+
+      const pending = db.select({ waiting: count() }).from(InboxTable).where(thisInbox).pipe(
+        Effect.map(([row]) => row?.waiting ?? 0),
+        Effect.orDie,
+      )
+
+      return Session.of({ id: options.id, admit, deliver, pending, append, events, history: Effect.map(events, toHistory) })
+    }).pipe(Effect.orDie),
+  ).pipe(Layer.provide(SqliteClient.layer({ filename: options.path }).pipe(Layer.orDie)))
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/lines.ts</summary>
+
+`src/lines.ts`
+
+```ts
+import { Effect } from "effect"
+import { InputClosed } from "./errors"
+
+// Hands the lines the user types to whoever is asking for one.
+// - A line that arrives while nobody is asking waits, and the next question receives it.
+// - When several questions are open, the newest one receives the line: it was printed last, so it is the one being answered.
+// - When input ends, every open question fails with InputClosed, and so does every later one once the waiting lines are used up.
+export interface Lines {
+  readonly push: (line: string) => void
+  readonly end: () => void
+  readonly next: Effect.Effect<string, InputClosed>
+}
+
+export const makeLines = (): Lines => {
+  const waiting: string[] = []
+  const asking: Array<(answer: Effect.Effect<string, InputClosed>) => void> = []
+  let ended = false
+
+  return {
+    push: (line) => {
+      const asker = asking.pop()
+      if (asker) asker(Effect.succeed(line))
+      else waiting.push(line)
+    },
+    end: () => {
+      ended = true
+      for (const asker of asking.splice(0)) asker(Effect.fail(new InputClosed()))
+    },
+    next: Effect.callback<string, InputClosed>((resume) => {
+      const line = waiting.shift()
+      if (line !== undefined) return resume(Effect.succeed(line))
+      if (ended) return resume(Effect.fail(new InputClosed()))
+      asking.push(resume)
+      // A question that is interrupted stops asking, so it cannot take a line meant for the next one.
+      return Effect.sync(() => {
+        const index = asking.indexOf(resume)
+        if (index >= 0) asking.splice(index, 1)
+      })
+    }),
+  }
+}
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/terminal.ts</summary>
+
+`src/terminal.ts`
+
+```ts
+import { Context, Effect, Layer } from "effect"
+import { createInterface } from "node:readline"
+import { InputClosed } from "./errors"
+import { makeLines } from "./lines"
+
+// What the agent needs from the person at the keyboard. Nothing here says readline.
+export class Terminal extends Context.Service<
+  Terminal,
+  {
+    // Asks one question. The type says it can fail: input may have ended.
+    readonly ask: (prompt: string) => Effect.Effect<string, InputClosed>
+    readonly say: (line: string) => Effect.Effect<void>
+    // Prints text without ending the line, so a reply can appear piece by piece.
+    readonly write: (text: string) => Effect.Effect<void>
+  }
+>()("@agent/Terminal") {}
+
+// The real terminal. Building the layer starts reading standard input; the end of the program stops it.
+// readline only cuts the input into lines. It is given no output, so the terminal itself echoes what is typed,
+// and a reply that is printed while the user types cannot disturb a line readline is redrawing.
+export const TerminalLive = Layer.effect(
+  Terminal,
+  Effect.gen(function* () {
+    const lines = makeLines()
+
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const rl = createInterface({ input: process.stdin })
+        rl.on("line", lines.push)
+        rl.on("close", lines.end)
+        return rl
+      }),
+      (rl) => Effect.sync(() => rl.close()),
+    )
+
+    return Terminal.of({
+      ask: (prompt) => Effect.sync(() => void process.stdout.write(prompt)).pipe(Effect.andThen(lines.next)),
+      say: (line) => Effect.sync(() => console.log(line)),
+      write: (text) => Effect.sync(() => void process.stdout.write(text)),
+    })
+  }),
+)
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/agent.ts</summary>
+
+`src/agent.ts`
+
+```ts
+import { Effect, Queue, Stream } from "effect"
+import { messageOf, type InputClosed, type ProviderError, type SessionCorrupt } from "./errors"
+import type { FinishReason } from "./events"
+import { unansweredCalls } from "./history"
+import { isToolCall, type Message, type Part } from "./messages"
+import { ModelClient } from "./model-client"
+import { Session } from "./session"
+import { Terminal } from "./terminal"
+import { runTool, Tools, type Tool } from "./tool"
+
+// One step: reload the history from the log, stream the model's events, show the text as it arrives,
+// and append the finished message to the log.
+const step = (tools: Tool[]) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const session = yield* Session
+    const history = yield* session.history
+    const content: Part[] = []
+    let text = "" // the text block being written, if any
+    const outcome: { finish: FinishReason; native?: unknown } = { finish: "stop" }
+
+    // A text block ends when anything else arrives, or when the stream does, even by failing.
+    const endText = Effect.suspend(() => {
+      if (!text) return Effect.void
+      content.push({ type: "text", text })
+      text = ""
+      return terminal.say("")
+    })
+
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    ).pipe(Effect.ensuring(endText))
+
+    const message: Message = { role: "assistant", content, ...(outcome.native === undefined ? {} : { native: outcome.native }) }
+    yield* session.append({ type: "step-finished", message, finish: outcome.finish })
+    return { message, finish: outcome.finish }
+  })
+
+// Steps until the model stops asking for tools. Each result is appended as soon as its tool finishes.
+const run = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const tools = yield* Tools
+
+  while (true) {
+    const { message, finish } = yield* step(tools)
+    if (finish !== "tool-calls") return
+
+    for (const call of message.content.filter(isToolCall)) {
+      yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const part = yield* runTool(call)
+      if (part.result.type === "error") yield* terminal.say(`[error] ${part.result.value}`)
+      yield* session.append({ type: "tool-result", part })
+    }
+  }
+})
+
+const interrupted =
+  "The agent stopped before this tool finished, so it may or may not have run. Check the current state before repeating it."
+
+// A restart can find a turn that did not finish. Tool calls without a result get an error result instead of
+// running again, since a command that already ran must not run twice. Then the turn continues.
+const resume = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const calls = unansweredCalls(yield* session.history)
+  if (calls === undefined) return
+
+  yield* terminal.say(`[resuming session ${session.id}]`)
+  for (const call of calls) {
+    yield* terminal.say(`[interrupted] ${call.name}(${JSON.stringify(call.input)})`)
+    yield* session.append({
+      type: "tool-result",
+      part: { type: "tool-result", id: call.id, name: call.name, result: { type: "error", value: interrupted } },
+    })
+  }
+  yield* run
+})
+
+const queued = (count: number) => `${count} queued prompt${count === 1 ? "" : "s"}`
+
+// The read-eval-print loop, in two halves that do not wait for each other.
+// - The reader asks for a line, saves it in the inbox, and asks again, even while a turn is running.
+// - The worker finishes an interrupted turn, then delivers one prompt at a time and runs its turn.
+// The reader rings a bell after each prompt. The ring carries no prompt: it only tells the worker to look at the inbox.
+export const repl = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+
+  // A turn that fails is recorded as failed, so the next prompt starts from a consistent history.
+  const failed = (label: string, reason: string) =>
+    session.append({ type: "turn-failed", reason }).pipe(Effect.andThen(terminal.say(`[${label}] ${reason}`)))
+  const guarded = <R>(work: Effect.Effect<void, ProviderError | SessionCorrupt | InputClosed, R>) =>
+    work.pipe(
+      Effect.catchTag("ProviderError", (error) => failed("provider error", error.message)),
+      Effect.catchDefect((defect) => failed("bug", messageOf(defect))),
+    )
+
+  // At most one ring waits at a time: two rings in a row mean the same thing as one.
+  const wake = yield* Queue.dropping<void>(1)
+  let inputEnded = false
+
+  const reader = Effect.gen(function* () {
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+      yield* session.admit(input)
+      yield* terminal.say("[queued]")
+      yield* Queue.offer(wake, undefined)
+    }
+  }).pipe(
+    Effect.catchTag("InputClosed", () => Effect.sync(() => void (inputEnded = true))),
+    Effect.andThen(Queue.offer(wake, undefined)),
+  )
+
+  // What the last run left in the inbox, counted before the reader can add anything.
+  const left = yield* session.pending
+  if (left > 0) yield* terminal.say(`[${queued(left)} from an earlier run]`)
+
+  yield* Effect.forkChild(reader)
+  yield* guarded(resume)
+
+  while (true) {
+    // Read before delivering: a prompt admitted before the input ended is then always found by the delivery below.
+    const ended = inputEnded
+    if ((yield* session.deliver) !== undefined) {
+      yield* guarded(run)
+      continue
+    }
+    if (ended) return
+    yield* Queue.take(wake)
+  }
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/fakes.ts</summary>
+
+`test/fakes.ts`
+
+```ts
+import { Effect, Layer, Stream } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { ModelEvent } from "../src/events"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import { Terminal } from "../src/terminal"
+
+// What the scripted model streams for one step, in order. A ProviderError makes the stream fail at that point.
+export type Step = Array<ModelEvent | ProviderError>
+
+// A text reply, streamed one word at a time.
+export const reply = (text: string): Step => [
+  ...text.split(/(?<= )/).map((word): ModelEvent => ({ type: "text-delta", text: word })),
+  { type: "finish", reason: "stop" },
+]
+
+export const callTool = (id: string, name: string, input: unknown): Step => [
+  { type: "tool-call", id, name, input },
+  { type: "finish", reason: "tool-calls" },
+]
+
+// A step that fails before sending anything.
+export const fail = (reason: string): Step => [new ProviderError({ reason })]
+
+// A model that follows a script and records the history it was given at each step.
+// `beforeStep` runs when a step starts and holds the stream back until its promise settles.
+export const scriptedModel = (steps: Step[], beforeStep?: (request: number) => Promise<void>) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const request = requests.length
+          const next = steps[request - 1] ?? fail("The script has no reply left for this step")
+          const events = Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+          return beforeStep ? Stream.unwrap(Effect.promise(() => beforeStep(request)).pipe(Effect.as(events))) : events
+        }),
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. An answer can be a promise, for a line the user types later.
+// When the answers run out, input ends.
+// Questions that start with "Allow" are answered from `confirmations` instead, so a confirmation reaches the
+// tool that asked even though the reader has already taken every prompt, as the live terminal does.
+// `output` holds the finished lines; `writes` holds every piece passed to `write`, in order.
+export const scriptedTerminal = (answers: Array<string | Promise<string>>, confirmations: string[] = []) => {
+  const output: string[] = []
+  const writes: string[] = []
+  const queue = [...answers]
+  const confirm = [...confirmations]
+  let pending = "" // text written since the last line ended
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(pending + prompt)
+          pending = ""
+          const next = (prompt.startsWith("Allow") ? confirm : queue).shift()
+          if (next === undefined) return Effect.fail(new InputClosed())
+          return typeof next === "string" ? Effect.succeed(next) : Effect.promise(() => next)
+        }),
+      say: (line) =>
+        Effect.sync(() => {
+          output.push(pending + line)
+          pending = ""
+        }),
+      write: (text) =>
+        Effect.sync(() => {
+          writes.push(text)
+          pending += text
+        }),
+    }),
+  )
+  return { layer, output, writes }
+}
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/agent.test.ts</summary>
+
+`test/agent.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { ProviderError } from "../src/errors"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, fail, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+// Two small tools, so the tests never touch the disk.
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const deleteEverything = defineTool({
+  name: "delete_everything",
+  description: "Pretends to delete everything.",
+  input: Schema.Struct({}),
+  execute: async () => "deleted",
+  confirm: () => "delete everything",
+})
+
+// Runs the loop against a script, on a session kept in memory, and returns what the loop and the fakes saw.
+const run = async (script: {
+  model: Step[]
+  answers: Array<string | Promise<string>>
+  confirmations?: string[]
+  beforeStep?: (request: number) => Promise<void>
+}) => {
+  const model = scriptedModel(script.model, script.beforeStep)
+  const terminal = scriptedTerminal(script.answers, script.confirmations)
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo, deleteEverything]), SessionLive({ path: ":memory:", id: "test" }))
+
+  const { history, events } = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      const session = yield* Session
+      return { history: yield* session.history, events: yield* session.events }
+    }).pipe(Effect.provide(layers)),
+  )
+  return { history, events, requests: model.requests, output: terminal.output, writes: terminal.writes }
+}
+
+describe("the agent loop", () => {
+  test("runs a tool call and then answers", async () => {
+    const { history, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("The tool said hi.")],
+      answers: ["say hi"],
+    })
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"])
+    expect(history[2]?.content).toEqual([{ type: "tool-result", id: "call_1", name: "echo", result: { type: "text", value: "hi" } }])
+    expect(output).toContain("Agent: The tool said hi.")
+  })
+
+  test("appends each fact to the log as it happens", async () => {
+    const { events } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("The tool said hi.")],
+      answers: ["say hi"],
+    })
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "step-finished"])
+  })
+
+  test("shows the reply piece by piece", async () => {
+    const { writes } = await run({ model: [reply("Hello there, friend.")], answers: ["hi"] })
+
+    expect(writes).toEqual(["Agent: ", "Hello ", "there, ", "friend."])
+  })
+
+  test("tells the model when the user declines", async () => {
+    const { requests } = await run({
+      model: [callTool("call_1", "delete_everything", {}), reply("Understood, I will not delete anything.")],
+      answers: ["clean up"],
+      confirmations: ["n"],
+    })
+
+    // The second request is the step after the tool call: its last message holds the result.
+    const result = requests[1]?.at(-1)?.content[0]
+    expect(result).toMatchObject({ type: "tool-result", result: { type: "error" } })
+    expect(JSON.stringify(result)).toContain("User declined")
+  })
+
+  test("ends the line of a reply that breaks off, then drops the turn", async () => {
+    const { history, events, output } = await run({
+      model: [[{ type: "text-delta", text: "The answer is" }, new ProviderError({ reason: "connection reset" })]],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(events.map((event) => event.type)).toEqual(["prompt", "turn-failed"])
+    expect(output).toContain("Agent: The answer is")
+    expect(output).toContain("[provider error] connection reset")
+  })
+
+  test("drops a turn whose model call fails", async () => {
+    const { history, output } = await run({
+      model: [fail("connection refused")],
+      answers: ["hello"],
+    })
+
+    expect(history).toEqual([])
+    expect(output).toContain("[provider error] connection refused")
+  })
+
+  test("saves every prompt first, then runs them one at a time in the order they came", async () => {
+    const { events, requests, output } = await run({
+      model: [reply("First."), reply("Second."), reply("Third.")],
+      answers: ["one", "two", "three"],
+    })
+
+    expect(output.filter((line) => line === "[queued]")).toHaveLength(3)
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual([
+      "one", "step-finished", "two", "step-finished", "three", "step-finished",
+    ])
+    expect(requests[2]?.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant", "user"])
+  })
+
+  test("a prompt typed while a turn runs is saved at once and runs after the turn", async () => {
+    let typeSecond!: (line: string) => void
+    const second = new Promise<string>((resolve) => (typeSecond = resolve))
+
+    const { events, output } = await run({
+      model: [callTool("call_1", "echo", { text: "hi" }), reply("First done."), reply("Second done.")],
+      answers: ["first", second],
+      // The user types while the model is working on the second step of the first turn.
+      beforeStep: async (request) => {
+        if (request !== 2) return
+        typeSecond("second")
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      },
+    })
+
+    expect(output.indexOf("[queued]", output.indexOf("[queued]") + 1)).toBeLessThan(output.indexOf("Agent: First done."))
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual([
+      "first", "step-finished", "tool-result", "step-finished", "second", "step-finished",
+    ])
+    expect(output).toContain("Agent: Second done.")
+  })
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/inbox.test.ts</summary>
+
+`test/inbox.test.ts`
+
+```ts
+import { Database } from "bun:sqlite"
+import { afterEach, beforeEach, expect, test } from "bun:test"
+import { Effect, Exit } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Session, SessionLive } from "../src/session"
+
+let path: string
+let dir: string
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "agent-inbox-"))
+  path = join(dir, "agent.db")
+})
+afterEach(() => rm(dir, { recursive: true, force: true }))
+
+// Opens the file, runs `use`, and closes the file again, like one run of the agent.
+const using = <A, E>(id: string, use: (session: Session["Service"]) => Effect.Effect<A, E>) =>
+  Effect.runPromise(Effect.gen(function* () { return yield* use(yield* Session) }).pipe(Effect.provide(SessionLive({ path, id }))))
+
+test("delivers the prompts in the order they were admitted, then reports an empty inbox", async () => {
+  const delivered = await using("s", (session) =>
+    Effect.gen(function* () {
+      yield* session.admit("one")
+      yield* session.admit("two")
+      return [yield* session.deliver, yield* session.deliver, yield* session.deliver]
+    }),
+  )
+  expect(delivered).toEqual(["one", "two", undefined])
+})
+
+test("moves a prompt from the inbox to the log", async () => {
+  const { before, after, events } = await using("s", (session) =>
+    Effect.gen(function* () {
+      yield* session.admit("hello")
+      const before = { pending: yield* session.pending, events: (yield* session.events).length }
+      yield* session.deliver
+      const after = { pending: yield* session.pending }
+      return { before, after, events: yield* session.events }
+    }),
+  )
+  expect(before).toEqual({ pending: 1, events: 0 })
+  expect(after).toEqual({ pending: 0 })
+  expect(events).toEqual([{ type: "prompt", text: "hello" }])
+})
+
+test("keeps an admitted prompt after the file is closed and opened again", async () => {
+  await using("s", (session) => session.admit("still here"))
+  expect(await using("s", (session) => session.pending)).toBe(1)
+  expect(await using("s", (session) => session.deliver)).toBe("still here")
+})
+
+test("keeps the inboxes of two sessions apart", async () => {
+  await using("a", (session) => session.admit("for a"))
+  await using("b", (session) => session.admit("for b"))
+  expect(await using("b", (session) => session.deliver)).toBe("for b")
+  expect(await using("b", (session) => session.deliver)).toBeUndefined()
+  expect(await using("a", (session) => session.pending)).toBe(1)
+})
+
+test("a delivery that fails leaves the prompt in the inbox", async () => {
+  await using("s", (session) => session.admit("must not be lost"))
+
+  const outcome = await Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      // A second writer takes event number 1 after this session opened, so the insert in `deliver` is refused.
+      const intruder = new Database(path)
+      intruder.run(`insert into event (session_id, seq, type, data) values ('s', 1, 'prompt', '{"type":"prompt","text":"intruder"}')`)
+      intruder.close()
+      const exit = yield* Effect.exit(session.deliver)
+      return { failed: Exit.isFailure(exit), pending: yield* session.pending }
+    }).pipe(Effect.provide(SessionLive({ path, id: "s" }))),
+  )
+
+  expect(outcome).toEqual({ failed: true, pending: 1 })
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/lines.test.ts</summary>
+
+`test/lines.test.ts`
+
+```ts
+import { expect, test } from "bun:test"
+import { Effect, Fiber } from "effect"
+import { makeLines } from "../src/lines"
+import { InputClosed } from "../src/errors"
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+test("keeps lines that arrive before anyone asks, in order", async () => {
+  const lines = makeLines()
+  lines.push("one")
+  lines.push("two")
+  expect(await Effect.runPromise(lines.next)).toBe("one")
+  expect(await Effect.runPromise(lines.next)).toBe("two")
+})
+
+test("gives a line to the question that is waiting", async () => {
+  const lines = makeLines()
+  const answer = Effect.runPromise(lines.next)
+  lines.push("hello")
+  expect(await answer).toBe("hello")
+})
+
+test("gives the line to the newest of several open questions", async () => {
+  const lines = makeLines()
+  const reader = Effect.runPromise(lines.next) // "You: "
+  const confirm = Effect.runPromise(lines.next) // "Allow? [y/N]"
+  lines.push("y")
+  expect(await confirm).toBe("y")
+  lines.push("next prompt")
+  expect(await reader).toBe("next prompt")
+})
+
+test("fails the open questions when input ends, after the waiting lines are used", async () => {
+  const lines = makeLines()
+  lines.push("last")
+  lines.end()
+  expect(await Effect.runPromise(lines.next)).toBe("last")
+  expect(await Effect.runPromise(Effect.flip(lines.next))).toBeInstanceOf(InputClosed)
+
+  const open = makeLines()
+  const pending = Effect.runPromise(Effect.flip(open.next))
+  open.end()
+  expect(await pending).toBeInstanceOf(InputClosed)
+})
+
+test("an interrupted question does not take the next line", async () => {
+  const lines = makeLines()
+  const first = Effect.runFork(lines.next)
+  await settle()
+  await Effect.runPromise(Fiber.interrupt(first))
+  const second = Effect.runPromise(lines.next)
+  lines.push("for the second")
+  expect(await second).toBe("for the second")
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/resume.test.ts</summary>
+
+`test/resume.test.ts`
+
+```ts
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { repl } from "../src/agent"
+import type { SessionEvent } from "../src/session-event"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, reply, scriptedModel, scriptedTerminal } from "./fakes"
+
+// A crash leaves the log as it was at the moment the process died. These tests write that log with
+// `append`, close the file, and start the agent again on it.
+let dir: string
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "agent-session-"))
+})
+afterEach(() => rm(dir, { recursive: true, force: true }))
+
+const ran: string[] = []
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => (ran.push(text), text),
+})
+
+const prompt = (text: string): SessionEvent => ({ type: "prompt", text })
+const calls = (...ids: string[]): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: ids.map((id) => ({ type: "tool-call", id, name: "echo", input: { text: id } })) },
+  finish: "tool-calls",
+})
+const result = (id: string): SessionEvent => ({
+  type: "tool-result",
+  part: { type: "tool-result", id, name: "echo", result: { type: "text", value: id } },
+})
+
+// Process one: the events that were written before the crash, and the prompts that were still in the inbox.
+const crashAfter = (events: SessionEvent[], inbox: string[] = []) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      for (const event of events) yield* session.append(event)
+      for (const text of inbox) yield* session.admit(text)
+    }).pipe(Effect.provide(SessionLive({ path: join(dir, "agent.db"), id: "s" }))),
+  )
+
+// Process two: a new agent on the same file. No input, so it only finishes what it finds.
+const restart = async (modelSteps: Parameters<typeof scriptedModel>[0]) => {
+  const model = scriptedModel(modelSteps)
+  const terminal = scriptedTerminal([])
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo]), SessionLive({ path: join(dir, "agent.db"), id: "s" }))
+  const events = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      return yield* (yield* Session).events
+    }).pipe(Effect.provide(layers)),
+  )
+  return { events, requests: model.requests, output: terminal.output }
+}
+
+describe("resuming a session", () => {
+  test("answers a call that has no result with an error and never runs it again", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go"), calls("a", "b"), result("a")])
+
+    const { events, requests, output } = await restart([reply("Understood.")])
+
+    expect(output[0]).toBe("[resuming session s]")
+    expect(ran).toEqual([])
+    const tool = requests[0]?.at(-1)
+    expect(tool?.role).toBe("tool")
+    expect(tool?.content.map((part) => (part.type === "tool-result" ? [part.id, part.result.type] : []))).toEqual([
+      ["a", "text"],
+      ["b", "error"],
+    ])
+    expect(JSON.stringify(tool)).toContain("stopped before this tool finished")
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "tool-result", "step-finished"])
+  })
+
+  test("continues a turn that stopped right after the prompt", async () => {
+    await crashAfter([prompt("hello")])
+
+    const { requests, output } = await restart([reply("Hi.")])
+
+    expect(output).toContain("Agent: Hi.")
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+  })
+
+  test("continues a turn that stopped between the last result and the next step", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a")])
+
+    const { requests } = await restart([reply("Done.")])
+
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+  })
+
+  test("leaves a finished turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("leaves a failed turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "turn-failed", reason: "connection reset" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("a resumed turn that calls a tool runs it like any other", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go")])
+
+    await restart([callTool("c9", "echo", { text: "again" }), reply("Done.")])
+
+    expect(ran).toEqual(["again"])
+  })
+
+  test("runs the prompts that were still in the inbox, in order", async () => {
+    await crashAfter([], ["one", "two"])
+
+    const { events, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output).toContain("[2 queued prompts from an earlier run]")
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["one", "step-finished", "two", "step-finished"])
+  })
+
+  test("finishes the interrupted turn before it delivers the next prompt", async () => {
+    await crashAfter([prompt("first")], ["second"])
+
+    const { events, requests, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output.slice(0, 2)).toEqual(["[1 queued prompt from an earlier run]", "[resuming session s]"])
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["first", "step-finished", "second", "step-finished"])
+  })
+
+  test("says nothing about the inbox when it is empty", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { output } = await restart([])
+
+    expect(output.join("\n")).not.toContain("queued prompt")
+  })
+})
+```
+
+</details>
+
+## Sources
+
+The first item is the primary source for this Part. OpenCode's versions are fuller than the one built here: they keep the inbox in a projected table with several kinds of items, wake and drain sessions through a coordinator that runs many of them, and recover with durable claims. A useful exercise is to read `inbox.ts`, `execution.ts` and `restart.ts` and to note, for each of them, what the agent here does without it and what a crash could then do.
+
+- OpenCode's [session/inbox.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/inbox.ts#L191-L199), [session/execution.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution.ts#L24-L25) and [session/execution/restart.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L26-L34)
+- OpenCode's [AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208-L214) (the Session Core section on admission, delivery and wakeups)
+- Anthropic's [Scaling Managed Agents](https://www.anthropic.com/research/managed-agents) (the session as a log apart from the loop) and [Building effective agents](https://www.anthropic.com/research/building-effective-agents) (human feedback at checkpoints)
+
+This Part is the second of Stage B. The session now accepts work while the process is busy and keeps it across a restart. The other topic of the stage that is still open, listed in [the roadmap](/posts/the-roadmap/) as _Context limits and compaction_, is not covered here, and its Part is not yet scheduled.

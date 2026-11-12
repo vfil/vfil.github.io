@@ -91,7 +91,7 @@ The database file is input from outside the program, like the arguments a model 
 
 ### What this leaves for later
 
-A prompt is still written and run in the same act: if the process dies after the user pressed Enter and before the `prompt` event was appended, the prompt is lost. Separating the two is _Inbox vs. execution_ in [the roadmap](/posts/the-roadmap/). Only one process may write to a session: the event numbers are counted by the process that writes them, and a second writer on the same session fails, with `UNIQUE constraint failed: event.session_id, event.seq` as the cause, because the pair is the table's primary key. And a session never shrinks, so a long task will eventually outgrow the model's context window, which the roadmap's _Context limits and compaction_ covers.
+A prompt is still written and run in the same act: if the process dies after the user pressed Enter and before the `prompt` event was appended, the prompt is lost. Separating the two is _Inbox vs. execution_ in [the roadmap](/posts/the-roadmap/), and [Part 9](/posts/inbox-vs-execution/) builds it. Only one process may write to a session: the event numbers are counted by the process that writes them, and a second writer on the same session fails, with `UNIQUE constraint failed: event.session_id, event.seq` as the cause, because the pair is the table's primary key. And a session never shrinks, so a long task will eventually outgrow the model's context window, which the roadmap's _Context limits and compaction_ covers.
 
 ## Check yourself
 
@@ -3156,4 +3156,4 @@ The first item is the primary source for this Part. OpenCode's versions are full
 - OpenCode's [session/sql.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/sql.ts#L86-L102), [database/database.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/database/database.ts) and [AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md) (the Session Core section and the event rules)
 - Drizzle's [Get started with Drizzle and Bun:SQLite](https://orm.drizzle.team/docs/get-started/bun-sqlite-new)
 
-This Part starts Stage B. The session now outlives the process. Two other topics of the stage, listed in [the roadmap](/posts/the-roadmap/) as _Inbox vs. execution_ and _Context limits and compaction_, are not covered here, and their Parts are not yet scheduled.
+This Part starts Stage B. The session now outlives the process. Of the two other topics of the stage listed in [the roadmap](/posts/the-roadmap/), _Inbox vs. execution_ is the subject of [Part 9](/posts/inbox-vs-execution/), and _Context limits and compaction_ is not covered here and its Part is not yet scheduled.
