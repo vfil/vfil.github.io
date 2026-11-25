@@ -13,22 +13,22 @@ import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-This Part rewrites the agent from [Part 4](/posts/providers-behind-one-interface/) so that every failure shows in a type: tools fail with typed errors, a Schema validates each tool's input, and the errors the model reads are kept apart from the errors the user reads. The code also moves from one file to eight. It is the third Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+This Part rewrites the agent from [Part 4](/posts/providers-behind-one-interface/) so that every failure shows up in a type. Tools fail with typed errors, a Schema validates each tool's input, and the model reads only the errors it can act on while the user reads the rest. The code also grows from one file to eight. This is the fourth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
 
-The code for this Part is available as the [`Part5_use_effects` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part5_use_effects), the repo where I build this agent in parallel.
+The code for this Part is the [`Part5_use_effects` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part5_use_effects), the repo where I build this agent in parallel.
 
 ## Start from the failures
 
-The agent from [Part 4](/posts/providers-behind-one-interface/) has four kinds of failure, and the code handles each of them differently. None of the four shows in a type.
+The agent from [Part 4](/posts/providers-behind-one-interface/) can fail in four ways, and the code handles each one differently. None of them shows up in a type.
 
-| Failure                                                                                              | Where it is raised | What happens in Part 4                                                                                         |
-| ---------------------------------------------------------------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------- |
-| A tool is unknown, its input is wrong, the user declines, or the tool's code throws                  | Inside `runTool`   | The `catch` turns it into an error result and the model reads it                                               |
-| A bug in the agent's own code that runs inside that `try` block, for example in a `confirm` function | Inside `runTool`   | The same `catch` turns it into an error result. The model is told about a mistake that only the author can fix |
-| The model request fails: server not running, a 404, a reply that cannot be read                      | `chat`             | The error is thrown out of the loop and the program exits                                                      |
-| Input ends, from piped input or Ctrl-D                                                               | `rl.question`      | The call throws `readline was closed`, or, when input ends during a question, never returns                    |
+| Failure                                                                                              | Where it is raised | What happens in Part 4                                                                                     |
+| ---------------------------------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
+| A tool is unknown, its input is wrong, the user declines, or the tool's code throws                  | Inside `runTool`   | The `catch` turns it into an error result and the model reads it                                           |
+| A bug in the agent's own code that runs inside that `try` block, for example in a `confirm` function | Inside `runTool`   | The same `catch` turns it into an error result, so the model hears about a mistake only the author can fix |
+| The model request fails: server not running, a 404, a reply that cannot be read                      | `chat`             | The error is thrown out of the loop and the program exits                                                  |
+| Input ends, from piped input or Ctrl-D                                                               | `rl.question`      | The call throws `readline was closed`, or, when input ends during a question, never returns                |
 
-The first row works because [Part 3](/posts/tools-as-data/) put one `try`/`catch` around the whole call. The other rows show what that does not express. TypeScript does not distinguish a failure the model can fix from a bug, or from a failure that only the user can fix, and a function's type does not say whether it can throw at all. [Part 1](/posts/the-loop/) already ran into the last point. Pointing `list_files` at a directory that does not exist ended the program:
+The first row works because [Part 3](/posts/tools-as-data/) wrapped the whole call in one `try`/`catch`. The other rows are what that can't express. TypeScript can't tell a failure the model can fix from a bug, or from a failure only the user can fix, and a function's type doesn't say whether it throws at all. [Part 1](/posts/the-loop/) already hit that last point: pointing `list_files` at a directory that doesn't exist ended the program:
 
 ```ts
 import { readdir } from "node:fs/promises"
@@ -52,17 +52,17 @@ ENOENT: no such file or directory, scandir 'missing'
     code: "ENOENT"
 ```
 
-The type of `listFiles` is `(path: string) => Promise<string>`. Nothing in it mentions `ENOENT`. This Part moves the agent to Effect, a library whose central idea is to put the failure into the type.
+The type of `listFiles` is `(path: string) => Promise<string>`, and nothing in it mentions `ENOENT`. This Part moves the agent to Effect, a library built around putting the failure into the type.
 
 ## What Effect adds
 
-Effect's own introduction, [Why Effect?](https://effect.website/docs/getting-started/why-effect/), makes the same observation about a plain `divide` function: "Based on the types, we have no idea that this function can throw an exception." Its core claim is that "we can use the type system to track errors and context, not only success values." The page is part of the v3 documentation, and OpenCode uses v4, so some names differ; the [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md) lists them. The snippets in this Part were run on Effect 4.1.0, the version OpenCode pins at the commit its links point to (`97be25f046`).
+Effect's own introduction, [Why Effect?](https://effect.website/docs/getting-started/why-effect/), makes the same point about a plain `divide` function: "Based on the types, we have no idea that this function can throw an exception." Its main claim is that "we can use the type system to track errors and context, not only success values." The page is part of the v3 documentation and OpenCode uses v4, so some names differ; the [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md) lists them. The snippets in this Part run on Effect 4.1.0, the version OpenCode used when this Post was written.
 
-This section covers the four ideas the rest of this Part uses. Each snippet was run on its own before it went into this Part.
+The rest of this Part relies on four ideas from Effect, and the snippets below show each one on its own.
 
 ### 1. An Effect is a value with three type parameters
 
-`Effect<A, E, R>` describes a computation that produces an `A`, can fail with an `E`, and needs an `R` to run. `R` stands for requirements such as services. It stays `never` (nothing is required) in this Part, and _Services and layers_ (Part 6) uses it. Here `listFiles` is written again, with the failure as a class. `Schema.TaggedError` defines a class whose instances carry a `_tag` that names the failure, and Schema gives its fields their types. (A `_tag` is Effect vocabulary and has nothing to do with the Tags of a Post on this blog.)
+`Effect<A, E, R>` describes a computation that produces an `A`, can fail with an `E`, and needs an `R` to run. `R` is for requirements such as services. It stays `never` (nothing required) in this Part, and _Services and layers_ (Part 6) puts it to use. Here is `listFiles` again, with its failure written as a class. `Schema.TaggedError` defines a class whose instances carry a `_tag` naming the failure, and Schema gives its fields their types. (`_tag` is Effect vocabulary and has nothing to do with the Tags on this blog's Posts.)
 
 ```ts
 import { Effect, Schema } from "effect"
@@ -80,7 +80,7 @@ const listFiles = (path: string) =>
   }).pipe(Effect.map((entries) => entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name)).join("\n")))
 ```
 
-`Effect.tryPromise` runs a function that returns a promise, and `catch` turns whatever it rejects with into the typed failure. The type of `listFiles` is now `(path: string) => Effect<string, NotListable, never>`: it produces a string, can fail with `NotListable`, and requires nothing. The compiler enforces this. Assigning the result to an Effect that cannot fail is an error:
+`Effect.tryPromise` runs a function that returns a promise, and its `catch` turns whatever the promise rejects with into the typed failure. The type of `listFiles` is now `(path: string) => Effect<string, NotListable, never>`: it produces a string, can fail with `NotListable`, and requires nothing. The compiler holds you to that, so assigning the result to an Effect that cannot fail is an error:
 
 ```ts
 const sure: Effect.Effect<string> = listFiles("missing")
@@ -94,7 +94,7 @@ effect2.ts(4,7): error TS2322: Type 'Effect<string, NotListable, never>' is not 
 
 ### 2. `Effect.gen` and `yield*` play the role of `async` and `await`
 
-Inside `Effect.gen`, `yield*` runs another Effect and gives back its success value. If that Effect fails, the generator stops and the Effect it belongs to fails with the same error:
+Inside `Effect.gen`, `yield*` runs another Effect and hands back its success value. If that Effect fails, the generator stops and the Effect being built fails with the same error:
 
 ```ts
 const listBoth = Effect.gen(function* () {
@@ -106,11 +106,11 @@ const listBoth = Effect.gen(function* () {
 // listBoth: Effect<string, NotListable, never>
 ```
 
-The error types of the steps are combined, so `listBoth` has the same `NotListable` in its type without anyone writing it down. With `async` functions this information is lost at every `await`.
+The steps' error types add up, so `listBoth` carries `NotListable` in its type even though nobody wrote it there. With `async` functions that information is lost at every `await`.
 
 ### 3. An Effect describes work and does nothing until it is run
 
-Building `listBoth` does not list any directory. The work starts when the Effect is run, and a program does that once, at its edge. `Effect.runPromise` is the usual way:
+Building `listBoth` doesn't list any directory. The work starts when the Effect runs, and a program runs it once, at its edge, usually with `Effect.runPromise`:
 
 ```ts
 console.log("built the Effect")
@@ -127,11 +127,11 @@ notes/
 todo.txt
 ```
 
-`listing` prints after `built the Effect`. An Effect that is created and never yielded or run does nothing, and the compiler does not report it. A missing `yield*` is a mistake to look for when a step seems to be skipped.
+`listing` prints after `built the Effect`. If you create an Effect and never yield or run it, nothing happens, and the compiler won't warn you. When a step seems to be skipped, look for a missing `yield*`.
 
 ### 4. A failure is handled by its type, and the type shrinks
 
-`Effect.catch` takes a handler for the typed failure. After it, `E` is `never`, and the earlier compiler error disappears:
+`Effect.catch` takes a handler for the typed failure. After it, `E` is `never`, and the compiler error from earlier goes away:
 
 ```ts
 const safe = listFiles("missing").pipe(
@@ -147,13 +147,13 @@ $ cd playground && bun ../effect4.ts
 Could not list missing: ENOENT: no such file or directory, scandir 'missing'
 ```
 
-There is a second kind of failure that `Effect.catch` does not see. A **defect** is an error nobody planned for, such as an exception thrown by a bug. It is not part of `E`, it passes through `Effect.catch`, and it has its own handler, `Effect.catchDefect`. The agent uses this difference to keep bugs away from the model.
+`Effect.catch` doesn't see a second kind of failure. A **defect** is an error nobody planned for, such as an exception thrown by a bug. It isn't part of `E`, it passes through `Effect.catch`, and it has its own handler, `Effect.catchDefect`. The agent uses this split to keep bugs away from the model.
 
 ## Five decisions in the rewrite
 
 ### 1. A tool failure is a typed class
 
-A **tool failure** is a typed error raised while running a tool call, and the agent turns it into an error tool result. The agent has four, each with the fields that describe it and a `message` that becomes the text the model reads:
+A **tool failure** is a typed error raised while running a tool call, which the agent turns into an error tool result. There are four, each with the fields that describe it and a `message` that becomes the text the model reads:
 
 | Failure        | Raised when                                                                                 | What the model reads                                           |
 | -------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
@@ -162,13 +162,13 @@ A **tool failure** is a typed error raised while running a tool call, and the ag
 | `Declined`     | The user answers anything but `y`, or there is no answer                                    | `User declined this action. Ask what they would like instead.` |
 | `ToolCrashed`  | The tool's own code throws or rejects: a missing file, a bad edit, a command that timed out | The error's message, as in Part 3                              |
 
-Part 4 had these messages as strings in four places. Now each is a class, and a function that can raise one has it in its type.
+In Part 4 these messages were strings in four places. Now each one is a class, and any function that can raise it says so in its type.
 
 ### 2. One place turns a failure into a result
 
-Each tool's `run` has the type `Effect<string, ToolFailure>`, where `ToolFailure` is the union of the four classes. `runTool` runs it and converts both outcomes into the same result type as in Part 4: a string becomes `{ type: "text" }` and a failure becomes `{ type: "error" }`. Its return type is `Effect<ToolResultPart>`, which is `Effect<ToolResultPart, never, never>` with the defaults left out. The protocols are unchanged, because they only ever see a tool result.
+Each tool's `run` has the type `Effect<string, ToolFailure>`, where `ToolFailure` is the union of the four classes. `runTool` runs it and turns both outcomes into the same result type as in Part 4: a string becomes `{ type: "text" }` and a failure becomes `{ type: "error" }`. Its return type is `Effect<ToolResultPart>`, short for `Effect<ToolResultPart, never, never>`. The protocols don't change, because all they ever see is a tool result.
 
-The union is checked. If `run` is changed so that it can fail with something that is not in `ToolFailure`, for example a `ProviderError`, the compiler reports it where the `Tool` is built, before anything runs:
+The compiler checks the union. Change `run` so it can fail with something outside `ToolFailure`, such as a `ProviderError`, and the compiler reports it where the `Tool` is built, before anything runs:
 
 ```text
 src/tool.ts(34,7): error TS2322: Type 'Effect<string, Declined | InvalidInput | ProviderError | ToolCrashed, S["DecodingServices"]>' is not assignable to type 'Effect<string, ToolFailure, never>'.
@@ -176,19 +176,19 @@ src/tool.ts(34,7): error TS2322: Type 'Effect<string, Declined | InvalidInput | 
 
 ### 3. Expected failures and defects are separate
 
-`runTool` handles the typed failures only. A bug inside the agent, such as a function that throws while describing a confirmation, is a defect. It is not converted into a tool result. OpenCode draws the same line. The comment on its `ToolFailure` says that handlers must map their errors to it, and that the runtime surfaces those as an error result "so the model can self-correct". It continues: "Anything thrown or yielded by a handler that is not a `ToolFailure` is treated as a defect and fails the stream" ([schema/errors.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/schema/errors.ts)). Its tool guidelines add that interruption and defects must survive, so they do not use `catchCause` there ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)).
+`runTool` handles only the typed failures. A bug inside the agent, such as a function that throws while describing a confirmation, is a defect, and it doesn't become a tool result. OpenCode draws the same line. The comment on its `ToolFailure` says handlers must map their errors to it, and the runtime surfaces those as an error result "so the model can self-correct". It goes on: "Anything thrown or yielded by a handler that is not a `ToolFailure` is treated as a defect and fails the stream" ([schema/errors.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/schema/errors.ts)). Its tool guidelines add that interruption and defects must survive, which is why they rule out `catchCause` there ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)).
 
 ### 4. Provider errors reach the user, and the turn is dropped
 
-A failed model request is not something the model can act on. `chat` now fails with a `ProviderError` that carries the status and body, or says that the server could not be reached or its reply could not be read. The prompt loop catches it, together with defects, prints it, and returns to `You:`.
+The model can't do anything about a failed model request. `chat` now fails with a `ProviderError` that carries the status and body, or says the server couldn't be reached or its reply couldn't be read. The prompt loop catches it along with defects, prints it, and goes back to `You:`.
 
-The turn that failed is removed from the history. A turn can fail after the model asked for tools and before their results were added, and a history that ends with a tool call and no result is not valid for either protocol (Part 3: every call needs its own result). Cutting the history back to its length before the prompt keeps the next prompt on a consistent conversation.
+The failed turn is removed from the history. A turn can fail after the model asked for tools but before their results were added, and a history that ends in a tool call with no result is invalid for both protocols (Part 3: every call needs its own result). Cutting the history back to its length before the prompt gives the next prompt a consistent conversation.
 
 ### 5. One Schema describes a tool's input
 
-In Part 4 a tool's input was described twice: a JSON Schema object for the model and `field()` calls for validation. They could drift apart. Now each tool declares one `Schema.Struct`. `Schema.decodeUnknownEffect` validates the model's arguments against it, and `Schema.toJsonSchemaDocument` produces the JSON Schema that goes into the request. OpenCode uses both functions for the same two jobs in [ai/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/tool.ts).
+In Part 4 a tool's input was described twice, as a JSON Schema object for the model and as `field()` calls for validation, and the two could drift apart. Now each tool declares one `Schema.Struct`. `Schema.decodeUnknownEffect` validates the model's arguments against it, and `Schema.toJsonSchemaDocument` produces the JSON Schema that goes into the request. OpenCode uses the same two functions for the same two jobs in [ai/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/tool.ts).
 
-Schema's default messages for a wrong input are short. For `{}` and for `{ path: 42 }` against a Schema with a `path` string field they are:
+Schema's default messages for a wrong input are short. Against a Schema with a `path` string field, `{}` and `{ path: 42 }` give:
 
 ```text
 Missing key
@@ -198,7 +198,7 @@ Expected string
   at ["path"]
 ```
 
-Part 3 gave the model `path must be a string, e.g. src/index.ts`, which names the field and says what to send. The default text names the field and the problem, and leaves out what the tool takes. `InvalidInput` lists every problem as `field: problem` and then names the fields the tool takes, which is the purpose Part 3's message served. Step 6 shows a model correcting a call from it.
+Part 3 gave the model `path must be a string, e.g. src/index.ts`, which names the field and says what to send. Schema's default text names the field and the problem but not what the tool takes. So `InvalidInput` lists every problem as `field: problem` and then names the fields the tool takes, which is the job Part 3's message did. In step 6 a model corrects a call from it.
 
 ```ts
 // The agent (Part 5)
@@ -227,7 +227,7 @@ type ToolExecute<Input, Success> = (
 ) => Effect.Effect<Schema.Schema.Type<Success>, ToolFailure>
 ```
 
-The agent keeps the Schema inside the tool. `defineTool` takes a typed `execute` and builds a `run` that decodes the raw input, asks for confirmation and calls `execute`. That makes the registry a plain `Tool[]` whatever the tools' input types are. OpenCode's tool object carries the Schema and a decoder for it, and its `execute` receives the decoded input. It also has a second Schema for the output. Its tool guidelines state that the registry erases the definitions' types at that boundary ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)).
+The agent keeps the Schema inside the tool. `defineTool` takes a typed `execute` and builds a `run` that decodes the raw input, asks for confirmation and calls `execute`, so the registry is a plain `Tool[]` whatever the tools' input types are. OpenCode's tool object carries the Schema and a decoder for it, its `execute` receives the decoded input, and it has a second Schema for the output. Its tool guidelines say the registry erases the definitions' types at that boundary ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)).
 
 ## Check yourself
 
@@ -291,7 +291,7 @@ Sort each event by who reads the resulting error.
 
 ## Your turn: the same agent, in Effect
 
-Work in the `my-agent` folder from Part 4. Parts 1 to 4 kept the agent in one `index.ts` in the project folder. From this Part the code lives in eight files in a new `src` folder, and step 1 does the split before anything else changes:
+Work in the `my-agent` folder from Part 4. Parts 1 to 4 kept the agent in one `index.ts` in the project folder. From this Part on, the code lives in eight files in a new `src` folder, and step 1 does the split before anything else changes:
 
 | File               | Contents                                                                |
 | ------------------ | ----------------------------------------------------------------------- |
@@ -308,7 +308,7 @@ Test environment: the transcripts in this section were recorded in the [Part 1](
 
 ### Step 1: Move the agent into `src` and split it into files
 
-This step changes no behavior. It moves the Part 4 code into seven files and makes two small signature changes so that `tool.ts` and `tools.ts` do not import each other: `runTool` and `chat` receive the list of tools as an argument instead of reading a global. Create a `src` folder in the project, create the seven files below in it, and delete the old `index.ts` from the project folder. The last file, `src/index.ts`, takes its place. `tools.ts` and `protocols.ts` are long, so they are collapsed.
+This step changes no behavior. It moves the Part 4 code into seven files, with two small signature changes so that `tool.ts` and `tools.ts` don't import each other: `runTool` and `chat` take the list of tools as an argument instead of reading a global. Create a `src` folder in the project, create the seven files below in it, and delete the old `index.ts` from the project folder; `src/index.ts`, the last file, replaces it. `tools.ts` and `protocols.ts` are long, so they're collapsed.
 
 `src/messages.ts`
 
@@ -756,7 +756,7 @@ A scratch folder for testing the agent.
 ```
 ````
 
-The compiler prints nothing. Input that ends still stops this version with `readline was closed`, as in Part 4, and step 2 addresses it.
+The compiler prints nothing. When input ends, this version still stops with `readline was closed`, as in Part 4. Step 2 fixes that.
 
 ### Step 2: Add Effect, the failure classes and `ask`
 
@@ -766,7 +766,7 @@ Install Effect at the version used here:
 bun add effect@4.1.0
 ```
 
-Create a new file, `src/errors.ts`, with the code below. It holds every failure the agent names. Each class lists its fields, and the four tool failures turn them into the sentence the model reads through a `message` getter. `messageOf` turns a thrown value into text:
+Create `src/errors.ts` with the code below. It holds every failure the agent names. Each class lists its fields, and the four tool failures turn those fields into the sentence the model reads through a `message` getter. `messageOf` turns a thrown value into text:
 
 ```ts
 import { Schema } from "effect"
@@ -821,7 +821,7 @@ export class InputClosed extends Schema.TaggedError<InputClosed>()("InputClosed"
 export const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 ```
 
-Then replace the contents of `src/terminal.ts`: the exported `rl` becomes `ask`. It needs the extra lines because a question that is pending when input ends never settles. The `close` event is turned into a rejection, and the question is raced against it, so the failure becomes `InputClosed` in the type:
+Then replace the contents of `src/terminal.ts`, where the exported `rl` becomes `ask`. The extra lines are there because a question still pending when input ends never settles. `ask` turns the `close` event into a rejection and races the question against it, so the failure shows up in the type as `InputClosed`:
 
 ```ts
 import { Effect } from "effect"
@@ -842,7 +842,7 @@ export const ask = (prompt: string) =>
   })
 ```
 
-`index.ts` and `tool.ts` still import `rl`, so the compiler now reports it, once in each file. Steps 3 and 5 replace both files. Check `ask` by itself with a temporary `src/check.ts`:
+`index.ts` and `tool.ts` still import `rl`, so the compiler now reports it once in each file; steps 3 and 5 replace both. Check `ask` on its own with a temporary `src/check.ts`:
 
 ```ts
 import { Effect } from "effect"
@@ -851,7 +851,7 @@ import { ask } from "./terminal"
 console.log(await Effect.runPromise(Effect.result(ask("Question: "))))
 ```
 
-`Effect.result` turns the failure into a value, so the check prints it. With input that ends and with an answer:
+`Effect.result` turns the failure into a value, so the check can print it. With input that ends, and with an answer:
 
 ```text
 $ cd playground && : | bun ../src/check.ts
@@ -870,7 +870,7 @@ Question: {
 }
 ```
 
-Without the race, the first command does not return. Delete `check.ts` afterwards.
+Without the race, the first command never returns. Delete `check.ts` afterwards.
 
 <details>
 <summary>Stuck? The finished errors.ts and terminal.ts</summary>
@@ -955,7 +955,7 @@ export const ask = (prompt: string) =>
 
 ### Step 3: Rewrite `tool.ts`
 
-This file changes the most. `Tool` loses `execute` and `confirm` and gets `run`, the JSON Schema is derived instead of written, and `field` is gone. The first part is the imports, the union of tool failures, the new `Tool` type and the formatter that turns Schema's problems into the lines of an `InvalidInput`:
+This file changes the most. `Tool` loses `execute` and `confirm` and gets `run`, the JSON Schema is derived instead of written by hand, and `field` goes away. The first part holds the imports, the union of tool failures, the new `Tool` type and the formatter that turns Schema's problems into the lines of an `InvalidInput`:
 
 ```ts
 import { Effect, Schema, SchemaIssue } from "effect"
@@ -975,9 +975,9 @@ export type Tool = {
 const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1()
 ```
 
-`defineTool` builds a `Tool` from a Schema. Its generic parameter `S` carries the input type to `execute` and `confirm`, and `DecodingServices: never` limits `S` to Schemas that need nothing else to decode, which is what keeps `R` at `never`. `takes` is the list of field names, `decode` is the validator, and `parameters` is the JSON Schema derived from the same Schema.
+`defineTool` builds a `Tool` from a Schema. Its generic parameter `S` carries the input type through to `execute` and `confirm`, and `DecodingServices: never` limits `S` to Schemas that need nothing else to decode, which keeps `R` at `never`. `takes` is the list of field names, `decode` is the validator, and `parameters` is the JSON Schema derived from the same Schema.
 
-`run` is an `Effect.gen` with four steps: reject text that was not JSON, decode the input, ask for confirmation, run the tool. Each `return yield* new …` stops the generator with that failure, the way a `throw` would. Three calls bring in errors from outside the agent: `mapError` turns Schema's error into `InvalidInput`, `orElseSucceed` makes an input that ended count as an empty answer, and `tryPromise` turns a rejected promise into `ToolCrashed`:
+`run` is an `Effect.gen` in four steps: reject text that isn't JSON, decode the input, ask for confirmation, run the tool. Each `return yield* new …` stops the generator with that failure, the way a `throw` would. Three calls bring in errors from outside the agent: `mapError` turns Schema's error into `InvalidInput`, `orElseSucceed` treats an input that ended as an empty answer, and `tryPromise` turns a rejected promise into `ToolCrashed`:
 
 ```ts
 // Builds a Tool from one Schema: it validates the input and produces the JSON Schema the model receives.
@@ -1029,7 +1029,7 @@ export const defineTool = <S extends Schema.Struct<Schema.Struct.Fields> & { rea
 }
 ```
 
-`runTool` picks the tool and runs it. `Effect.map` and `Effect.catch` turn the two outcomes into the result type from Part 4. A tool name that is not registered fails with `UnknownTool` before reaching them:
+`runTool` picks the tool and runs it, and `Effect.map` and `Effect.catch` turn the two outcomes into Part 4's result type. A tool name that isn't registered fails with `UnknownTool` before it gets that far:
 
 ```ts
 // Cannot fail: every tool failure becomes a tool result the model can read.
@@ -1045,7 +1045,7 @@ export const runTool = (tools: Tool[], call: ToolCallPart): Effect.Effect<ToolRe
 }
 ```
 
-`tools.ts` and `index.ts` use the old shape, so the compiler reports them. The messages are the compiler's list of what is left to change. In `tools.ts` every tool still has an `execute` and an `input` parameter without a type, and `index.ts` treats the result of `runTool` as a plain value:
+`tools.ts` and `index.ts` still use the old shape, so the compiler reports them, and its messages are your list of what's left to change. In `tools.ts` every tool still has an `execute` and an untyped `input` parameter, and `index.ts` treats the result of `runTool` as a plain value:
 
 ```text
 $ bunx --package typescript tsc --noEmit
@@ -1057,7 +1057,7 @@ src/tools.ts(63,15): error TS7006: Parameter 'input' implicitly has an 'any' typ
 …
 ```
 
-Before changing them, check `tool.ts` with a tool defined inside a temporary `check.ts`. It runs six calls, one for each way a call can go wrong or right:
+Before changing them, check `tool.ts` with a tool defined in a temporary `check.ts`. It makes six calls, one for each way a call can go right or wrong:
 
 ```ts
 import { Effect, Schema } from "effect"
@@ -1116,7 +1116,7 @@ text: # Playground
 A scratch folder for testing the agent.
 ```
 
-Five failures and one success, each a value with its call's id, as in Part 4. The first is an `UnknownTool`, the next three are `InvalidInput`, and the file error is a `ToolCrashed` whose message is the original one. `Declined` needs a tool with a `confirm` function, which arrives with the real tools in step 4, and step 6 declines one. The call with the string `'{"path": '` is how a protocol hands over arguments it could not parse. Delete `check.ts` afterwards.
+That's five failures and one success, each a value carrying its call's id, as in Part 4. The first is an `UnknownTool`, the next three are `InvalidInput`, and the file error is a `ToolCrashed` that keeps the original message. `Declined` needs a tool with a `confirm` function; the real tools bring one in step 4, and you decline one in step 6. The call with the string `'{"path": '` is what a protocol hands over when it couldn't parse the arguments. Delete `check.ts` afterwards.
 
 <details>
 <summary>Stuck? The finished tool.ts</summary>
@@ -1205,7 +1205,7 @@ export const runTool = (tools: Tool[], call: ToolCallPart): Effect.Effect<ToolRe
 
 ### Step 4: Declare the tools with Schemas
 
-In `tools.ts`, change the imports at the top. `field` is gone, and `Schema` and `defineTool` come in:
+In `tools.ts`, change the imports at the top: `field` goes, and `Schema` and `defineTool` come in:
 
 ```ts
 import { execFile } from "node:child_process"
@@ -1216,7 +1216,7 @@ import { Schema } from "effect"
 import { defineTool, type Tool } from "./tool"
 ```
 
-The helpers (`listFiles`, `editFile`, `saveFile`, `runBash`) stay as they are. Their names, descriptions and bodies are the same as in Part 4. What changes is how the model's input is described: each tool's hand-written `parameters` object and its `field()` calls are replaced by one `Schema.Struct`, and `execute` receives the decoded fields. Replace the whole `export const tools: Tool[] = [ … ]` array with:
+The helpers (`listFiles`, `editFile`, `saveFile`, `runBash`) stay as they are, and the tools keep their Part 4 names, descriptions and bodies. What changes is how the model's input is described: one `Schema.Struct` replaces each tool's hand-written `parameters` object and its `field()` calls, and `execute` receives the decoded fields. Replace the whole `export const tools: Tool[] = [ … ]` array with:
 
 ```ts
 export const tools: Tool[] = [
@@ -1274,7 +1274,7 @@ export const tools: Tool[] = [
 ]
 ```
 
-Each field's `description` is an annotation on its Schema and ends up in the JSON Schema, which is the text the model sees about that argument. Print the result for `edit_file` with a temporary `check.ts`:
+Each field's `description` is an annotation on its Schema and ends up in the JSON Schema, so it's the text the model sees for that argument. Print the result for `edit_file` with a temporary `check.ts`:
 
 ```ts
 import { tools } from "./tools"
@@ -1310,7 +1310,7 @@ $ cd playground && bun ../src/check.ts
 }
 ```
 
-This matches the object written by hand in Part 4, with one addition: `additionalProperties: true`, which is Schema's default. Ollama and llama.cpp accepted it in the runs below. Only `index.ts` is left with compiler errors. Delete `check.ts`.
+This matches the object written by hand in Part 4, plus `additionalProperties: true`, which is Schema's default. Ollama and llama.cpp accepted it in the runs below. Now only `index.ts` has compiler errors. Delete `check.ts`.
 
 <details>
 <summary>Stuck? The finished tools.ts</summary>
@@ -1430,7 +1430,7 @@ export const tools: Tool[] = [
 
 ### Step 5: Make `chat` and the loop Effects
 
-In `provider.ts`, replace `chat`. It was a `Promise` that threw. It is now an Effect that fails with `ProviderError`, and it does the request in three steps so each failure has its own message: reaching the server, reading the body, and decoding the reply. A non-2xx status is also a `ProviderError`, with the status and body in the text. Add the two imports at the top of the file:
+In `provider.ts`, replace `chat`. It used to be a `Promise` that threw, and now it's an Effect that fails with `ProviderError`. It makes the request in three steps so each failure gets its own message: reaching the server, reading the body, and decoding the reply. A non-2xx status is also a `ProviderError`, with the status and body in the text. Add the two imports at the top of the file:
 
 ```ts
 import { Effect } from "effect"
@@ -1505,7 +1505,7 @@ const turn = (input: string) =>
   })
 ```
 
-`program` asks for a prompt, remembers how long the history is, and runs the turn with both handlers attached. `drop` cuts the history back and prints the reason. The last `catchTag` ends the program when input ends, and `Effect.runPromise` runs it once:
+`program` asks for a prompt, notes how long the history is, and runs the turn with both handlers attached. `drop` cuts the history back and prints the reason. The last `catchTag` ends the program when input ends, and `Effect.runPromise` runs the whole thing once:
 
 ```ts
 const program = Effect.gen(function* () {
@@ -1530,7 +1530,7 @@ const program = Effect.gen(function* () {
 await Effect.runPromise(program)
 ```
 
-Run it. The first prompt names a file that does not exist, and the second makes the agent write one:
+Run it. The first prompt names a file that doesn't exist, and the second has the agent write one:
 
 ```text
 $ bunx --package typescript tsc --noEmit
@@ -1673,8 +1673,6 @@ await Effect.runPromise(program)
 
 ### Step 6: Make each kind of failure happen
 
-This step causes each failure on purpose.
-
 **A tool failure the model corrects.** To see the message in use, ask the model for an invalid call:
 
 ````text
@@ -1695,7 +1693,7 @@ A scratch folder for testing the agent.
 ```
 ````
 
-The model read the message, named the missing field and sent the next call with it. This was one run; the prompt asked for the invalid call, so it shows the message being usable and does not measure how often a model recovers.
+The model read the message, named the missing field and sent the next call with it. This is a single run, and the prompt asked for the invalid call, so it shows that the message is usable, not how often a model recovers.
 
 **A declined action.** Answer `n` at a confirmation prompt. The refusal goes back to the model as a result, and the model reacts to it:
 
@@ -1722,7 +1720,7 @@ You: hello
 You: ^D
 ```
 
-**A dropped turn.** A stand-in server that answers with a tool call, then with an error, then with a normal reply shows what the history looks like after a failure. It prints the roles of the messages it receives. Save it as `src/stub.ts`:
+**A dropped turn.** To see what the history looks like after a failure, use a stand-in server that answers with a tool call, then an error, then a normal reply, and prints the roles of the messages it receives. Save it as `src/stub.ts`:
 
 ```ts
 let requests = 0
@@ -1759,7 +1757,7 @@ request 2: roles = user,assistant,tool
 request 3: roles = user
 ```
 
-Request 2 carries the tool result. Request 3 contains only the new prompt, so the failed turn, including its tool call, is gone from the history.
+Request 2 carries the tool result. Request 3 holds only the new prompt, so the failed turn, tool call included, is gone from the history.
 
 **A defect.** Temporarily add a `confirm` that throws to the `list_files` entry in `tools.ts`, and run the same stand-in:
 
@@ -1783,9 +1781,9 @@ request 1: roles = user
 request 2: roles = user
 ```
 
-The bug is printed for the author with a `[bug]` label and is not sent to the model, and the turn is dropped: the stand-in's second request, which belongs to the prompt `second`, carries only that prompt. The 500 on that request comes from the stand-in, which answers its second request with an error. In Part 4 the same mistake would have come back as a tool result. Remove the temporary `confirm` and `stub.ts` afterwards.
+The bug is printed for you with a `[bug]` label, the model never sees it, and the turn is dropped: the stand-in's second request, which belongs to the prompt `second`, carries only that prompt. The 500 on that request is the stand-in's doing, since it answers its second request with an error. In Part 4 the same mistake would have gone back to the model as a tool result. Remove the temporary `confirm` and `stub.ts` afterwards.
 
-**llama.cpp.** The same files run on the second local provider by changing the route. Start the server with `--reasoning off` and choose it with `PROVIDER`:
+**llama.cpp.** The same files run on the second local provider once you change the route. Start the server with `--reasoning off` and choose it with `PROVIDER`:
 
 ```text
 $ cd playground && PROVIDER=llamacpp bun ../src/index.ts
@@ -1805,9 +1803,9 @@ Did you perhaps mean `todo.txt`?
 
 `PROVIDER=claude` still selects the Anthropic route, and the protocols are unchanged from Part 4.
 
-> **Watch for this.** `Effect.catch` and `catchTag` handle typed failures only. A bug that throws is a defect, and the typed handler next to it does not run for it. When a handler seems to be ignored, check which of the two kinds of failure reached it.
+> **Watch for this.** `Effect.catch` and `catchTag` handle typed failures only. A bug that throws is a defect, so the typed handler next to it never runs. When a handler seems to be ignored, check which kind of failure reached it.
 
-> **Result.** In this agent every function that can fail has the failure in its type. The model reads tool failures, the user reads provider errors and bugs, and a failed turn leaves the history valid. A new tool is one `defineTool` entry, and a new route or protocol changes neither the tools nor the loop.
+> **Result.** Every function in this agent that can fail has the failure in its type. The model reads tool failures, the user reads provider errors and bugs, and a failed turn leaves the history valid. Adding a tool takes one `defineTool` entry, and a new route or protocol touches neither the tools nor the loop.
 
 ### The finished files
 
@@ -2382,23 +2380,10 @@ await Effect.runPromise(program)
 
 ## Sources
 
-The first item is the primary source for this Part. A useful exercise is to find where OpenCode's tool decodes the model's input and where it builds the JSON Schema, then to list what OpenCode has that the agent does not (an output Schema, `toModelOutput`, an execution context, a raw JSON Schema as input) and what each one is for. _Services and layers_ (Part 6) takes the next step on that list: the model client and the tools become services that the loop asks for.
+The first item is the main source for this Part. As an exercise, find where OpenCode's tool decodes the model's input and where it builds the JSON Schema, then list what OpenCode has that this agent doesn't (an output Schema, `toModelOutput`, an execution context, a raw JSON Schema as input) and what each one is for. _Services and layers_ (Part 6) takes the next step from that list: the model client and the tools become services that the loop asks for.
 
 - OpenCode's [ai/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/tool.ts) and the `ToolFailure` comment in [schema/errors.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/schema/errors.ts)
 - [Effect docs: Why Effect?](https://effect.website/docs/getting-started/why-effect/) (the v3 documentation) and the [v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md)
 - OpenCode's [schema/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/schema/src/tool.ts) (where `Tool.Error`, the class `ToolFailure` extends, is defined) and [core/src/tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool/AGENTS.md)
 
-Measured: the steps above were run on 5 November 2026 in the [Part 1](/posts/the-loop/) test environment with Effect 4.1.0. The files were type-checked on Effect 4.1.0 and 4.1.2, and the direct calls to `runTool` gave the same messages on both. The Ollama and llama.cpp transcripts used piped input with pauses between prompts, and llama.cpp ran on a second port with `--reasoning off` selected with `BASE_URL`. The failure runs used a port with no server, an unknown model name and the stand-in server above.
-
-Checked:
-
-- the `Part5_use_effects` tag on the remote (commit `3cb6e23`, the same as `main`)
-- Steps 1 to 5 applied in order to Part 4's finished `index.ts`: the compiler errors listed in steps 2 to 4 appear as shown, and the eight resulting files equal the Snapshot's `src` apart from trailing commas and blank lines (the "Stuck?" files and the finished files are the same text)
-- the finished files type-check on Effect 4.1.0 and 4.1.2, and the `check.ts` runs of steps 2 to 4 print the same text on both
-- every snippet in "What Effect adds" run on its own, including the `TS2322` message, the order of `built the Effect` and `listing`, and Schema's default messages for `{}` and `{ path: 42 }`; the `TS2322` message for a `ProviderError` outside `ToolFailure`
-- the "Start from the failures" table against Part 4's finished file: a dead port ends the program with `ECONNREFUSED`, empty input never returns from the first `You:`, and input that ends after a prompt raises `readline was closed`; inside a confirmation the same error is caught by `runTool` and sent to the model
-- the Step 5 and Step 6 runs repeated on Ollama and llama.cpp (b9830) with paced input: the error lines, the stand-in server's role lists and the `[bug]` run printed as shown, and the model's wording differed
-- the Effect documentation quotations and the page's place in the v3 documentation, and the migration guide's rename maps
-- at OpenCode commit `97be25f046`: the `ToolFailure` comment in `schema/errors.ts`, the `Tool` shape, `Schema.decodeUnknownEffect` and `Schema.toJsonSchemaDocument` in `ai/src/tool.ts`, `Tool.Error` in `schema/src/tool.ts`, the registry and `catchCause` guidance in `core/src/tool/AGENTS.md`, and the Effect 4.1.0 pin in its `package.json`
-
-Parts 2 to 4 link OpenCode at `863ea41364`, where the `Tool` interface has `parameters` instead of `input` and Effect is pinned at 4.0.1, so this Part links the newer commit that its comparison matches.
+The OpenCode links in this Part show its code as it was when this Post was written. Parts 2 to 4 link older code, where the `Tool` interface had `parameters` instead of `input` and Effect was pinned at 4.0.1.

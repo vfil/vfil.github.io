@@ -13,11 +13,11 @@ import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-This Part changes the model client of the agent from [Part 6](/posts/services-and-layers/) so that it returns a stream of events instead of one reply, and the loop prints the text as it arrives. Each protocol decodes the server's messages into those events. It is the fifth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+This Part changes the model client of the agent from [Part 6](/posts/services-and-layers/) so that it returns a stream of events instead of one reply, and the loop prints the text as it arrives. Each protocol decodes the server's messages into those events. It is the sixth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
 
 The code for this Part is available as the [`Part7_Streaming` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part7_Streaming), the repo where I build this agent in parallel.
 
-## Start from the silence
+## Waiting for the whole reply
 
 The agent from [Part 6](/posts/services-and-layers/) sends a request, waits until the model has written the whole reply, and only then prints it. A model writes one token at a time (a token is a word or a piece of a word), so the wait is as long as the reply. The same prompt, a story of about 400 words, against the Part 6 agent and the agent from this Part:
 
@@ -26,9 +26,9 @@ The agent from [Part 6](/posts/services-and-layers/) sends a request, waits unti
 | Ollama    | 9.4 s                      | 0.5 s                         | 10.3 s                 |
 | llama.cpp | 14.5 s                     | 0.6 s                         | 16.4 s                 |
 
-Streaming does not make the model faster. The reply finishes at about the same time, and the replies differ in length from run to run, so the last column is only a rough comparison. What changes is when the first words appear: at the start of the reply instead of at the end. The wait grows with the length of the reply and with slower hardware.
+Streaming does not make the model faster. The reply finishes at about the same time, and the replies differ in length from run to run, so the last column is only a rough comparison. The first words, though, appear at the start of the reply instead of at the end, and without streaming that wait grows with the length of the reply and with slower hardware.
 
-This Part changes the agent in three places. The server is asked to send the reply in pieces. Each protocol decodes the pieces into a small set of events. The loop prints and collects the events as they arrive.
+This Part changes the agent in three places: the server is asked to send the reply in pieces, each protocol decodes the pieces into a small set of events, and the loop prints and collects the events as they arrive.
 
 ## What the server sends
 
@@ -58,7 +58,7 @@ data: [DONE]
 
 Each chunk's `delta` holds the next piece of the reply. The first chunk also names the role. The last chunk has an empty `delta` and a `finish_reason`, and `data: [DONE]` closes the stream.
 
-A tool call is the part of the reply that the two local servers send differently. Ollama, asked to read a file with a `read_file` tool defined, sends the call in one chunk:
+The two local servers differ in how they send a tool call. Ollama, asked to read a file with a `read_file` tool defined, sends the call in one chunk:
 
 ```text
 $ curl -sN http://127.0.0.1:11434/v1/chat/completions -H 'content-type: application/json' \
@@ -111,7 +111,7 @@ The parser in this Part follows those rules and skips the `id` and `retry` field
 
 ## What streams add
 
-A _stream_ is the many-valued version of an Effect: instead of producing one value, it produces a sequence of them, one at a time, as they become available. Its type is `Stream<A, E, R>`: the values it produces, the error it can fail with and the services it needs, with the same `E` and `R` as an `Effect`. This section covers four ideas. Each snippet was run on its own on Effect 4.1.0 before it went into this Part. To follow along, save a snippet in a temporary file in `src` and delete it afterwards.
+A _stream_ is the many-valued version of an Effect: instead of producing one value, it produces a sequence of them, one at a time, as they become available. Its type is `Stream<A, E, R>`: the values it produces, the error it can fail with and the services it needs, with the same `E` and `R` as an `Effect`. This section covers four ideas, with snippets written for Effect 4.1.0. To follow along, save a snippet in a temporary file in `src` and delete it afterwards.
 
 ### 1. A stream hands over its values as they are produced
 
@@ -166,7 +166,7 @@ $ bun src/broken.ts
 [ 1, 2 ] failed: connection reset
 ```
 
-The type of `broken` is `Stream<number, string>`. [Part 5](/posts/why-effect/)'s `Effect<A, E>` is either an `A` or an `E`. A `Stream<A, E>` can be some `A`s and then an `E`. A model reply that breaks off halfway is exactly that.
+The type of `broken` is `Stream<number, string>`. [Part 5](/posts/why-effect/)'s `Effect<A, E>` is either an `A` or an `E`. A `Stream<A, E>` can be some `A`s and then an `E`, which is how a model reply that breaks off halfway looks.
 
 ### 3. Bytes become lines, wherever the pieces are cut
 
@@ -218,7 +218,7 @@ $ bun src/fragments.ts
 [ "{\"path\":\"notes/todo.txt\"}" ]
 ```
 
-Four fragments went in and one value came out. The function is an ordinary function of the state and a value, so it can be called and checked without a stream. Both protocols below are written as such functions. `mapAccum` also takes an `onHalt` option, a function that can emit more values when the input ends; this agent does not need it.
+The step is an ordinary function of the state and a value, so it can be called and checked without a stream. Both protocols below are written as such functions. `mapAccum` also takes an `onHalt` option, a function that can emit more values when the input ends; this agent does not need it.
 
 ## Six decisions in the rewrite
 
@@ -266,7 +266,7 @@ A small helper, `reduce`, runs a step function over the frames with `Stream.mapA
 
 The loop gets a new function, `step`. It reads the stream with `Stream.runForEach` and builds the assistant message as the events arrive: text goes to the terminal at once and is also collected into a text part, a tool call is collected, and `finish` records the reason. `Terminal` gets a second output method, `write`, which prints without ending the line, because `say` always ends it. The agent writes `Agent: ` before the first piece of a text block and ends the line when the block is over.
 
-A tool call is complete before the step finishes, so the agent could start running it while the model is still writing. It does not. The tools run after `finish`, in order, as in Part 6. A call to `bash` asks `Allow? [y/N]`, and that question would otherwise appear in the middle of the model's sentence. Running tools early is a possible optimization once the rest works.
+A tool call is complete before the step finishes, so the agent could start running it while the model is still writing. The tools still run after `finish`, in order, as in Part 6, because a call to `bash` asks `Allow? [y/N]` and that question would otherwise appear in the middle of the model's sentence. Running tools early is a possible optimization once the rest works.
 
 ### 5. A reply can break off in the middle
 
@@ -278,7 +278,7 @@ A stream that ends without a `finish` event is the one that needs a check, becau
 
 ### 6. Two kinds of test, and what each one covers
 
-The scripted model now streams events. A text reply is one `text-delta` per word, so the loop's tests see the same pieces a real model sends. Those tests cover the loop: that text is written in order, that the line is ended, that a failed turn leaves the history valid. They say nothing about the wire.
+The scripted model now streams events. A text reply is one `text-delta` per word, so the loop's tests see the same pieces a real model sends. Those tests cover the loop: that text is written in order, that the line is ended, that a failed turn leaves the history valid.
 
 The wire has its own tests. The streams recorded from Ollama and llama.cpp above are saved as fixture files and run through the framing and the OpenAI protocol. One test cuts each fixture at every possible byte position and checks that the events do not change, which covers the half-line and half-character cases from idea 3 on real data. A last group of tests runs `chat` against a small local server that sends a stream, cuts it off, sends bad JSON, or answers with an error status. Whether a model picks the right tool is still decided by running it, as in Part 6.
 
@@ -342,7 +342,7 @@ Work in the `my-agent` folder from [Part 6](/posts/services-and-layers/), with i
 
 `messages.ts`, `errors.ts`, `tool.ts`, `tools.ts` and `index.ts` do not change. Each step ends with code that type-checks and runs, so the work can stop after any of them.
 
-Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 6 November 2026, and repeated on 9 November 2026 (see Measured at the end). The model's wording will differ.
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 6 November 2026, and repeated on 9 November 2026. The model's wording will differ.
 
 ### Step 1: Events in the middle
 
@@ -3086,19 +3086,3 @@ The first item is the primary source for this Part. A useful exercise is to find
 - Anthropic's [Streaming Messages](https://platform.claude.com/docs/en/build-with-claude/streaming)
 
 This Part completes Stage A: a harness with one loop and two wire formats (OpenAI chat and Anthropic Messages), with tools as data, errors in the types, services that a test can replace, and a reply that streams. The Session stage (Stage B) comes next, and its Parts are not yet scheduled in [the roadmap](/posts/the-roadmap/).
-
-Measured: the steps above were run on 6 November 2026 and again on 9 November 2026 in the [Part 1](/posts/the-loop/) test environment (Ollama 0.40.14, llama.cpp b9830) with Effect 4.1.0, Bun 1.4.4 and TypeScript 7.0.2. Every state of the steps was type-checked and the tests were run. The finished files were run on Ollama and on llama.cpp (a second llama-server on another port with `--reasoning off`, selected with `BASE_URL`) with piped input and pauses between prompts. The timings in the first section are from the 9 November runs, with the model already loaded: the time from writing the prompt to standard input until `Agent:` first reached standard output, and until the next `You:` prompt. Two runs per server of the Part 6 agent gave 9.4 to 10.0 s on Ollama and 13.6 to 14.5 s on llama.cpp; the Part 7 agent showed its first text after 0.5 s on Ollama and 0.6 s on llama.cpp, and finished the reply in 8.8 to 10.3 s and 14.9 to 16.4 s. The table shows the last run of each. The replies differed in length from run to run (about 440 to 540 words). Runs of the 18 tests (3 files) took 150 to 180 ms. Long lines in transcripts are shortened. The snippets in "What streams add" were run on their own.
-
-Checked:
-
-- the `Part7_Streaming` Snapshot on the remote (commit `bd618fd`): its fixtures and its `events.ts`, `sse.ts`, `terminal.ts`, `provider.ts`, `test/fakes.ts`, `test/protocols.test.ts` and `test/provider.test.ts` equal the finished files above; `model-client.ts` and `agent.ts` differ in one comment and a trailing comma, `agent.test.ts` in a blank line and the order of the tests, and the Snapshot's `protocols.ts` still has an unused `OpenAIResponse` type that the steps remove
-- the starting point of ten files in `src` and two in `test`, counted in Part 6's Snapshot
-- Part 6's files with the edits of Steps 1 to 3 applied as worded: the files after Steps 1 and 2 equal the "Stuck?" files (apart from trailing commas in `provider.ts`), every state type-checks, four tests pass after Steps 1 and 2, the new test fails as shown before the `Effect.ensuring` fix, and all 18 tests pass after it
-- the finished files type-check on Effect 4.1.0, and the two deliberate breakages in Step 4 fail as shown (durations differ, and Bun prints the full path in the `at` line)
-- every snippet in "What streams add" run on its own: the output is as shown, with the last line of the first one at 911 ms instead of 908 ms
-- the three `curl` requests of "What the server sends" repeated on Ollama and llama.cpp: Ollama sends the tool call in one chunk with complete arguments and llama.cpp in fragments, as shown; the Ollama text differed in its last word, and the fixtures are the recordings in the Snapshot and were not recorded again
-- the agent on Ollama and on llama.cpp with the file listing and the poem, and against the two local servers of "Cut a stream off": the transcripts match in form and the error lines are as shown, and the model's wording differed
-- in Effect 4.1.0's declarations, `effect/encoding/Sse` is marked `@stability unstable` and `Stream.mapAccum` has an `onHalt` option
-- at OpenCode commit `97be25f046`: `requireTerminalEvent` at `ai/src/route/client.ts` lines 331 to 346, the event union at `ai/src/schema/events.ts` lines 313 to 331, the `ai.stream`/`ai.generate` rule in `ai/AGENTS.md`, and `framing.ts` importing `makeParser` from `effect/encoding/Sse`
-- the rules of server-sent events against the HTML Standard, and the event flow, the `ping` event, the delta types and the sentence that new event types may be added against Anthropic's Streaming Messages page
-- the Part numbers and titles against the Series file, and the Stage A count against the Forewords of Parts 3 to 6

@@ -13,9 +13,9 @@ import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-This Part takes the three-tool array you built in [Part 1](/posts/the-loop/) to a registry of five tools that both of your protocols can use, where a failing tool becomes information the model can act on instead of a crash. It is the first Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+This Part turns the three-tool array from [Part 1](/posts/the-loop/) into a registry of five tools that both of your protocols use. When a tool fails, the model now gets a result it can act on, where before the program crashed. It is the second Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
 
-The code for this Part is available as the [`Part3_tools_as_data` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part3_tools_as_data), the repo where I build this agent in parallel.
+The code for this Part is the [`Part3_tools_as_data` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part3_tools_as_data), the repo where I build this agent in parallel.
 
 ## First: your prediction
 
@@ -24,18 +24,18 @@ In [Part 2](/posts/the-roadmap/) you predicted what your loop does when `list_fi
 <details>
 <summary>What it should do, on each protocol</summary>
 
-It should not crash, and it should not hide the failure. It should send back a normal tool result that says what went wrong. How you mark it as a failure depends on the protocol:
+It should neither crash nor hide the failure. It sends back a normal tool result that says what went wrong, and how you mark that result as a failure depends on the protocol:
 
 - **Anthropic Messages (Claude)** has a flag: `"is_error": true` on the `tool_result` ([Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)).
-- **OpenAI Chat Completions (Ollama, llama.cpp)** has no such flag. A `role: "tool"` message is just text, so _the text is the only signal_. OpenCode does the same: on this protocol an error result is simply written out as the message content ([protocols/shared.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/shared.ts)).
+- **OpenAI Chat Completions (Ollama, llama.cpp)** has no such flag. A `role: "tool"` message is just text, so _the text is the only signal_. OpenCode does the same: on this protocol it writes an error result out as the message content ([protocols/shared.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/shared.ts)).
 
-This works on small local models too. In my tests, both Ollama and llama.cpp running `qwen3.5:9b` received `"Error: directory not found: . (try listing 'src' instead)"` and immediately called `list_files` again with `"src"`. A clear error message is the mechanism involved, so the wording of the message matters.
+Small local models handle this too. In my tests, both Ollama and llama.cpp running `qwen3.5:9b` received `"Error: directory not found: . (try listing 'src' instead)"` and immediately called `list_files` again with `"src"`. The message is all the model has to go on, so its wording matters.
 
 </details>
 
 ## A tool is one object
 
-Agents commonly end up with the same shape. A tool is a single value holding four things: a **name**, a **description**, an **input schema**, and an **executor** (the function that does the work). Compare Thorsten Ball's Go agent with OpenCode's `read` tool:
+Most agents settle on the same shape for a tool. It is a single value holding four things: a **name**, a **description**, an **input schema**, and an **executor** (the function that does the work). Compare Thorsten Ball's Go agent with OpenCode's `read` tool:
 
 ```go
 // Thorsten Ball (Go)
@@ -61,22 +61,22 @@ editor.add({
 
 Sources: [How to Build an Agent](https://ampcode.com/how-to-build-an-agent); [packages/core/src/tool/plugin/read.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/read.ts). OpenCode's [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md) makes this a rule: "Each tool carries its name, options, schemas, and executable behavior in one object."
 
-Notice that neither object mentions a protocol. A tool is provider-neutral. Keeping it that way is what makes tools _data_:
+Neither object mentions a protocol. Because a tool stays provider-neutral, you can treat your tools as _data_:
 
-1. **Each protocol's tool list is derived from the registry.** One small function turns a tool into `{ type: "function", function: { name, description, parameters } }` for OpenAI; another turns it into `{ name, description, input_schema }` for Anthropic. Same JSON Schema, different wrapping. You never write a definition twice.
-2. **Dispatch is a lookup by name.** When a tool call arrives, find the tool with that name and run its executor. A tool the model asks for that you don't have isn't a crash either: Ball's agent replies `"tool not found"` as an error result.
+1. **Each protocol's tool list is derived from the registry.** One small function turns a tool into `{ type: "function", function: { name, description, parameters } }` for OpenAI; another turns it into `{ name, description, input_schema }` for Anthropic. Both wrap the same JSON Schema, so you never write a definition twice.
+2. **Dispatch is a lookup by name.** When a tool call arrives, find the tool with that name and run its executor. If the model asks for a tool you don't have, that isn't a crash either: Ball's agent replies `"tool not found"` as an error result.
 
-Add a fifth tool and you add one object. Neither loop changes, and neither does any protocol code. This is the main result of this Part.
+That is the main result of this Part: a fifth tool is one more object, and neither loop nor any protocol code changes.
 
 ## Three rules for tools the model can use well
 
 ### 1. Descriptions matter most
 
-Claude's docs call detailed descriptions ["by far the most important factor in tool performance"](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools) and recommend at least 3–4 sentences: what the tool does, when to use it (and when not to), what each parameter means, and its limits. OpenCode's `read` description is eight sentences long, and it tells the model how to read large files ("Use offset and limit…") and when to use a different tool ("use grep to find specific content"). Anthropic's tool-design post gives a useful test: describe the tool [as you would to a new hire](https://www.anthropic.com/engineering/writing-tools-for-agents). The advice comes from Anthropic, but it matters _more_ for a 9B local model, which has less ability to guess what you meant.
+Claude's docs call detailed descriptions ["by far the most important factor in tool performance"](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools) and recommend at least 3–4 sentences: what the tool does, when to use it (and when not to), what each parameter means, and its limits. OpenCode's `read` description is eight sentences long, and it tells the model how to read large files ("Use offset and limit…") and when to use a different tool ("use grep to find specific content"). Anthropic's tool-design post gives a useful test: describe the tool [as you would to a new hire](https://www.anthropic.com/engineering/writing-tools-for-agents). The advice comes from Anthropic, but it matters _more_ for a 9B local model, which is worse at guessing what you meant.
 
 ### 2. Errors should say what to do next
 
-Claude's [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) docs: "Instead of generic errors such as `"failed"`, include what went wrong and what Claude should try next." Here is OpenCode doing it. When a file is missing, the `read` tool doesn't return "not found". It looks for similar names:
+Claude's [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) docs: "Instead of generic errors such as `"failed"`, include what went wrong and what Claude should try next." OpenCode's `read` tool does this: when a file is missing, it looks for similar names instead of returning a bare "not found":
 
 ```text
 File not found: docs/README
@@ -85,11 +85,11 @@ Did you mean one of these?
 docs/README.md
 ```
 
-Its truncation notice works the same way: `[Output truncated. Continue reading with offset: 2001]`. The model gets the exact next call to make. On your local providers, where there's no error flag, this text is everything.
+Its truncation notice works the same way: `[Output truncated. Continue reading with offset: 2001]`. The model gets the exact next call to make. On your local providers, which have no error flag, this text is all the model gets.
 
 ### 3. Model input is untrusted
 
-The schema tells the model what to send, but nothing forces it to comply. Claude's docs say that when input is invalid and you reply with an error result, "Claude will retry 2–3 times with corrections before apologizing to the user." Local models make this mistake more often, and the OpenAI protocol adds one more way to fail: `arguments` arrives as a JSON _string_, so `JSON.parse` itself can throw on a malformed reply. Treat a parse failure like any other bad input: an instructive error result, never a crash. OpenCode's registry validates model input at runtime for every tool ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), Registration). In _Why Effect: errors as values_ (Part 5), `Schema` will do this for you. For now, check it by hand.
+The schema tells the model what to send, but nothing forces it to comply. Claude's docs say that when input is invalid and you reply with an error result, "Claude will retry 2–3 times with corrections before apologizing to the user." Local models make this mistake more often, and the OpenAI protocol adds one more way to fail: `arguments` arrives as a JSON _string_, so `JSON.parse` itself can throw on a malformed reply. Treat a parse failure like any other bad input and answer it with an instructive error result. OpenCode's registry validates model input at runtime for every tool ([tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), Registration). In _Why Effect: errors as values_ (Part 5), `Schema` will do this for you. For now, check it by hand.
 
 ## Tools on each provider
 
@@ -115,7 +115,7 @@ The schema tells the model what to send, but nothing forces it to comply. Claude
 | Result     | One user message whose content starts with every `tool_result` block: `tool_use_id`, `content` |
 | Failure    | `is_error: true`, plus the same instructive text                                               |
 
-Two Claude-only extras: `strict: true` on a tool definition makes Claude's calls always match your schema ([Define tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools)), and Claude is your reference. When a local model keeps calling a tool wrong, run the same prompt and tools against Claude. If Claude gets it right, improve the description or accept the model's limit. If Claude gets it wrong too, the problem is probably your definition or your dispatch.
+Claude has an option the local providers lack: `strict: true` on a tool definition makes its calls always match your schema ([Define tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools)). It is also your reference. When a local model keeps calling a tool wrong, run the same prompt and tools against Claude. If Claude gets it right, improve the description or accept the model's limit. If Claude gets it wrong too, the problem is probably your definition or your dispatch.
 
 ## Check yourself
 
@@ -201,7 +201,7 @@ From [Part 2](/posts/the-roadmap/): a tool object spans two of the three parts. 
 
 ## Your turn: build the registry
 
-Work in the `my-agent` folder from Part 1, on Ollama first. It is still one `index.ts`, plain TypeScript and `fetch`; Effect comes after the provider part. Each step edits that file and ends with something to run or check. The complete file is at the end of the Ollama steps, and the Claude changes follow as a separate section with their own complete file.
+Work in the `my-agent` folder from Part 1, on Ollama first. It is still one `index.ts` in plain TypeScript with `fetch`; Effect arrives in Part 5. Each step edits that file and ends with something to run or check. The complete file follows the Ollama steps, and the Claude changes come after it with their own complete file.
 
 Test environment: the transcripts in this section were recorded in the Part 1 environment (MacBook Pro with Apple M4 Max, 36 GB of memory, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) on 4 November 2026. The model's wording will differ.
 
@@ -322,7 +322,7 @@ You: What does the file missing.txt say?
 Agent: The file `missing.txt` does not exist. If it's supposed to be in the current directory, please check if it was created correctly or confirm its path.
 ```
 
-The read failed, `runTool` caught the exception, and the model was told and answered. In Part 1 the same situation ended the program. The message here is Node's own wording and names no next step. The messages written by hand in step 2 do.
+The read failed, `runTool` caught the exception, and the model answered. In Part 1 the same prompt ended the program. This message is Node's own wording and names no next step; the ones you wrote in step 2 do.
 
 #### Step 4: Add `write_file` and `bash`
 
@@ -455,7 +455,7 @@ In `bash`:
     confirm: (input) => `run: ${field(input, "command", "ls -la")}`,
 ```
 
-`confirm` reads the input through `field`, so invalid input fails before the prompt appears and nobody is asked to approve a call that cannot run. `list_files` and `read_file` stay unprompted. The prompt shows the action; it does not restrict it. An approved command runs with your permissions, and file paths are not limited to the playground folder. Restricting that is the permission work in Stage C.
+`confirm` reads the input through `field`, so invalid input fails before the prompt appears and nobody is asked to approve a call that cannot run. `list_files` and `read_file` stay unprompted. The prompt only shows the action. An approved command runs with your permissions, and file paths are not limited to the playground folder. Restricting that is the permission work in Stage C.
 
 #### Step 6: Check it works
 
@@ -509,7 +509,7 @@ $ cd playground && bun ../index.ts
 }
 ```
 
-Three different failures, and each one is a value the loop can send back. Last, run the same missing-file prompt with `BASE_URL` pointed at llama.cpp (`cd playground && BASE_URL=http://127.0.0.1:9931/v1 bun ../index.ts`). In my runs, it and the `bash` prompt behaved the same as on Ollama.
+Last, run the same missing-file prompt with `BASE_URL` pointed at llama.cpp (`cd playground && BASE_URL=http://127.0.0.1:9931/v1 bun ../index.ts`). In my runs, it and the `bash` prompt behaved the same as on Ollama.
 
 <details>
 <summary>Stuck? The finished index.ts</summary>
@@ -775,7 +775,7 @@ With this:
 
 Run `cd playground && bun ../claude.ts` with the missing-file prompt from step 3 and the write-and-run prompt from step 6. Claude reads the failure and replies without the program ending, and the `write_file` and `bash` prompts appear before anything runs. The `[error]` line appears for the missing file, and the result Claude receives has `is_error: true`. If a reply contains several tool calls, each is prompted in turn and all the results still go back in one user message.
 
-Then compare the files again with `diff index.ts claude.ts`. With the tool code copied over, the differences are the config, `toAnthropicTool`, `chat()` and the loop. The five tools, `runTool` and the confirmation exist twice. _Providers behind one interface_ (Part 4) addresses that duplication.
+Then compare the files again with `diff index.ts claude.ts`. With the tool code copied over, the differences are the config, `toAnthropicTool`, `chat()` and the loop. The five tools, `runTool` and the confirmation exist twice. _Providers behind one interface_ (Part 4) removes that duplication.
 
 <details>
 <summary>Stuck? The finished claude.ts</summary>
@@ -1014,11 +1014,11 @@ while (true) {
 
 </details>
 
-> **Watch for this.** With five tools, a model may request several tools in one reply. Every call needs its own result. On the OpenAI protocol that's one `role: "tool"` message per call, right after the assistant message. On Anthropic it's one user message whose content [starts with all the `tool_result` blocks](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls). A 400 error mentioning "tool_use ids were found without tool_result blocks" indicates the results were not formatted as above.
+> **Watch for this.** With five tools, a model may request several tools in one reply. Every call needs its own result. On the OpenAI protocol that's one `role: "tool"` message per call, right after the assistant message. On Anthropic it's one user message whose content [starts with all the `tool_result` blocks](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls). A 400 error mentioning "tool_use ids were found without tool_result blocks" means the results don't follow this layout.
 
-> **If you have 32 GB or more of memory.** A larger local model tends to make fewer malformed calls, and can serve as a free second reference before using Claude. Keep building against `qwen3.5:9b`: code that handles a small model's mistakes also handles larger models'.
+> **If you have 32 GB or more of memory.** A larger local model tends to make fewer malformed calls, and it is a free second reference to try before Claude. Keep building against `qwen3.5:9b`: code that handles a small model's mistakes also handles larger models'.
 
-> **Result.** Adding a tool now means adding one object, and it works on every provider at once. Your tools no longer depend on your loops, and that independence is what lets OpenCode accept tools from plugins and MCP servers it has never seen.
+> **Result.** Adding a tool now means adding one object, and it works on every provider at once. Your tools no longer depend on your loops. OpenCode relies on the same separation to accept tools from plugins and MCP servers it has never seen.
 
 ## Sources
 
@@ -1031,11 +1031,3 @@ If you read only one, read the first, then do this: after building your five too
 - [llama.cpp: function-calling.md](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
 - [Thorsten Ball: How to Build an Agent](https://ampcode.com/how-to-build-an-agent) (`ToolDefinition`, "tool not found")
 - OpenCode's [tool/plugin/read.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/read.ts), [tool/AGENTS.md](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/AGENTS.md), [tool/plugin/shell.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/core/src/tool/plugin/shell.ts) and [ai/src/protocols/shared.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/shared.ts)
-
-Measured: the Ollama and llama.cpp steps in "Your turn" were run on 4 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b` with thinking off); `runBash`'s exit code, 30-second timeout and output cut-off were checked by calling `runTool` directly.
-
-Not measured against the live API: `claude.ts` was type-checked and run against a local stand-in for the Messages API that checks the request rules and that a failed tool call comes back as a `tool_result` with `is_error: true`. No Claude output is recorded in this Part.
-
-Measured: error-result round trips on Ollama 0.40.13 and llama.cpp b11669 with `qwen3.5:9b` (2026-10-31).
-
-Checked: every OpenCode link and quotation above against commit `863ea41364`, the quotations from the Claude, Ollama and llama.cpp docs and from Anthropic's tool-design post, and every code block in "Your turn" against Part 1's finished files, on 2026-11-04. Both finished files type-check, and the three `runTool` failures print as shown.

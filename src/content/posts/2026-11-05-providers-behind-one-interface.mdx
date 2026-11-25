@@ -13,13 +13,13 @@ import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-This Part merges the two near-identical files from [Part 3](/posts/tools-as-data/) into one loop that gets its provider from a setting. The agent gets its own message types, and each wire format becomes a protocol that translates to and from them. It is the second Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+This Part merges the two near-identical files from [Part 3](/posts/tools-as-data/) into one loop that reads its provider from a setting. To get there, the agent gets message types of its own, and each wire format becomes a protocol that translates to and from them. It is the third Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
 
-The code for this Part is available as the [`Part4_common_interface` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part4_common_interface), the repo where I build this agent in parallel.
+The code for this Part is the [`Part4_common_interface` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part4_common_interface), the repo where I build this agent in parallel.
 
 ## Start from the diff
 
-After Part 3 the agent exists twice: `index.ts` talks to Ollama and llama.cpp, and `claude.ts` talks to Claude. The five tools, `runTool` and the confirmation prompt are identical in both. Diffing the two files shows how much of each is specific to its provider:
+After Part 3 the agent exists twice: `index.ts` talks to Ollama and llama.cpp, and `claude.ts` talks to Claude. The five tools, `runTool` and the confirmation prompt are identical in both. A diff of the two files shows how much of each is specific to its provider:
 
 ```bash
 diff index.ts claude.ts | grep -c '^[<>]'
@@ -35,7 +35,7 @@ The count is 66 changed lines out of roughly 220 per file. They fall into five g
 | Reading the reply | `choices[0].message`; `tool_calls` with `arguments` as a JSON string; stop when there are no calls                | `content` blocks; `tool_use` with `input` as an object; stop when there are no calls or on `stop_reason: "refusal"` |
 | Writing history   | The assistant message as received; one `role: "tool"` message per result, with `Error:` in the text for a failure | The assistant content as received; one user message holding every `tool_result`, with `is_error` for a failure      |
 
-Everything else, including the tools, `runTool` and the loop's shape, is the same. The first row and the endpoint and authentication parts of the third are facts about one provider. The rest of the third row and rows two, four and five describe a wire format that several providers can share. This Part separates the two, so the loop is written once.
+Everything else, including the tools, `runTool` and the loop's shape, is the same. Only the configuration and the endpoint and authentication in the request row are facts about one provider. The rest of the table describes a wire format that several providers can share. This Part pulls the two apart, so the loop is written once.
 
 ## Protocols and routes
 
@@ -51,11 +51,11 @@ The agent ends this Part with two protocols and three routes:
 | `llamacpp` | `openaiChat`        | `http://127.0.0.1:9931/v1`  | `qwen3.5:9b`        |
 | `claude`   | `anthropicMessages` | `https://api.anthropic.com` | `claude-sonnet-5-5` |
 
-A provider that speaks a protocol the agent already has is one more row in this table. A provider with a new wire format needs a new protocol first. In the agent a protocol has three members: the `path` it posts to, a `body` function that turns the conversation into a request body, and a `decode` function that turns the response into a reply. Those functions work on the agent's own types, which come next.
+A provider that speaks a protocol the agent already has is one more row in this table; one with a new wire format needs a new protocol first. In the agent a protocol has three members: the `path` it posts to, a `body` function that turns the conversation into a request body, and a `decode` function that turns the response into a reply. Those functions work on the agent's own types, which come next.
 
 ## The agent's own types
 
-The loop needs a vocabulary that belongs to no provider. A **message** has a role and a list of **content parts**. A content part is text, a tool call or a tool result. (The word is agent vocabulary and unrelated to the Parts of this Series; the code calls the type `Part`, as OpenCode does.) The two tool-related ones, next to OpenCode's:
+The loop needs a vocabulary that belongs to no provider. A **message** has a role and a list of **content parts**. A content part is text, a tool call or a tool result. (The word is agent vocabulary and unrelated to the Parts of this Series; the code calls the type `Part`, as OpenCode does.) Here are the two tool parts, next to OpenCode's:
 
 ```ts
 // The agent (Part 4)
@@ -112,23 +112,23 @@ Part 3 returned `{ content, isError }`. Here the failure is part of the result's
 
 #### 2. One `tool` message holds a step's results
 
-The loop collects the results of every tool call in a step and pushes them as one message with the role `tool`. The OpenAI encoder splits it into one message per result, and the Anthropic encoder wraps it in a user message. This is the "every call needs its own result" rule from Part 3, expressed once instead of in two loops.
+The loop collects the results of every tool call in a step and pushes them as one message with the role `tool`. The OpenAI encoder splits it into one message per result, and the Anthropic encoder wraps it in a user message. Part 3's rule that every call needs its own result now lives in one place instead of two loops.
 
 #### 3. A reply says why it ended
 
-`decode` returns `{ message, finish }`, where `finish` is `"tool-calls"`, `"stop"` or `"refusal"`. The loop continues only on `"tool-calls"`. Parts 1 to 3 also stopped when a reply had no tool calls; here that decision has a name, and each protocol makes it. The OpenAI decoder bases it on whether the message contains tool calls rather than on the server's `finish_reason`. The Anthropic decoder keeps the refusal check from Part 1.
+`decode` returns `{ message, finish }`, where `finish` is `"tool-calls"`, `"stop"` or `"refusal"`. The loop continues only on `"tool-calls"`. Parts 1 to 3 also stopped when a reply had no tool calls; now that decision has a name, and each protocol makes it. The OpenAI decoder looks at whether the message contains tool calls and ignores the server's `finish_reason`. The Anthropic decoder keeps the refusal check from Part 1.
 
 #### 4. `native` keeps what the types cannot hold
 
-Claude's replies can contain thinking blocks. They are neither text nor tool calls in the agent's types, and they have to be sent back unchanged with the tool results. The assistant message gets an optional `native` field. The Anthropic decoder stores the original `content` array there and the Anthropic encoder sends it back. The loop never reads it. OpenCode models thinking as a `reasoning` part that carries the signature and rebuilds the thinking block when it encodes ([anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts#L934-L958)). A `reasoning` part becomes worthwhile once something displays or compacts reasoning, so the agent keeps the raw content for now.
+Claude's replies can contain thinking blocks. The agent's types have no place for them, yet they have to go back unchanged with the tool results. So the assistant message gets an optional `native` field: the Anthropic decoder stores the original `content` array there, the Anthropic encoder sends it back, and the loop never reads it. OpenCode models thinking as a `reasoning` part that carries the signature and rebuilds the thinking block when it encodes ([anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts#L934-L958)). A `reasoning` part pays off once something displays or compacts reasoning. Nothing in the agent does yet, so it keeps the raw content.
 
 #### 5. Malformed arguments keep their raw text
 
-On the OpenAI protocol `arguments` is a string, and `JSON.parse` can fail on a small model's output. The decoder then keeps the raw string as the call's `input`. `runTool` treats a string input as "not valid JSON" and returns the same instructive error as in Part 3, and the encoder sends the raw text back unchanged. A string that is valid JSON, such as `"abc"`, gets the same message, which is slightly less precise and still tells the model to send an object.
+On the OpenAI protocol `arguments` is a string, and `JSON.parse` can fail on a small model's output. When it does, the decoder keeps the raw string as the call's `input`. `runTool` treats a string input as "not valid JSON" and returns the same instructive error as in Part 3, and the encoder sends the raw text back unchanged. A string that is valid JSON, such as `"abc"`, gets the same message. That message is slightly wrong for it, but it still tells the model to send an object.
 
 ## Check yourself
 
-Try each question before moving on. First, sorting code into the loop, a protocol or a route:
+Try each question before moving on. The first four ask where a piece of code belongs: the loop, a protocol or a route.
 
 <Quiz
   question="The API key sent in a request header."
@@ -210,7 +210,7 @@ Try each question before moving on. First, sorting code into the loop, a protoco
     'A message cannot hold fewer than two parts',
   ]}
   correct={1}
-  right="Right. The neutral shape is the one that either encoder can reshape locally."
+  right="Right. Each encoder can reshape one neutral message for its own protocol."
   wrong="Anthropic needs one user message with every `tool_result`; OpenAI needs one message per result. A single neutral message lets each encoder reshape it for its protocol."
 />
 
@@ -229,7 +229,7 @@ Try each question before moving on. First, sorting code into the loop, a protoco
 
 ## Your turn: one loop, three routes
 
-Work in the `my-agent` folder from Part 3 and edit `index.ts`. It stays one file, plain TypeScript and `fetch`. Each step ends with something to run or check. Steps 1 to 3 use the local providers, and the complete file after step 3 is in a "Stuck?" block. Step 4 adds Claude, costs money to run, and is optional; the complete file at the end of it is the whole implementation. Step 4 also removes `claude.ts`.
+Work in the `my-agent` folder from Part 3 and edit `index.ts`, which stays one file of plain TypeScript and `fetch`. Each step ends with something to run or check. Steps 1 to 3 use the local providers, and the complete file after step 3 is in a "Stuck?" block. Step 4 is optional and costs money to run: it adds Claude and removes `claude.ts`. The complete file at the end of this section is the whole implementation.
 
 Test environment: the transcripts in this section were recorded in the Part 1 environment (MacBook Pro with Apple M4 Max, 36 GB of memory, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) on 5 November 2026. The model's wording will differ.
 
@@ -278,7 +278,7 @@ const runTool = async (call: ToolCallPart): Promise<ToolResultPart> => {
 
 `done` builds the result part, so the success and failure paths cannot disagree about the id and name. A result is a `text` on success and an `error` on every failure: an unknown tool, a string input, an input that fails `field`, a declined confirmation and an executor that throws.
 
-The loop still uses the old shapes, so the compiler now has complaints:
+The loop still uses the old shapes, so the type check now fails:
 
 ```bash
 bunx --package typescript tsc --noEmit
@@ -294,7 +294,7 @@ index.ts(216,24): error TS2339: Property 'isError' does not exist on type 'ToolR
 index.ts(216,70): error TS2554: Expected 1 arguments, but got 2.
 ```
 
-`Message` is declared twice, once here and once as the OpenAI-shaped type the old loop uses, and the loop still calls `runTool` the old way. Step 2 replaces that code. Bun runs the file without type checking, so `runTool` can still be tested now. Add these lines temporarily above `const messages`, run the agent, then remove them:
+`Message` is declared twice, once here and once as the OpenAI-shaped type the old loop uses, and the loop still calls `runTool` the old way. Step 2 replaces that code. Bun runs the file without type checking, so you can already test `runTool`. Add these lines temporarily above `const messages`, run the agent, then remove them:
 
 ```ts
 const call = (name: string, input: unknown): ToolCallPart => ({ type: "tool-call", id: "test", name, input })
@@ -345,7 +345,7 @@ $ cd playground && bun ../index.ts
 }
 ```
 
-Three failures and one success, each a value with the call's id. The second call passes a string, which is how a protocol will report arguments it could not parse.
+Three calls fail and one succeeds, and each returns a value that carries the call's id. The second call passes a string, which is how a protocol will report arguments it could not parse.
 
 ### Step 2: Move the OpenAI wire format into a protocol
 
@@ -367,7 +367,7 @@ const isToolCall = (part: Part): part is ToolCallPart => part.type === "tool-cal
 const textOf = (message: Message) => message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
 ```
 
-Then the OpenAI wire types and the tool wrapper from Part 3, which only moves:
+Then the OpenAI wire types and the tool wrapper from Part 3, which moves unchanged:
 
 ```ts
 // OpenAI Chat Completions: what Ollama and llama.cpp speak. Only this section knows its wire format.
@@ -482,7 +482,7 @@ while (true) {
 }
 ```
 
-Run the agent as in Part 3. The loop behaves as before, with no provider shape in it. Asking for a missing file:
+Run the agent as in Part 3. It behaves as before, though no provider's message shape appears in the loop anymore. Asking for a missing file:
 
 ```text
 $ cd playground && bun ../index.ts
@@ -515,7 +515,7 @@ Allow: run: node hello.js? [y/N] y
 Agent: The file `hello.js` has been created and executed successfully. It printed "hello" to the console.
 ```
 
-One difference from Part 3 shows in the `[tool]` line: it now prints `JSON.stringify(call.input)`, because the input is an object on every protocol. Part 3 printed the raw string on this one. The type check prints nothing:
+The `[tool]` line differs from Part 3. On this protocol Part 3 printed the raw argument string; now the line prints `JSON.stringify(call.input)`, because the input is an object on every protocol. The type check passes and prints nothing:
 
 ```bash
 bunx --package typescript tsc --noEmit
@@ -563,7 +563,7 @@ const chat = async (history: Message[]): Promise<Reply> => {
 }
 ```
 
-`PROVIDER` picks a route and defaults to `ollama`, so `bun ../index.ts` works as in Part 3. `BASE_URL` and `MODEL` still override a route's defaults. An unknown name stops the program with the available names. `llamacpp` expects the server from Part 1, started with `--reasoning off` on port 9931. Running the missing-file prompt and the write-and-run prompt on it:
+`PROVIDER` picks a route and defaults to `ollama`, so `bun ../index.ts` works as in Part 3. `BASE_URL` and `MODEL` still override a route's defaults. An unknown name stops the program and lists the names it accepts. `llamacpp` expects the server from Part 1, started with `--reasoning off` on port 9931. Running the missing-file prompt and the write-and-run prompt on it:
 
 ```text
 $ cd playground && PROVIDER=llamacpp bun ../index.ts
@@ -583,7 +583,7 @@ Allow: run: node hello.js? [y/N] y
 Agent: Done! I created `hello.js` with `console.log('hello');` and ran it with `node`, which printed "hello".
 ```
 
-Both prompts behave as on Ollama, from the same code. A name that is not a route (Bun also prints the failing source line, left out here):
+Both prompts behave as they did on Ollama, with no code changed. A name that is not a route (Bun also prints the failing source line, left out here):
 
 ```text
 $ cd playground && PROVIDER=nope bun ../index.ts
@@ -978,7 +978,7 @@ const anthropicMessages: Protocol = {
 }
 ```
 
-The encoder has three jobs that the OpenAI encoder does differently. It sends every result of a step in one user message and marks failures with `is_error`, with no `Error:` prefix. It replays `native` for assistant messages, which keeps the thinking blocks. And when a message has no `native`, it rebuilds the blocks from the parts, so a message made from parts alone can still be sent. The decoder fills in `native` and maps `stop_reason: "refusal"` to `finish`.
+This encoder works differently from the OpenAI one in three ways. It sends every result of a step in one user message and marks failures with `is_error` instead of an `Error:` prefix. It replays `native` for assistant messages, which keeps the thinking blocks. When a message has no `native`, it rebuilds the blocks from the parts, so a message made from parts alone can still be sent. The decoder fills in `native` and maps `stop_reason: "refusal"` to `finish`.
 
 Third, add the route. In `routes`, after the `llamacpp` entry:
 
@@ -991,13 +991,13 @@ Third, add the route. In `routes`, after the `llamacpp` entry:
   },
 ```
 
-The key is read when the table is built, so a missing key needs its own check. Add this line below the `if (!selected)` check:
+The key is read when the table is built, before anyone has chosen a route, so a missing key needs its own check. Add this line below the `if (!selected)` check:
 
 ```ts
 if (providerName === "claude" && !process.env.ANTHROPIC_API_KEY) throw new Error("Set ANTHROPIC_API_KEY first")
 ```
 
-Fourth, delete `claude.ts`. Everything in it now lives in `index.ts`. Run the agent on Claude with the prompts from step 2 and step 3:
+Fourth, delete `claude.ts`, since everything in it now lives in `index.ts`. Run the agent on Claude with the prompts from step 2 and step 3:
 
 ```bash
 cd playground && ANTHROPIC_API_KEY=... PROVIDER=claude bun ../index.ts
@@ -1009,7 +1009,7 @@ The output has the same shape as before: `[tool]` lines, an `[error]` line for t
 
 ### Step 5: One loop, any provider
 
-The same prompt runs on each route by changing one variable. This is also the diagnostic from Part 3: when a local model keeps calling a tool wrongly, the prompt can be replayed on Claude.
+Changing one variable runs the same prompt on each route. That also gives you the diagnostic from Part 3: when a local model keeps calling a tool wrongly, replay the prompt on Claude.
 
 ```bash
 cd playground
@@ -1018,16 +1018,16 @@ PROVIDER=llamacpp bun ../index.ts
 ANTHROPIC_API_KEY=... PROVIDER=claude bun ../index.ts
 ```
 
-If Claude gets the call right, the limit is the description or the model, and the description is what can be changed. If Claude gets it wrong as well, the tool definition, `runTool` and the encoders are the places to check. In Part 3 this meant switching to another file; here it is the `PROVIDER` setting.
+If Claude gets the call right, the limit is the description or the model, and of those two you can only change the description. If Claude gets it wrong too, check the tool definition, `runTool` and the encoders. In Part 3 the replay meant running another file; now it means changing `PROVIDER`.
 
-The separation can be checked too. The tools, `runTool`, `chat` and the loop should not name a provider, a protocol or a wire-format field. These two commands search them and print nothing when they are clean:
+You can check the separation as well. The tools, `runTool`, `chat` and the loop should not name a provider, a protocol or a wire-format field. These two commands search them and print nothing when they are clean:
 
 ```bash
 sed -n '1,/^type Reply/p' index.ts | grep -n -i "openai\|anthropic\|ollama\|claude\|llama"
 sed -n '/^const chat/,$p' index.ts | grep -n -i "openai\|anthropic\|ollama\|claude\|llama"
 ```
 
-Provider names appear in the two protocol sections and in `routes`, which is where the five groups of differences listed at the start of this Part now live. The final type check prints nothing:
+Provider names appear only in the two protocol sections and in `routes`, and those hold the five groups of differences from the table at the start of this Part. The final type check prints nothing:
 
 ```bash
 bunx --package typescript tsc --noEmit
@@ -1411,20 +1411,16 @@ while (true) {
 
 </details>
 
-> **If you have 32 GB or more of memory.** A larger local model is one more route entry, or a different `MODEL` on an existing one, and needs no other change. It can serve as a free second reference before using Claude.
+> **If you have 32 GB or more of memory.** A larger local model is one more route entry, or a different `MODEL` on an existing one, and needs no other change. It gives you a free second opinion to try before paying for Claude.
 
-> **Result.** The loop, the tools and `runTool` exist once and do not name a provider. A provider that speaks OpenAI Chat Completions is one more row in `routes`. Only a new wire format needs a new protocol.
+> **Result.** The loop, the tools and `runTool` exist once and name no provider. A provider that speaks OpenAI Chat Completions is one more row in `routes`, and only a new wire format needs a new protocol.
 
 ## Sources
 
-The first item is the primary source for this Part. A useful exercise is to read the documentation comment on `Protocol` and the part types, then list what OpenCode has that the agent does not (the four type parameters, the framing step, the extra part types) and what each one is for. That list is the work of the Parts that follow.
+The first item is the primary source for this Part. As an exercise, read the documentation comment on `Protocol` and the part types, then list what OpenCode has that the agent does not (the four type parameters, the framing step, the extra part types) and what each one is for. The Parts that follow work through that list.
 
 - OpenCode's [route/protocol.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/route/protocol.ts) and [schema/messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/schema/messages.ts)
 - [Claude docs: Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) (`is_error`, order of `tool_result` blocks) and [Parallel tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use) (all results of a step in the next user message)
 - [Ollama docs: OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)
 - [llama.cpp: function-calling.md](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
 - OpenCode's [protocols/openai-compatible-chat.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/openai-compatible-chat.ts) and [protocols/anthropic-messages.ts](https://github.com/anomalyco/opencode/blob/863ea41364/packages/ai/src/protocols/anthropic-messages.ts)
-
-Measured: every Ollama step above was run on 5 November 2026 in the Part 1 test environment (M4 Max, Ollama 0.40.14, `qwen3.5:9b` with `reasoning_effort: "none"`). The llama.cpp runs used b9830 with `--reasoning off`, started on a different port and selected with `BASE_URL`. The step 1 results come from calling `runTool` directly, and the encoders and decoders of both protocols were also called directly with malformed arguments, several results in one step, a message without `native` and a refusal. Step 4 was also run against the live Anthropic API with `claude-sonnet-5-5` on 5 November 2026, with the prompts of steps 2 and 3. No Claude output is recorded in this Part; in my runs the prompts behaved as on the local routes, with an `[error]` line for the missing file and a prompt before `write_file` and `bash`.
-
-Checked: every OpenCode link and quotation above against commit `863ea41364` (the `Protocol` documentation comment and its four type parameters, the 24 lines of `openai-compatible-chat.ts`, the `is_error` line at 988 and the `reasoning` handling at 934–958 of `anthropic-messages.ts`, the part and result types in `schema/messages.ts`), the Claude documentation claims about `is_error` and a step's results in one user message, the diff count of 66 changed lines on Part 3's finished files, the `Part4_common_interface` tag on the remote, the Part numbers and titles on the Series page (Parts 1–4 written, Parts 5–7 planned), and every code block in "Your turn" by applying the steps in order to Part 3's finished `index.ts` and comparing the result with the finished files here and with the `Part4_common_interface` snapshot, on 2026-11-05. Both finished files type-check, the seven errors listed in step 1 are the ones the compiler prints, and the step 1 results, the unknown-provider and missing-key errors and the two separation checks print as shown. The missing-file, decline and write-and-run prompts, rerun on Ollama and llama.cpp, behaved as the transcripts show; the model's wording differed.
