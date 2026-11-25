@@ -13,11 +13,11 @@ import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-An "AI coding agent" can seem to need a lot of machinery. At its core, it is a short loop. Thorsten Ball built a working one that reads, lists, and edits files in about [400 lines, mostly boilerplate](https://ampcode.com/how-to-build-an-agent). The loop itself is maybe 20 of those lines.
+An "AI coding agent" sounds like it needs a lot of machinery, but it is a short loop around a model. Thorsten Ball built a working one that reads, lists, and edits files in about [400 lines, mostly boilerplate](https://ampcode.com/how-to-build-an-agent). The loop itself is maybe 20 of those lines.
 
-Everything the AI agentic software adds on top (durable sessions, permission prompts, many providers, retries) exists to make this loop _safe_ and _durable_, not to replace it.
+Everything agent software adds on top (durable sessions, permission prompts, many providers, retries) wraps that loop to make it _safe_ and _durable_. The loop itself stays the same.
 
-The rest of this Series (persistence, permissions, tool registries) builds around one small loop. This Part covers that loop first, on a model running on your own machine.
+The rest of this Series (persistence, permissions, tool registries) builds on that loop, so this Part builds the loop first, on a model running on your own machine.
 
 The code for this Part is available as the [`Part1_the_loop` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part1_the_loop), the repo where I build this agent in parallel.
 
@@ -29,13 +29,13 @@ The code for this Part is available as the [`Part1_the_loop` snapshot of vfil/si
 4. You append the tool's result to the conversation and go back to step 2.
 5. Eventually the model replies with text and no tool request. That ends the turn.
 
-> **Why this shape.** The model can only _propose_ actions; your code is always the thing that _does_ them. That boundary is where an agent's safety checks attach, and it is why OpenCode has a permission system.
+> **Why this shape.** The model can only _propose_ actions, and your code always _does_ them. An agent's safety checks attach at that boundary, which is where OpenCode's permission system sits.
 
-Anthropic's ["Building effective agents"](https://www.anthropic.com/research/building-effective-agents) makes a related point: the teams that succeeded mostly used this loop directly, not elaborate frameworks. (The page itself notes that its tooling details are dated; the loop it describes still applies.)
+Anthropic's ["Building effective agents"](https://www.anthropic.com/research/building-effective-agents) makes a related point: the teams that succeeded mostly built on this loop directly instead of on elaborate frameworks. (The page notes that its tooling details are dated, but the loop it describes still applies.)
 
-## Three words before you start
+## Provider, protocol, model
 
-You'll run this loop against three sources of models, so the three terms below are used consistently:
+You'll run this loop against three sources of models, so this Part keeps three terms apart:
 
 - A **provider** serves models over HTTP: Ollama, a llama.cpp server, or Anthropic.
 - A **protocol** is the wire format of a request and its response. Ollama and llama.cpp both speak _OpenAI Chat Completions_; Claude speaks _Anthropic Messages_.
@@ -124,15 +124,15 @@ Try each question before moving on.
 
 ## Your turn: build the loop
 
-Do this in its own new folder: it's the seed of the agent you'll grow through the rest of the Series. Plain TypeScript and plain `fetch`, no SDKs and no Effect yet, so every byte on the wire is visible to you.
+Do this in a new folder of its own; it's the seed of the agent you'll grow through the rest of the Series. It uses plain TypeScript and plain `fetch`, with no SDKs and no Effect yet, so you see every byte on the wire.
 
-You'll build a small chat agent in eight steps, the way Thorsten Ball builds his Go one: each step adds one thing, ends with something you run, and shows what you should see. The code is short enough to type by hand. The finished file is about 123 lines.
+You'll build a small chat agent in eight steps, the way Thorsten Ball builds his Go one. Each step adds one thing and ends with something you run, next to the output you should see. The code is short enough to type by hand; the finished file is about 123 lines.
 
-Ollama is the main path. The llama.cpp and Claude sections at the end are optional, though the Claude section is what makes the duplication that _Providers behind one interface_ (Part 4) removes visible.
+Ollama is the main path. The llama.cpp and Claude sections at the end are optional, but the Claude section shows you the duplicated code that _Providers behind one interface_ (Part 4) removes.
 
 Test environment: the build steps and transcripts in this Part were run on a MacBook Pro (Apple M4 Max, 36 GB of memory, macOS 15.7) with Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830 and the model `qwen3.5:9b`, on 3 November 2026. The raw wire shapes above were captured a few days earlier on a MacBook with an Apple M1 and 16 GB of memory (Ollama 0.40.13, llama.cpp b11669). Timings will differ on your hardware, and so will the model's wording.
 
-> **Not a sandbox.** From step 7 your agent can overwrite files. There is no permission step until a much later Part. You'll run it from inside a scratch folder so the model's default "this directory" is harmless, but that is a convention, not a restriction: a model can still ask for `../index.ts`. Avoid pointing the agent at anything that can't be recovered.
+> **Not a sandbox.** From step 7 your agent can overwrite files, and there is no permission step until a much later Part. You'll run it from inside a scratch folder so the model's default "this directory" is harmless, but nothing enforces that: a model can still ask for `../index.ts`. Don't point the agent at anything you can't recover.
 
 ### Setup
 
@@ -157,7 +157,7 @@ Test environment: the build steps and transcripts in this Part were run on a Mac
 
 2. In another terminal: `ollama pull qwen3.5:9b` (about 7 GB, with tool support).
 
-Your transcripts will differ in wording from the ones below, because a model never answers the same way twice. What must match is the _shape_: which lines start with `[tool]`, and in what order.
+Your transcripts will be worded differently from the ones below, because a model never answers the same way twice. The _shape_ should match: which lines start with `[tool]`, and in what order.
 
 #### Step 1: One request, one reply
 
@@ -253,7 +253,7 @@ README.md
 notes/
 ```
 
-The order may differ. Directories end in a slash because the model will read this text, and a trailing slash marks which names are folders. The output format is a design choice, and smaller models benefit from a format that is explicit. Now delete the two temporary lines.
+The order may differ. Directories end in a slash because the model reads this text, and the slash tells it which names are folders. You choose this format, and smaller models do better when it spells things out. Now delete the two temporary lines.
 
 #### Step 4: Tell the model the tool exists
 
@@ -338,13 +338,13 @@ Agent: The `notes/` directory contains one file:
 - `todo.txt`
 ```
 
-This is the complete agent. The `[tool]` lines show that _your_ function ran, rather than the model guessing. In OpenCode's vocabulary, each `chat()` call is one **step**, and the inner `while` is one **turn**: all the steps from the prompt until the model answers in plain text. The outer loop is only the chat around it.
+This is the complete agent. The `[tool]` lines show _your_ function running, so the listing comes from disk and not from a guess. In OpenCode's vocabulary, each `chat()` call is one **step**, and the inner `while` is one **turn**: all the steps from the prompt until the model answers in plain text. The outer loop is only the chat around it.
 
 One simplification so far: the loop assumes every tool call is `list_files`. That holds with one tool, and the next step adds a second.
 
 #### Step 6: A second tool, and a shape for tools
 
-Add `read_file`. One option is to copy the `tools` entry and add an `if` on the name, which repeats for every further tool. This step instead gives a tool a shape: a name, a description, a schema, and the function that does the work. Then the model-facing list is _derived_ from those objects, and the loop finds the right one by name. Two changes, shown below: the `node:fs/promises` import gains `readFile`, and the `const tools = […]` block is replaced.
+Add `read_file`. You could copy the `tools` entry and add an `if` on the name, but you'd repeat that for every tool after it. Instead, give a tool a shape: a name, a description, a schema, and the function that does the work. The model-facing list is then _derived_ from those objects, and the loop finds the right one by name. There are two changes: the `node:fs/promises` import gains `readFile`, and the `const tools = […]` block is replaced.
 
 ```ts
 // at the top of the file, replace the existing import:
@@ -477,7 +477,7 @@ $ bun fizzbuzz.js | tr '\n' ' '
 1 2 Fizz 4 Buzz Fizz 7 8 Fizz Buzz 11 Fizz 13 14 FizzBuzz
 ```
 
-(`\u003c` is just how Ollama writes `<` inside a JSON string; `JSON.parse` turns it back. Long lines are shortened here with `…`.) Notice the second edit: the model sent only the one line that changes. It could do that because your tool replaces a snippet instead of rewriting the file. That is why the schema asks for `old_str` and not a whole new file.
+(`\u003c` is how Ollama writes `<` inside a JSON string; `JSON.parse` turns it back. Long lines are shortened here with `…`.) In the second edit the model sent only the line that changes. It can do that because the schema asks for an `old_str` to replace, not a whole new file.
 
 #### Step 8: Let it chain tools
 
@@ -491,7 +491,7 @@ Agent: The answer to the riddle is **a keyboard**.
 …
 ```
 
-The model picked `list_files`, saw the names, then picked `read_file`. That is two steps in one turn, with the loop only relaying calls and results. Try Ball's last demo too: _"Create congrats.js that decodes the ROT13 string 'Pbatenghyngvbaf ba ohvyqvat n pbqr-rqvgvat ntrag!' and prints it."_ Then run `bun congrats.js` yourself. When I ran it, the model's summary said the script would print "Congratulations on holidays and code-editing!", but the file it wrote printed the right sentence: `Congratulations on building a code-editing agent!`. **Run the file to check it; the model's description of it can be wrong.**
+The model picked `list_files`, saw the names, then picked `read_file`: two steps in one turn, with the loop only relaying calls and results. Try Ball's last demo too: _"Create congrats.js that decodes the ROT13 string 'Pbatenghyngvbaf ba ohvyqvat n pbqr-rqvgvat ntrag!' and prints it."_ Then run `bun congrats.js` yourself. When I ran it, the model's summary said the script would print "Congratulations on holidays and code-editing!", but the file it wrote printed the right sentence: `Congratulations on building a code-editing agent!`. Run what the agent writes, because its summary of the file can be wrong.
 
 Last, break it on purpose. Ask for a directory that doesn't exist:
 
@@ -503,7 +503,7 @@ You: What files are in the directory called missing?
 ENOENT: no such file or directory, scandir 'missing'
 ```
 
-The whole agent crashes. The model asked for a reasonable path, the tool threw, and the model was never told what happened. What _should_ happen instead is where _The roadmap_ (Part 2) starts, and _Tools as data_ (Part 3) fixes it. The same applies to a tool the model invents and to an `edit_file` whose `old_str` doesn't match.
+The whole agent crashes. The model asked for a reasonable path, the tool threw, and the model never heard what happened. A tool the model invents, or an `edit_file` whose `old_str` doesn't match, crashes it the same way. _The roadmap_ (Part 2) starts from what should happen instead, and _Tools as data_ (Part 3) fixes it.
 
 <details>
 <summary>Stuck? The finished index.ts</summary>
@@ -639,13 +639,13 @@ while (true) {
 <details>
 <summary>Under the hood: Ollama's own protocol</summary>
 
-Ollama also speaks a native protocol at `/api/chat` ([tool calling docs](https://docs.ollama.com/capabilities/tool-calling)). It is shown here to illustrate that these details are protocol choices:
+Ollama also speaks a native protocol at `/api/chat` ([tool calling docs](https://docs.ollama.com/capabilities/tool-calling)), which makes different choices for the same exchange:
 
-- `arguments` arrives as an **object**, not a JSON string.
-- Tool calls have **no id**. You return results as `{ role: "tool", tool_name: "list_files", content }`, matched by name, which gets ambiguous when the model calls the same tool twice in one reply.
+- `arguments` arrives as an object instead of a JSON string.
+- Tool calls have no id. You return results as `{ role: "tool", tool_name: "list_files", content }`, matched by name, which gets ambiguous when the model calls the same tool twice in one reply.
 - It streams by default.
 
-Your agent won't use it: the OpenAI-compatible protocol already covers both local servers, and a third protocol would mean a third set of translation code to maintain. OpenCode doesn't use it either: it uses `/api/tags` and `/api/show` only to discover models.
+Your agent won't use it. The OpenAI-compatible protocol already covers both local servers, and a third protocol would mean a third set of translation code to maintain. OpenCode doesn't use it either; it calls `/api/tags` and `/api/show` only to discover models.
 
 </details>
 
@@ -664,7 +664,7 @@ llama.cpp is the inference engine; Ollama wraps an engine with a model registry,
 
 3. Run your _unchanged_ agent, all three tools included, with `cd playground && BASE_URL=http://127.0.0.1:9931/v1 bun ../index.ts`.
 
-It runs without changes, which illustrates the point: **same protocol, different provider**. In my runs, the riddle chain (`list_files` then `read_file`), creating `fizzbuzz.js` and editing it to stop at 15 all worked on llama.cpp with no code change. What differs, as measured in the test environment above:
+The agent needs no changes because llama.cpp speaks the same protocol as Ollama; only the provider is different. In my runs, the riddle chain (`list_files` then `read_file`), creating `fizzbuzz.js` and editing it to stop at 15 all worked on llama.cpp. The two servers still differ in a few places, measured in the test environment above:
 
 |                      | Ollama `/v1`                               | llama.cpp `/v1`                                                          |
 | -------------------- | ------------------------------------------ | ------------------------------------------------------------------------ |
@@ -677,7 +677,7 @@ The reasoning field is one example of "OpenAI-compatible" not meaning identical.
 
 ### Claude: the reference provider (optional, costs money)
 
-Claude is your reference. When a local model gets something wrong, replay the same prompt here: if Claude succeeds, the local model is the likely cause; if Claude fails too, the harness is the likely cause. Use Claude Sonnet 5.5 (`claude-sonnet-5-5`). It speaks a different protocol, Anthropic Messages, so it needs its own request and loop code. The differences are:
+Claude is your reference. When a local model gets something wrong, replay the same prompt here: if Claude succeeds, the local model is the likely cause; if Claude fails too, suspect the harness. Use Claude Sonnet 5.5 (`claude-sonnet-5-5`). It speaks a different protocol, Anthropic Messages, so it needs its own request and loop code:
 
 **OpenAI Chat Completions (local)**
 
@@ -716,7 +716,7 @@ reply.content[{ type: "tool_use",
 
 Sources: [Tool use overview](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview.md) and [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls). Send `anthropic-version: 2026-10-21`, the current API version ([Versions](https://platform.claude.com/docs/en/api/versioning)), and read your key from `ANTHROPIC_API_KEY`.
 
-You'll build it in six steps, starting from the finished local agent, so most of the file stays exactly as it is. Everything runs from the same `my-agent` folder, and the local agent in `index.ts` is left alone.
+You'll build it in six steps from the finished local agent, so most of the file stays as it is. Everything runs from the same `my-agent` folder, and `index.ts` stays untouched.
 
 #### Claude step 1: A key, and one request
 
@@ -796,7 +796,7 @@ Compared with the local `chat()`:
 - The path is `/v1/messages`, and authentication is a header, `x-api-key`, plus the required `anthropic-version`.
 - `max_tokens` is required. The local servers apply a default; the Anthropic API requires a value.
 - `reasoning_effort` is gone. It was an Ollama field, and Claude decides for itself how much to think.
-- The reply is a list of **blocks**. You keep all of it, because the whole list goes back into the history next. A `thinking` block must be passed back unchanged, so your code never drops or edits blocks it doesn't recognize.
+- The reply is a list of blocks. You keep all of it, because the whole list goes back into the history next. A `thinking` block must be passed back unchanged, so your code never drops or edits blocks it doesn't recognize.
 
 #### Claude step 3: Change the loop
 
@@ -831,7 +831,7 @@ Four places differ from the OpenAI loop and need attention:
 - The assistant message you push is `{ role: "assistant", content: reply.content }`, the block list as received.
 - `input` arrives as an object. There is no `JSON.parse`, because it wasn't a string to begin with.
 - There is no `role: "tool"`. A result is a `tool_result` block inside a _user_ message, matched to its call by `tool_use_id`.
-- All the results of one reply go in **one** user message. Claude often asks for several tools at once, and sending the results as separate messages is a `400` ("tool_use ids were found without tool_result blocks immediately after").
+- All the results of one reply go in a single user message. Claude often asks for several tools at once, and sending the results as separate messages is a `400` ("tool_use ids were found without tool_result blocks immediately after").
 
 The `refusal` check handles responses where Claude's safety classifiers decline a request. These come back as a normal `200` response with `stop_reason: "refusal"`, and without the check the agent stops with no explanation.
 
@@ -851,7 +851,7 @@ Your wording will differ. If both `[tool]` lines appear before any `Agent:` line
 
 #### Claude step 5: Replay a local failure
 
-This step uses Claude as the reference. Take a prompt where the local model went wrong (a bad `old_str` in `edit_file`, the wrong tool, or an answer that contradicts the file) and run it unchanged through both agents:
+Take a prompt where the local model went wrong (a bad `old_str` in `edit_file`, the wrong tool, or an answer that contradicts the file) and run it unchanged through both agents:
 
 ```bash
 cd playground
@@ -1022,7 +1022,7 @@ while (true) {
 
 > **If you have 32 GB or more of memory.** Raise the context to 65536 on both servers, as Ollama recommends for agents. Keep `qwen3.5:9b` as the baseline so your results compare with the transcripts in this Part, and try a larger local model only as a free second reference.
 
-> **Result.** One small agent file, with three tools, runs against two different local providers by changing one URL. The rest of the Series addresses how to make this loop trustworthy, not what the loop is.
+> **Result.** One small agent file with three tools runs against two local providers by changing one URL, and a copy of it runs against Claude. The rest of the Series keeps this loop and works on making it trustworthy.
 
 ## Sources
 
