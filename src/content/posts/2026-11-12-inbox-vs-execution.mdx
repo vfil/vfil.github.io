@@ -15,7 +15,7 @@ import Quiz from '../../components/Quiz.astro';
 
 This Part separates accepting a prompt from running it. Each line the user types goes into the SQLite file from [Part 8](/posts/the-session-as-an-event-log/) as soon as it is read, and the agent runs it later, when it is free. A prompt typed during a turn waits for that turn to end, and a prompt still waiting when the process is killed is there on the next start. This is the second Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/).
 
-The code for this Part is available as the [`Part9_inbox_vs_execution` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part9_inbox_vs_execution), the repo where I build this agent in parallel.
+The code for this Part is available in the repo [https://github.com/vfil/sigma-agent/tree/Part9_inbox_vs_execution](https://github.com/vfil/sigma-agent/tree/Part9_inbox_vs_execution).
 
 ## A prompt typed while the agent is busy
 
@@ -89,7 +89,7 @@ A small router, `makeLines`, takes over from `question`. It keeps lines that nob
 
 ### What this leaves for later
 
-A prompt that always kills the process is delivered once and then resumed on every start, so the agent can crash in a loop, as it already could with the `resume` from [Part 8](/posts/the-session-as-an-event-log/). A line typed while the model is streaming appears after the `You: ` prompt that is already on screen, in the middle of the reply. Steering a running turn is not built. And a session never shrinks, so a long task will eventually outgrow the model's context window, which the roadmap's _Context limits and compaction_ covers.
+A prompt that always kills the process is delivered once and then resumed on every start, so the agent can crash in a loop, as it already could with the `resume` from [Part 8](/posts/the-session-as-an-event-log/). A line typed while the model is streaming appears after the `You: ` prompt that is already on screen, in the middle of the reply. Steering a running turn is not built. And a session never shrinks, so a long task will eventually outgrow the model's context window, which [Part 10](/posts/context-limits-and-compaction/) covers.
 
 ## Check yourself
 
@@ -3050,4 +3050,4 @@ The first item is the primary source for this Part. OpenCode's versions do more 
 - OpenCode's [AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208-L214) (the Session Core section on admission, delivery and wakeups)
 - Anthropic's [Scaling Managed Agents](https://www.anthropic.com/research/managed-agents) (the session as a log apart from the loop) and [Building effective agents](https://www.anthropic.com/research/building-effective-agents) (human feedback at checkpoints)
 
-The session now accepts work while the process is busy and keeps it across a restart. Stage B's remaining topic, _Context limits and compaction_ in [the roadmap](/posts/the-roadmap/), doesn't have a Part scheduled yet.
+The session now accepts work while the process is busy and keeps it across a restart. Stage B's last topic, [_Context limits and compaction_](/posts/context-limits-and-compaction/), is Part 10.
