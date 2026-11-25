@@ -13,7 +13,7 @@ import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-This Part separates accepting a prompt from running it. Each line the user types is saved in the SQLite file from [Part 8](/posts/the-session-as-an-event-log/) as soon as it is read, and the agent runs it later, when it is free. A prompt typed while a turn runs waits its turn, and one that is still waiting when the process is killed is there on the next start. It is the second Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/).
+This Part separates accepting a prompt from running it. Each line the user types goes into the SQLite file from [Part 8](/posts/the-session-as-an-event-log/) as soon as it is read, and the agent runs it later, when it is free. A prompt typed during a turn waits for that turn to end, and a prompt still waiting when the process is killed is there on the next start. This is the second Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/).
 
 The code for this Part is available as the [`Part9_inbox_vs_execution` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part9_inbox_vs_execution), the repo where I build this agent in parallel.
 
@@ -21,19 +21,19 @@ The code for this Part is available as the [`Part9_inbox_vs_execution` snapshot 
 
 Suppose the agent is in the middle of a refactor. It has read a dozen files, edited three of them, and started the test suite, which will take a few minutes. While it works, the user remembers one more thing and types a second line: "also update the changelog". A moment later the terminal is closed, or the laptop goes to sleep and the process is killed.
 
-With the agent from [Part 8](/posts/the-session-as-an-event-log/), that second line is gone. Nothing was reading the keyboard while the turn ran, so the line was sitting in the terminal's own input buffer, outside the program. The log from [Part 8](/posts/the-session-as-an-event-log/) is durable, but it starts at the moment the agent takes a prompt. Everything the user handed over before that moment depends on the process staying alive.
+With the agent from [Part 8](/posts/the-session-as-an-event-log/), that second line is gone. Nothing was reading the keyboard while the turn ran, so the line sat in the terminal's own input buffer, outside the program. Part 8's log is durable, but it starts at the moment the agent takes a prompt, and anything the user typed before that moment survives only as long as the process does.
 
-This Part changes where a prompt is kept first. A prompt is meant to be safe from the moment the user hands it over, whether or not the agent can do anything with it yet. A mail slot in a door works this way: a letter that drops through the slot is delivered, whether or not anyone is home to read it, and reading it is a separate act that happens later. For the agent, _accepting_ a prompt becomes its own step, a write to the SQLite file, and _running_ a prompt becomes a second step that starts when the agent is free. OpenCode's AGENTS.md states the rule as "Keep durable prompt admission separate from model execution" ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208)).
+So this Part changes where a prompt is kept first. A prompt should be safe from the moment the user hands it over, even if the agent can't do anything with it yet. A mail slot in a door works this way: a letter that drops through the slot has been delivered whether or not anyone is home, and someone reads it later. For the agent, _accepting_ a prompt becomes its own step, a write to the SQLite file, and _running_ it becomes a second step that starts when the agent is free. OpenCode's AGENTS.md states the rule as "Keep durable prompt admission separate from model execution" ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208)).
 
 ### Why this belongs to the session
 
-Anthropic's article on [Managed Agents](https://www.anthropic.com/research/managed-agents), which [Part 2](/posts/the-roadmap/) introduced, describes the session as "the append-only log of everything that happened", kept apart from the harness, the loop that calls the model. Because the log sits outside the harness, the article says, "nothing in the harness needs to survive a crash": a new one can be started, read the log and "resume from the last event". [Part 8](/posts/the-session-as-an-event-log/) built that log for what the agent did. This Part applies the same thought to what the user asked.
+Anthropic's article on [Managed Agents](https://www.anthropic.com/research/managed-agents), which [Part 2](/posts/the-roadmap/) introduced, describes the session as "the append-only log of everything that happened", kept apart from the harness, the loop that calls the model. Because the log sits outside the harness, the article says, "nothing in the harness needs to survive a crash": a new one can be started, read the log and "resume from the last event". [Part 8](/posts/the-session-as-an-event-log/) built that log for what the agent did. This Part does the same for what the user asked.
 
-The other article cited in [Part 1](/posts/the-loop/), [Building effective agents](https://www.anthropic.com/research/building-effective-agents), notes that agents "can pause for human feedback at checkpoints or when encountering blockers". Human input arrives at the human's pace and not at the agent's. A user may type while a tool runs, think of a correction a minute after pressing Enter, or send three requests in a row. For an agent that listens only between turns, each of those is a chance to lose the line, which an inbox is there to prevent.
+The other article cited in [Part 1](/posts/the-loop/), [Building effective agents](https://www.anthropic.com/research/building-effective-agents), notes that agents "can pause for human feedback at checkpoints or when encountering blockers". People type when it suits them, though, not when the agent is ready. A user may type while a tool runs, think of a correction a minute after pressing Enter, or send three requests in a row. An agent that listens only between turns can lose the line each time, and the inbox is there to stop that.
 
 ### What a restart finds today
 
-This table lists the places a prompt can be when the process dies, and what the next run finds:
+When the process dies, a prompt can be in one of three places, and each decides what the next run finds:
 
 | The prompt is...                                | It lives in...              | The next run...                                                   |
 | ----------------------------------------------- | --------------------------- | ----------------------------------------------------------------- |
@@ -41,21 +41,21 @@ This table lists the places a prompt can be when the process dies, and what the 
 | read by the program, not yet appended           | the process's memory        | never sees it                                                     |
 | appended as a `prompt` event, turn not finished | the file                    | finishes the turn ([Part 8](/posts/the-session-as-an-event-log/)) |
 
-The first two rows are the ones this Part changes. The second row is a short gap: between the moment the program has the text in memory and the moment the `prompt` event is in the file, one insert wide, but it is there. After this Part, the first two rows end up in the same place as the third: in the file, where a restart can find them.
+This Part changes the first two rows. The second one is a short window, one insert wide, between the program reading the text into memory and the `prompt` event reaching the file, but a kill can still land in it. After this Part, prompts in both rows end up where the third row's are: in the file, where a restart can find them.
 
-The agent changes in four places. A new table holds the prompts that wait. The session gets methods to put a prompt into it and take one out. The terminal learns to share the keyboard between two readers. And the REPL, the read-eval-print loop that reads a line, runs a turn on it, prints the output and asks again, splits into a reader that accepts prompts and a worker that runs them.
+The agent changes in four places. A new table holds the prompts that wait, and the session gets methods to put a prompt into it and take one out. The terminal learns to share the keyboard between two readers. The REPL, the read-eval-print loop that reads a line, runs a turn on it, prints the output and asks again, splits into a reader that accepts prompts and a worker that runs them.
 
 ## The inbox
 
 ### Four words
 
-Four terms are used from here on. The _inbox_ holds the prompts a session has accepted and not yet run, oldest first. To _admit_ a prompt is to put it into the inbox. To _deliver_ a prompt is to move the oldest one out of the inbox and into the event log as a `prompt` event, which starts a turn. A _wake_ is a signal that tells the agent to look at the inbox. In this design a prompt is in exactly one of two places, the inbox or the event log, and never in both.
+The _inbox_ holds the prompts a session has accepted and not yet run, oldest first. To _admit_ a prompt is to put it into the inbox. To _deliver_ a prompt is to move the oldest one out of the inbox and into the event log as a `prompt` event, which starts a turn. A _wake_ is a signal that tells the agent to look at the inbox. In this design a prompt is in exactly one of two places, the inbox or the event log, and never in both.
 
 ### Six decisions in the design
 
 ### 1. A prompt is in the inbox or in the log, and the log keeps its meaning
 
-The event log from [Part 8](/posts/the-session-as-an-event-log/) records facts that happened: the user said this, the model answered that. A prompt that waits has not been answered by anyone yet, so it is not that kind of fact. The inbox is a second table with one row per waiting prompt, and a row is deleted when its prompt is delivered. The table is a to-do list, and the log is the record of what was done.
+The event log from [Part 8](/posts/the-session-as-an-event-log/) records facts that happened: the user said this, the model answered that. A waiting prompt hasn't been answered by anyone yet, so it isn't that kind of fact. It goes in a second table instead, one row per waiting prompt, and the row is deleted when its prompt is delivered. The inbox works like a to-do list, and the log records what was done.
 
 The other way to do this is to add two events to the log, "prompt queued" and "prompt delivered", and work out the waiting prompts by folding the log. That would need no second table. It would also make accepting a prompt a write to the log, whose event numbers are counted by one writer ([Part 8](/posts/the-session-as-an-event-log/)), and it would put prompts in the log that the model has not yet seen. OpenCode keeps a separate table for the same reason. Its AGENTS.md says: "`Session.prompt(...)` publishes `session.inbox.enqueued`, whose projection inserts one durable `session_inbox` row [...] `session_inbox` stores only unconsumed work" ([AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208)).
 
@@ -67,7 +67,7 @@ With the two statements in one transaction, the prompt is in the inbox or in the
 
 ### 3. The wake is a hint, and the inbox is the truth
 
-When a prompt is admitted, the code that runs prompts has to find out. That is the job of the wake. The wake carries no prompt. It means "look at the inbox", and the prompt itself is in the table. Two consequences follow. Several wakes in a row can be merged into one (OpenCode's word for this is to _coalesce_ them), because the worker reads the inbox until it is empty anyway. And a missed wake delays a prompt at most until the next look, because the worker looks again after every turn, and at startup it looks at everything that was left behind.
+When a prompt is admitted, the wake tells the code that runs prompts to go and look. It carries no prompt, only the message "look at the inbox", because the prompt itself is already in the table. That has two consequences. Several wakes in a row can be merged into one (OpenCode's word for this is to _coalesce_ them), because the worker reads the inbox until it is empty anyway. And a missed wake delays a prompt only until the next look, because the worker looks again after every turn, and at startup it picks up everything earlier runs left behind.
 
 OpenCode uses the same word and the same idea. Its execution service has a method `wake` with the comment "Registers newly recorded work. Repeated wakeups may coalesce" ([session/execution.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution.ts#L24-L25)). In the agent here the wake is a small Effect `Queue` that holds at most one item.
 
@@ -79,17 +79,17 @@ The worker delivers a prompt only after the previous turn has ended. A prompt ty
 
 The REPL splits in two halves that do not wait for each other. The _reader_ asks for a line, admits it, rings the wake and asks again. It never waits for the model. The _worker_ first finishes an interrupted turn, the way [Part 8](/posts/the-session-as-an-event-log/) does, and then repeats: deliver the oldest prompt, run its turn, and when the inbox is empty wait for a wake.
 
-Each half runs as a _fiber_, which is Effect's lightweight thread: an independent task that the runtime pauses while it waits for something and resumes later. The program ends when the input has ended and the inbox is empty, so the worker finishes the queued prompts first. One detail matters for that rule. The worker reads the flag "input has ended" before it delivers. If it read the flag after, a prompt admitted just before the end could be missed: the delivery finds the inbox empty, the reader admits the last prompt and ends the input, and the worker sees the flag set and quits without running it.
+Each half runs as a _fiber_, which is Effect's lightweight thread: an independent task that the runtime pauses while it waits for something and resumes later. The program ends when the input has ended and the inbox is empty, so the worker finishes the queued prompts first. For that to hold, the worker has to read the flag "input has ended" before it delivers. If it read the flag after, it could miss a prompt admitted just before the end: the delivery finds the inbox empty, the reader admits the last prompt and ends the input, and the worker sees the flag set and quits without running it.
 
 ### 6. The terminal gives each line to the newest question
 
-Two places in the agent can now ask the user something at the same time: the reader, with `You: `, and a tool that needs approval, with `Allow: ... [y/N]`. The terminal from [Part 8](/posts/the-session-as-an-event-log/) used readline's `question` for both, and two things were observed with that under Bun 1.4.4. When two questions are open, the first line typed goes to the older one, so a `y` meant for the approval would be admitted as a new prompt. And a line that arrives while no question is open is dropped, so when several lines are piped in, only the first one is read.
+Two places in the agent can now ask the user something at the same time: the reader, with `You: `, and a tool that needs approval, with `Allow: ... [y/N]`. The terminal from [Part 8](/posts/the-session-as-an-event-log/) used readline's `question` for both, which under Bun 1.4.4 goes wrong in two ways. When two questions are open, the first line typed goes to the older one, so a `y` meant for the approval would be admitted as a new prompt. And a line that arrives while no question is open is dropped, so when several lines are piped in, only the first one is read.
 
-A small router, `makeLines`, replaces that. It keeps lines that nobody has asked for yet, hands a line to the newest open question (the one printed last is the one the user is answering), and fails all open questions when the input ends. The `Terminal` service keeps the same three methods, so nothing that uses it changes.
+A small router, `makeLines`, takes over from `question`. It keeps lines that nobody has asked for yet, hands a line to the newest open question (the one printed last is the one the user is answering), and fails all open questions when the input ends. The `Terminal` service keeps the same three methods, so nothing that uses it changes.
 
 ### What this leaves for later
 
-A prompt that always kills the process is delivered once and then resumed on every start, so the agent can crash in a loop. The `resume` from [Part 8](/posts/the-session-as-an-event-log/) has the same limit. A line typed while the model is streaming appears after the `You: ` prompt that is already on screen, in the middle of the reply. Steering a running turn is not built. And a session never shrinks, so a long task will eventually outgrow the model's context window, which the roadmap's _Context limits and compaction_ covers.
+A prompt that always kills the process is delivered once and then resumed on every start, so the agent can crash in a loop, as it already could with the `resume` from [Part 8](/posts/the-session-as-an-event-log/). A line typed while the model is streaming appears after the `You: ` prompt that is already on screen, in the middle of the reply. Steering a running turn is not built. And a session never shrinks, so a long task will eventually outgrow the model's context window, which the roadmap's _Context limits and compaction_ covers.
 
 ## Check yourself
 
@@ -162,9 +162,9 @@ Test environment: the transcripts in this section were recorded in the [Part 1](
 
 ### Step 1: The inbox table
 
-[Part 8](/posts/the-session-as-an-event-log/) kept the event table in `src/session-table.ts`. The file is about to hold two tables, so the singular name no longer fits. The file moves to `src/db/schema.ts`.
+[Part 8](/posts/the-session-as-an-event-log/) kept the event table in `src/session-table.ts`. The file is about to hold two tables, so the name no longer fits, and it moves to `src/db/schema.ts`.
 
-The move touches three places. The file changes folder, the import in `src/session.ts` follows it, and the config tells Drizzle Kit where to look. First, in the `my-agent` folder, move the file:
+The move touches three places: the file changes folder, the import in `src/session.ts` follows it, and the config tells Drizzle Kit where to look. First, in the `my-agent` folder, move the file:
 
 ```bash
 mkdir src/db
@@ -594,7 +594,7 @@ test("keeps the inboxes of two sessions apart", async () => {
 1. The first test admits a prompt in one run of the agent and reads it back in two later runs. Each call to `using` closes the file when it returns, so the prompt was read from disk and not from memory.
 2. The second test admits one prompt in session `a` and one in session `b`. Delivering from `b` returns only its own prompt, then `undefined`, and the prompt for `a` is still waiting.
 
-The behavior that matters for the transaction only shows when something goes wrong in the middle of a delivery. The test below goes at the end of the same file and makes it go wrong on purpose. Another writer takes event number 1 after the session has opened. The session still counts from 0, so the insert in `deliver` is refused by the table's primary key:
+The transaction only makes a difference when something fails in the middle of a delivery, so the last test, at the end of the same file, makes it fail on purpose. Another writer takes event number 1 after the session has opened. The session still counts from 0, so the insert in `deliver` is refused by the table's primary key:
 
 ```ts
 test("a delivery that fails leaves the prompt in the inbox", async () => {
@@ -633,7 +633,7 @@ bun test v1.4.4 (38afee6c8)
 Ran 5 tests across 1 file. [131.00ms]
 ```
 
-One way to see what the transaction is for is to take it away. This is a temporary change to `src/session.ts`: replace the whole `const deliver = ...` definition inside `SessionLive` with the version below, and keep the original text at hand to put back. It runs the same three steps one after another, with no transaction around them:
+To see what the transaction is for, take it away. This is a temporary change to `src/session.ts`: replace the whole `const deliver = ...` definition inside `SessionLive` with the version below, and keep the original text at hand to put back. It runs the same three steps one after another, with no transaction around them:
 
 ```ts
       // The same three steps, one after another, with no transaction around them.
@@ -666,7 +666,7 @@ error: expect(received).toEqual(expected)
  1 fail
 ```
 
-The delivery failed, as before, and the prompt was gone from the inbox without being in the log. That is the outcome the transaction rules out. Restoring the real `deliver` brings all five tests back to green.
+The delivery failed as before, but this time the prompt left the inbox and never reached the log. Put the real `deliver` back and all five tests pass again.
 
 <details>
 <summary>Stuck? The finished inbox.test.ts</summary>
@@ -926,7 +926,7 @@ test("an interrupted question does not take the next line", async () => {
 2. `Fiber.interrupt` cancels that question, which runs the cleanup from `next` and removes it from `asking`.
 3. A second question is then opened and a line is pushed. The second question receives it.
 
-Run the file with `bun test test/lines.test.ts`. All five tests pass. The rule the router exists for is that the newest question wins. As a temporary experiment, change `asking.pop()` to `asking.shift()` in `src/lines.ts`, which makes the oldest one win, as readline's own `question` did. The third test then waits for a line that went to the other question, and it ends with a timeout. Change it back afterwards:
+Run the file with `bun test test/lines.test.ts`. All five tests pass. To see the newest-question rule fail, change `asking.pop()` to `asking.shift()` in `src/lines.ts` for a moment, which makes the oldest question win, as readline's own `question` did. The third test then waits for a line that went to the other question, and it ends with a timeout. Change it back afterwards:
 
 ```text
 $ bun test test/lines.test.ts
@@ -938,7 +938,7 @@ test/lines.test.ts:
  1 fail
 ```
 
-> **Watch for this.** Because the reader takes every line as soon as it can, piped input is read ahead. If three prompts are piped in and the first needs an approval, no line is left for it by the time the tool asks. The question then fails because the input has ended, and the tool is declined, exactly as it was in [Part 8](/posts/the-session-as-an-event-log/) when the input ended during a turn. In this agent an approval expects a person at the keyboard.
+> **Watch for this.** Because the reader takes every line as soon as it can, piped input is read ahead. If three prompts are piped in and the first needs an approval, no line is left for it by the time the tool asks. The question then fails because the input has ended, and the tool is declined, as it was in [Part 8](/posts/the-session-as-an-event-log/) when the input ended during a turn. Approvals in this agent assume a person at the keyboard.
 
 <details>
 <summary>Stuck? The finished lines.ts, terminal.ts and lines.test.ts</summary>
@@ -1171,7 +1171,7 @@ export const repl = Effect.gen(function* () {
 8. `guarded(resume)` comes next and finishes a turn that a killed process left open, as in [Part 8](/posts/the-session-as-an-event-log/). The reader is already running, so lines can be typed while that happens.
 9. The worker loop reads `inputEnded` first, then calls `deliver`. If a prompt came out, `guarded(run)` runs its turn and the loop starts again. If nothing came out and the input has ended, the REPL returns. Otherwise the worker waits for the next ring.
 
-The tests need a few changes. Because the reader takes every typed line at once, an answer meant for an approval can no longer be taken from the same list as the prompts. Open `test/fakes.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). It exports `scriptedModel` and `scriptedTerminal`, and the rest of the file (`Step`, `reply`, `callTool`, `fail`) stays as it is. Replace those two functions, with the comments above them, with the versions below. The fake terminal answers questions that start with `Allow` from their own list. An answer can also be a promise, for a line the user types later, and the fake model can hold a step back until a promise settles:
+The tests need a few changes too. The reader takes every typed line at once, so the fake terminal can no longer take approval answers from the same list as the prompts. Open `test/fakes.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). It exports `scriptedModel` and `scriptedTerminal`, and the rest of the file (`Step`, `reply`, `callTool`, `fail`) stays as it is. Replace those two functions, with the comments above them, with the versions below. The fake terminal answers questions that start with `Allow` from their own list. An answer can also be a promise, for a line the user types later, and the fake model can hold a step back until a promise settles:
 
 ```ts
 // A model that follows a script and records the history it was given at each step.
@@ -1725,7 +1725,7 @@ describe("the agent loop", () => {
 
 ### Step 6: Prompts that survive a restart
 
-The restart behavior is already in the REPL from step 5: it counts the inbox, finishes an interrupted turn, and then delivers what is left. This step only adds tests, all in `test/resume.test.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). The tests there write what a dead process leaves behind, an event log and an inbox, and start a new agent on the file. The helper `crashAfter` plays the first process. Find it near the top of the file, and replace it with the version below, which takes the events and, new in this part, the prompts that were still in the inbox:
+The restart behavior is already in the REPL from step 5: it counts the inbox, finishes an interrupted turn, and then delivers what is left. This step only adds tests, all in `test/resume.test.ts`, which exists from [Part 8](/posts/the-session-as-an-event-log/). The tests there write what a dead process leaves behind, an event log and an inbox, and start a new agent on the file. The helper `crashAfter` plays the first process. Find it near the top of the file, and replace it with the version below, which takes the events and, new in this Part, the prompts that were still in the inbox:
 
 ```ts
 // Process one: the events that were written before the crash, and the prompts that were still in the inbox.
@@ -1958,7 +1958,7 @@ This step changes no code. It uses two terminals, both opened in the `my-agent` 
 
 To get the same numbers as below, delete the database files that earlier runs left, with `rm -f my-agent.db*` in `my-agent`, so the log starts empty.
 
-**A real crash with work waiting.** The tests write the file by hand. This run produces it. In terminal 1, three lines go into the agent at once: a story that takes a while to stream, a question that needs a tool, and a question that needs another one. With piped input the typed lines are not echoed, so the transcript shows them after `You:`, as a terminal would. A few seconds into the story, terminal 2 sends `pkill -9 -f 'bun ../src/index.ts'`. Signal 9, SIGKILL, cannot be caught, so the process ends without running any code.
+**A real crash with work waiting.** The tests wrote that file by hand; here a real crash produces it. In terminal 1, three lines go into the agent at once: a story that takes a while to stream, a question that needs a tool, and a question that needs another one. With piped input the typed lines are not echoed, so the transcript shows them after `You:`, as a terminal would. A few seconds into the story, terminal 2 sends `pkill -9 -f 'bun ../src/index.ts'`. Signal 9, SIGKILL, cannot be caught, so the process ends without running any code.
 
 ```text
 $ printf '%s\n' "Write a story of about 300 words about a lighthouse keeper." "List the files in this folder." "What is the second item in notes/todo.txt?" | bun ../src/index.ts
@@ -1973,7 +1973,7 @@ Every hour, Elias climbed the iron stairs, his joints creaking in unison with th
 A sudden gust threatened to snuff the flame. With a sigh that carried the weight of decades, Elias…
 ```
 
-All three prompts were acknowledged before the model wrote its first word, which is the reader working while the worker runs the first turn. After the kill, the log holds the first prompt and nothing else, and the inbox holds the other two:
+All three prompts were acknowledged before the model wrote its first word, because the reader keeps working while the worker runs the first turn. After the kill, the log holds the first prompt and nothing else, and the inbox holds the other two:
 
 ```text
 $ sqlite3 my-agent.db "select seq || ' ' || type from event"
@@ -2021,11 +2021,11 @@ $ sqlite3 my-agent.db "select count(*) from inbox"
 0
 ```
 
-> **Watch for this.** The prompt that was running when the process died is not in the inbox. It was delivered, so it is in the log, and it is `resume` from [Part 8](/posts/the-session-as-an-event-log/) that finishes it. The inbox holds only the prompts that were never delivered. The two mechanisms cover different rows of the table at the start of this Part.
+> **Watch for this.** The prompt that was running when the process died is in the log, since it was delivered, and `resume` from [Part 8](/posts/the-session-as-an-event-log/) finishes it. The inbox holds only the prompts that were never delivered. Between them, the two mechanisms cover different rows of the table at the start of this Part.
 
-> **Watch for this.** The `You: ` prompt stays on screen while a reply streams, because the reader is already asking for the next line. In the transcripts, the reply appears on the same line as that prompt. With a real keyboard, the terminal echoes a line typed during a reply wherever the cursor is, which can be in the middle of the reply text. The router collects lines and does not depend on the screen, so the line is read as typed.
+> **Watch for this.** The `You: ` prompt stays on screen while a reply streams, because the reader is already asking for the next line. In the transcripts, the reply appears on the same line as that prompt. With a real keyboard, the terminal echoes a line typed during a reply wherever the cursor is, which can be in the middle of the reply text. The screen may look jumbled, but the router collects lines without looking at it, so the line is read as typed.
 
-> **Result.** In the runs above, a prompt is in the SQLite file as soon as its line has been read, and it moves into the event log only when the agent is ready for it, in one transaction. The reader does not wait for the model, the worker runs one prompt at a time, and a process killed with prompts waiting leaves them in the inbox for the next run.
+> **Result.** A prompt is in the SQLite file as soon as its line has been read, and it moves into the event log in one transaction, only when the agent is ready for it. The reader never waits for the model, the worker runs one prompt at a time, and a process killed with prompts waiting leaves them in the inbox for the next run.
 
 ### Possible extensions
 
@@ -2037,7 +2037,13 @@ Three small additions fit the design and are not built here:
 
 ### OpenCode does more
 
-Three things are left out on purpose. **Execution claims:** OpenCode writes a claim when a turn starts and releases it when the turn ends, so a claim that is still there on startup means a process died in the middle of a turn. The agent here recognises an unfinished turn from the shape of the log, with `unansweredCalls` from [Part 8](/posts/the-session-as-an-event-log/), which covers one process and one session. **Steering:** a prompt can be delivered at a step boundary inside a running turn, as decision 4 describes. **An attempts budget:** a turn that keeps killing the process would be resumed forever, so OpenCode counts the resumes of each turn and, after `maxAttempts` (10 by default), ends the turn as aborted instead ([session/execution/restart.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L26-L34)). The same file states the guarantee: recovery is at-least-once, and local coordination prevents concurrent drains but not repeated external side effects after a crash ([comment](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L53-L54)).
+I left three OpenCode features out on purpose:
+
+- **Execution claims.** OpenCode writes a claim when a turn starts and releases it when the turn ends, so a claim still there on startup means a process died in the middle of a turn. The agent here recognises an unfinished turn from the shape of the log, with `unansweredCalls` from [Part 8](/posts/the-session-as-an-event-log/), which is enough for one process and one session.
+- **Steering.** A prompt can be delivered at a step boundary inside a running turn, as decision 4 describes.
+- **An attempts budget.** A turn that keeps killing the process would otherwise be resumed forever, so OpenCode counts the resumes of each turn and, after `maxAttempts` (10 by default), ends the turn as aborted ([session/execution/restart.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L26-L34)).
+
+The same file states the guarantee: recovery is at-least-once, and local coordination prevents concurrent drains but not repeated external side effects after a crash ([comment](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L53-L54)).
 
 ### The finished files
 
@@ -3038,10 +3044,10 @@ describe("resuming a session", () => {
 
 ## Sources
 
-The first item is the primary source for this Part. OpenCode's versions are fuller than the one built here: they keep the inbox in a projected table with several kinds of items, wake and drain sessions through a coordinator that runs many of them, and recover with durable claims. A useful exercise is to read `inbox.ts`, `execution.ts` and `restart.ts` and to note, for each of them, what the agent here does without it and what a crash could then do.
+The first item is the primary source for this Part. OpenCode's versions do more than the one built here: they keep the inbox in a projected table with several kinds of items, wake and drain sessions through a coordinator that runs many of them, and recover with durable claims. As an exercise, read `inbox.ts`, `execution.ts` and `restart.ts`, and note for each what the agent here does without it and what a crash could then do.
 
 - OpenCode's [session/inbox.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/inbox.ts#L191-L199), [session/execution.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution.ts#L24-L25) and [session/execution/restart.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/execution/restart.ts#L26-L34)
 - OpenCode's [AGENTS.md](https://github.com/anomalyco/opencode/blob/97be25f046/AGENTS.md#L208-L214) (the Session Core section on admission, delivery and wakeups)
 - Anthropic's [Scaling Managed Agents](https://www.anthropic.com/research/managed-agents) (the session as a log apart from the loop) and [Building effective agents](https://www.anthropic.com/research/building-effective-agents) (human feedback at checkpoints)
 
-This Part is the second of Stage B. The session now accepts work while the process is busy and keeps it across a restart. The other topic of the stage that is still open, listed in [the roadmap](/posts/the-roadmap/) as _Context limits and compaction_, is not covered here, and its Part is not yet scheduled.
+The session now accepts work while the process is busy and keeps it across a restart. Stage B's remaining topic, _Context limits and compaction_ in [the roadmap](/posts/the-roadmap/), doesn't have a Part scheduled yet.

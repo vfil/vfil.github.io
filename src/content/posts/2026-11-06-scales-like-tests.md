@@ -7,11 +7,11 @@ tags: [practice, guitar, habits]
 draft: true
 ---
 
-Scales are to music what unit tests are to code: nobody enjoys them, and everything is easier once they are there.
+Nobody enjoys practising scales, just as nobody enjoys writing unit tests, but in both cases everything gets easier once they're in place.
 
 ![A one-octave C major scale written as tab](../../assets/scale-tab.svg)
 
-I keep a practice log the same way I keep a changelog, and I run it like a test suite every morning:
+I keep a practice log the same way I keep a changelog. Every morning I run the scales like a test suite, five minutes before I play anything fun:
 
 ```sh
 # practice.sh: five minutes, every day, before anything fun
@@ -21,4 +21,4 @@ for key in C G D A E; do
 done
 ```
 
-The trick that finally worked: never skip the boring part, but keep it short enough that skipping it would feel silly.
+The habit stuck once I made the scales short enough that skipping them would feel silly. Now I never skip them.

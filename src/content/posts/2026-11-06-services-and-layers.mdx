@@ -13,7 +13,7 @@ import Quiz from '../../components/Quiz.astro';
 
 ## Foreword
 
-This Part turns the model, the terminal and the tools of the agent from [Part 5](/posts/why-effect/) into services that the loop asks for, instead of things it imports. The loop can then be imported by a test and run against a scripted model: no server, no API key and no keyboard. It is the fourth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
+This Part turns the model, the terminal and the tools of the agent from [Part 5](/posts/why-effect/) into services that the loop asks for, instead of things it imports. A test can then import the loop and run it against a scripted model, without a server, an API key or a keyboard. It is the fifth Part of Stage A (Harness) in [the roadmap](/posts/the-roadmap/).
 
 The code for this Part is available as the [`Part6_services_and_layers` snapshot of vfil/sigma-agent](https://github.com/vfil/sigma-agent/tree/Part6_services_and_layers), the repo where I build this agent in parallel.
 
@@ -28,7 +28,7 @@ The code for this Part is available as the [`Part6_services_and_layers` snapshot
 | The tools | `index.ts` imports the `tools` array                                                                       | Real files and real shell commands  |
 | The loop  | `index.ts` builds `history`, defines `turn` and runs the program at the top level                          | Importing the loop starts the agent |
 
-The first row shows in a small experiment. Importing `provider.ts` with an unknown provider name fails before any code of a test could run:
+A small experiment shows the problem in the first row. Importing `provider.ts` with an unknown provider name fails before a test gets to run any code:
 
 ```text
 $ cd playground && PROVIDER=nope bun -e 'await import("../src/provider"); console.log("imported")'
@@ -47,13 +47,13 @@ Bun v1.4.4 (macOS arm64)
 
 The environment is read when the file loads, so a test cannot pick a different one. The readline interface behaves the same way: importing `terminal.ts` attaches it to standard input, and the process stays tied to the keyboard until input ends.
 
-This Part moves each of those pieces to the edge of the program. The loop asks for a model client, a terminal and a tools list, and `index.ts` is the only file that decides which real ones it gets. A test decides differently.
+This Part moves each of those pieces to the edge of the program. The loop asks for a model client, a terminal and a tools list, and `index.ts` is the only file that decides which real ones it gets. A test can hand it fakes instead.
 
 ## What services and layers add
 
-In [Part 5](/posts/why-effect/), `R` in `Effect<A, E, R>` stayed `never`. It is the list of things an Effect needs from its surroundings before it can run. Effect calls such a thing a **service** and the recipe that builds one a **layer**. Effect 4 defines services with `Context.Service`; the [Services page of the v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/migration/services.md) lists how it replaces the v3 spellings. The snippets in this Part were run on Effect 4.1.0, the version OpenCode pins at the commit its links point to (`97be25f046`).
+In [Part 5](/posts/why-effect/), `R` in `Effect<A, E, R>` stayed `never`. It is the list of things an Effect needs from its surroundings before it can run. Effect calls such a thing a **service** and the recipe that builds one a **layer**. Effect 4 defines services with `Context.Service`; the [Services page of the v3 to v4 migration guide](https://github.com/Effect-TS/effect/blob/main/migration/services.md) lists how it replaces the v3 spellings. The snippets in this Part were run on Effect 4.1.0, the version OpenCode used when this Post was written.
 
-This section covers four ideas. Each snippet was run on its own before it went into this Part. To follow along, the snippets of an idea can be saved in a temporary file in `src`, such as `src/dice.ts`, and deleted afterwards.
+This section covers four ideas. To follow along, save the snippets of an idea in a temporary file in `src`, such as `src/dice.ts`, and delete it afterwards.
 
 ### 1. A service is a key for something the program needs
 
@@ -165,7 +165,7 @@ done
 
 ### 1. Three services, named for what the loop needs
 
-A service is a capability the agent asks for by name instead of importing it, and a layer is the recipe that builds one. The model client is the service that makes one step. The agent has three:
+The agent has three services, each named for what the loop uses it for. The model client, for example, is the service that makes one step:
 
 | Service       | What the loop uses                                                 | Live layer                                             | Test layer                              |
 | ------------- | ------------------------------------------------------------------ | ------------------------------------------------------ | --------------------------------------- |
@@ -200,11 +200,11 @@ repl: Effect<void, never, ModelClient | Terminal | Tools>
 
 `agent.ts` still imports files that contain real implementations, because `model-client.ts` holds both the service and its live layer, and `terminal.ts` does the same. Importing them has no effect now, since nothing runs when a file loads: a live layer does its work only when something builds it. OpenCode puts a service and its layer in one file in the same way ([core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts)).
 
-### 5. A fake is a layer, and what it can and cannot tell you
+### 5. A fake is a layer, and it tests only the harness
 
-`scriptedModel` returns replies from a list and records the history it receives at each step. It stores a copy, `[...history]`, because the loop keeps pushing messages onto the same history array after the call returns, so a stored reference would later show messages the model was never sent. `scriptedTerminal` returns answers from a list and records what the agent printed. The loop's code is the same in a test and in the real program. Only the layers differ.
+`scriptedModel` returns replies from a list and records the history it receives at each step. It stores a copy, `[...history]`, because the loop keeps pushing messages onto the same history array after the call returns, so a stored reference would later show messages the model was never sent. `scriptedTerminal` returns answers from a list and records what the agent printed. The loop runs the same code in a test as in the real program, with different layers.
 
-OpenCode's tests use the same pattern for its model client, with `Layer.mock`, which accepts a partial implementation. In Effect 4.1.0's documentation, a method that was left out fails with an unimplemented defect when it is used ([core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)). The agent's services have one or two methods each, so its fakes implement all of them:
+OpenCode's tests fake its model client the same way, with `Layer.mock`, which accepts a partial implementation ([core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)). Effect 4.1.0 documents that a method left out of the mock fails with an unimplemented defect when something calls it. The agent's services have one or two methods each, so its fakes implement all of them:
 
 ```ts
 // The agent (test/fakes.ts, abridged)
@@ -235,7 +235,7 @@ const client = Layer.mock(LLMClient.Service)({
 })
 ```
 
-A scripted model checks the harness: that tool results go back in the right order, that a refusal reaches the model, that a failed turn leaves the history valid. It does not check the model. Whether a model picks the right tool or writes valid arguments is still decided by running it; [Part 1](/posts/the-loop/) used a run against Claude to tell a weak local model from a harness bug.
+A scripted model checks the harness: that tool results go back in the right order, that a refusal reaches the model, that a failed turn leaves the history valid. It says nothing about the model: whether a model picks the right tool or writes valid arguments is still decided by running it; [Part 1](/posts/the-loop/) used a run against Claude to tell a weak local model from a harness bug.
 
 ## Check yourself
 
@@ -303,9 +303,9 @@ Work in the `my-agent` folder from Part 5, with its eight files in `src`. This P
 | `src/index.ts`                        | Builds the live layers and runs `repl`                            |
 | `test/fakes.ts`, `test/agent.test.ts` | New. The scripted model, the scripted terminal and three tests    |
 
-`messages.ts` and `protocols.ts` do not change. Each step ends with code that type-checks and runs, so the work can stop after any of them.
+`messages.ts` and `protocols.ts` do not change. Each step ends with code that type-checks and runs, so you can stop after any of them.
 
-Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 5 November 2026, and repeated on 6 November 2026 (see Measured at the end). The model's wording will differ.
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.14, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, on 5 November 2026. The model's wording will differ.
 
 ### Step 1: Move the loop into `agent.ts`
 
@@ -366,7 +366,7 @@ export const repl = (history: Message[]) =>
   }).pipe(Effect.catchTag("InputClosed", () => Effect.void))
 ```
 
-`repl` is the read-eval-print loop: it reads a line, runs a turn on it, prints what the turn produced and repeats until input ends. Replace the contents of `src/index.ts` with:
+Replace the contents of `src/index.ts` with:
 
 ```ts
 import { Effect } from "effect"
@@ -1327,7 +1327,7 @@ await Effect.runPromise(
 
 ### Step 5: The fakes and three tests
 
-The runner is Bun's own, so nothing else is installed.
+The tests use Bun's own runner, so there is nothing to install.
 
 Create `test/fakes.ts`. A `Step` is what the scripted model does next: a reply, or a `ProviderError`. `reply` and `callTool` build replies without the surrounding message. `scriptedModel` returns a layer and the list of histories it was sent (each one a copy, `[...history]`, because the loop keeps adding to the original), and `scriptedTerminal` returns a layer and everything the agent printed. When the answers run out, `ask` fails with `InputClosed`, which ends `repl` the same way end of input does:
 
@@ -1542,7 +1542,7 @@ error: expect(received).toMatchObject(expected)
 Ran 3 tests across 1 file. [63.00ms]
 ```
 
-Change it back. The test fails for the reason it is meant to, so it does check the refusal.
+Change it back. The test failed for the reason it should, which shows that it really checks the refusal.
 
 **Run it for real.** The live layers replace the fakes. On Ollama, with a confirmed write:
 
@@ -1607,7 +1607,7 @@ You: ^D
 
 > **Watch for this.** A scripted fake keeps its script and its recordings in variables created by the function that builds it. Build a new `scriptedModel` and a new `scriptedTerminal` for each test, as `run` does. Sharing one between tests carries the script position and the recorded requests from one test into the next.
 
-> **Result.** The loop imports no real model, terminal or tools, and its type lists what it needs. The program provides live layers and a test provides scripted ones, so the whole loop, with its tool calls, a refusal and a failed turn, runs without a server in the three tests above, which took between 47 and 63 ms in five runs.
+> **Result.** The loop imports no real model, terminal or tools, and its type lists what it needs. The program provides the live layers and a test provides scripted ones, so the three tests above run the whole loop, including tool calls, a refusal and a failed turn, without a server and in well under a tenth of a second.
 
 ### The finished files
 
@@ -2253,25 +2253,10 @@ describe("the agent loop", () => {
 
 ## Sources
 
-The first item is the primary source for this Part. A useful exercise is to find the three services the tool layer asks for, and the services `session-compact.test.ts` replaces with `Layer.mock`. For each, the exercise is to write down what the agent in this Part does instead, and what it would need before it could do the same (a layer that needs another layer is the first case). _Streaming_ (Part 7) is planned to change what the model client returns, from one reply to a stream of events, and the scripted model would change with it.
+The first item is the primary source for this Part. As an exercise, find the three services the tool layer asks for and the services `session-compact.test.ts` replaces with `Layer.mock`. For each one, write down what the agent in this Part does instead and what it would need to do the same (the first case is a layer that needs another layer). [_Streaming_ (Part 7)](/posts/streaming/) changes what the model client returns, from one reply to a stream of events, and the scripted model changes with it.
 
 - OpenCode's [core/src/tool.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/tool.ts) and [core/test/session-compact.test.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/test/session-compact.test.ts)
 - OpenCode's [ai/src/route/client.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/ai/src/route/client.ts) (the `LLMClient` service)
 - The Effect v3 to v4 migration guide: [Services](https://github.com/Effect-TS/effect/blob/main/migration/services.md)
 
-Measured: the steps above were run on 6 November 2026 in the [Part 1](/posts/the-loop/) test environment (Ollama 0.40.14, llama.cpp b9830) with Effect 4.1.0, Bun 1.4.4 and TypeScript 7.0.2. Steps 1 to 4 were applied to Part 5's finished files and every state was type-checked. Five runs of the three tests took 47 to 63 ms, and the first run after the files were written took 102 ms. The Ollama and llama.cpp runs used piped input with pauses between prompts, and llama.cpp ran on a second port with `--reasoning off` selected with `BASE_URL`.
-
-Checked:
-
-- the `Part6_services_and_layers` tag on the remote (commit `93fc2e7`): its `src` and `test` files equal the finished files above apart from trailing commas and the position of one import in `agent.ts`
-- Steps 1 to 4 applied in order to Part 5's finished files, with the edits worded as in the steps: every state type-checks, and the files after steps 2, 3 and 4 equal the "Stuck?" files
-- the finished files type-check on Effect 4.1.0, and the three tests pass; the compiler errors for the `play` that still needs `Dice`, for `probe.ts` and for the missing `TerminalLive` are the ones shown, and the test with `y` in place of `n` fails with the message shown (durations differ, and Bun prints the full path in the `at` line)
-- every snippet in "What services and layers add" run on its own, with the `TS2345` message, the second number always 8, and the `open`, `rows for select 1`, `close`, `done` order
-- the `PROVIDER=nope` import fails on Part 5's `provider.ts` as shown (the stack trace there shows the full path) and succeeds on Part 6's; `index.ts` prints the message and exits with code 1, and so does `PROVIDER=claude` without `ANTHROPIC_API_KEY`
-- the "Start from what you cannot test" table against Part 5's finished files
-- the Ollama and llama.cpp runs repeated with paced input: the tool calls, the confirmation prompt, the written file, the declined command and the `ECONNREFUSED` line printed as shown, and the model's wording differed
-- in Effect 4.1.0's source, `Layer.mock` documents that a missing member fails with an unimplemented defect when it is used, and the Services page of the migration guide describes `Context.Service`
-- at OpenCode commit `97be25f046`: the Effect 4.1.0 pin in the catalog of its `package.json`, the `Service` and `layer` in `core/src/tool.ts` with the three `yield*` lines, the `Layer.mock(LLMClient.Service)` block in `core/test/session-compact.test.ts`, and the `LLMClient` service in `ai/src/route/client.ts`
-- the Part numbers and titles against the Series file, and the Stage A count against the Forewords of Parts 3 to 5
-
-Parts 2 to 4 link OpenCode at `863ea41364`, where the first lines of the tool layer do not include `Permission.Service`, so this Part links the newer commit that its description matches.
+The OpenCode links in this Part show its code as it was when this Post was written, which is newer than the code Parts 2 to 4 link to: back then the first lines of the tool layer did not include `Permission.Service`.
