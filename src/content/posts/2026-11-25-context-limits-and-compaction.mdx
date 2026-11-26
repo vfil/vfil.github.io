@@ -1,0 +1,3197 @@
+---
+title: 'Context limits and compaction'
+description: 'Every step sends the whole history to the model, and the history only grows. A size check before each step lets the model summarize the session when it nears the context window, and the summary goes into the event log as one more event.'
+pubDate: 2026-11-25
+category: agentic-ai
+tags: [agents, effect, typescript, sqlite, drizzle, ollama, llama-cpp]
+series: building-an-agent-from-scratch
+part: 10
+snapshot: Part10_context_limit_compaction
+---
+
+import Quiz from '../../components/Quiz.astro';
+
+## Foreword
+
+Every step sends the whole history to the model, and the history only grows. This Part adds a size check before each step. When the next request would come close to the model's limit, the model writes a summary, the agent appends it to the log, and the next step starts from it. This is the third and last Part of Stage B (Session) in [the roadmap](/posts/the-roadmap/).
+
+The code for this Part is available in the repo [https://github.com/vfil/sigma-agent/tree/Part10_context_limit_compaction](https://github.com/vfil/sigma-agent/tree/Part10_context_limit_compaction).
+
+## A session that outgrows the model
+
+Since [Part 8](/posts/the-session-as-an-event-log/), the agent rebuilds the history from the event log before every step and sends all of it. Every prompt, answer and tool result stays in that history for the rest of the session, so a task that reads ten files sends all ten with every later step.
+
+A model can only take in so much at once. That limit is its _context window_: the most tokens it accepts for one step, request and reply together. A _token_ is the unit a model reads text in, usually a word or part of a word. [Part 1](/posts/the-loop/) started both local servers with a 32k window (32,768 tokens). Claude models have much larger windows, so a session reaches the limit later, but a long enough session still reaches it.
+
+### What providers do with a request that is too long
+
+Providers react differently to a request that is too long. The two requests below are plain HTTP calls, with no agent involved. Each sends one user message: a secret word on the first line, a few thousand lines of filler, and a question about the word at the end. The first request goes to a second Ollama server, started with `OLLAMA_HOST=127.0.0.1:11435 OLLAMA_CONTEXT_LENGTH=4096 ollama serve`, and its message is more than twice the configured length:
+
+```text
+$ curl -s http://127.0.0.1:11435/v1/chat/completions -H 'content-type: application/json' -d @over-4k.json
+{"choices":[{"index":0,"message":{"role":"assistant","content":"PELICAN", ...},"finish_reason":"stop"}],
+ "usage":{"prompt_tokens":8724,"completion_tokens":758,"total_tokens":9482}, ...}
+```
+
+Ollama answers with status 200 and gives no sign that the request was longer than its configured context. With the MLX runner that Ollama 0.40.18 uses for this model on Apple silicon, the model read the whole message and found the word. Other runners and versions may behave differently, for example by dropping part of the prompt, and in neither case does the response tell the agent that the request was too long.
+
+The second request goes to the llama.cpp server from [Part 1](/posts/the-loop/), which runs with `-c 32768`. Its message is 326,982 characters long:
+
+```text
+$ curl -s http://127.0.0.1:9931/v1/chat/completions -H 'content-type: application/json' -d @over-32k.json
+{"error":{"code":400,"message":"request (90926 tokens) exceeds the available context size (32768 tokens),
+ try increasing it","type":"exceed_context_size_error","n_prompt_tokens":90926,"n_ctx":32768}}
+```
+
+llama.cpp refuses the request with status 400 and says how far over the limit it was. Anthropic's API also refuses a request that does not fit. The agent from [Part 9](/posts/inbox-vs-execution/) treats a refusal as a `ProviderError`: the turn fails, the next prompt sends the same long history, and that turn fails too, so the session stays stuck.
+
+An error is therefore a poor signal for a history that has grown too long. Ollama never sends one, and where an error does come, the turn has already failed. The agent in this Part checks the size itself, before it sends.
+
+### Summarizing instead of dropping messages
+
+Dropping the oldest messages would make the history fit, but it would also drop the user's original request, the files that matter and the decisions made so far. OpenCode, Claude Code and other coding agents take a different route: the model writes a summary of the conversation, and the work continues from it. This is called _compaction_. OpenCode does it in [session/compaction.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts).
+
+With the event log from [Part 8](/posts/the-session-as-an-event-log/), a summary only changes what the next step sees. The agent appends the summary as one more event, and every event before it stays in the file, so nothing is lost when the summary leaves something out.
+
+## Compaction
+
+### Three terms
+
+The _context window_ is the most tokens a model takes in for one step, the reply included. _Compaction_ replaces everything before a point in the history with a summary and records it as a session event; the event log keeps every original event. A _summary_ is the text a compaction writes, which the next step reads in place of the events it covers.
+
+### Six decisions in the design
+
+### 1. The agent estimates the size instead of measuring it
+
+The exact token count of a request depends on the model's tokenizer, which the agent does not have. A common rule of thumb is four characters per token. The agent turns the history and the tool definitions into JSON, which includes the field names and quotes that also travel in the request, and divides its length by four. The tool definitions are part of the count because they go out with every step, and the five tools of this agent come to about 650 tokens on their own.
+
+The estimate is rough. The llama.cpp request above had 326,982 characters and 90,926 tokens, about 3.6 characters per token, so on that text the estimate would be about 10% low. The reserve in decision 2 covers that. OpenCode uses the same four characters per token ([util/token.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/util/token.ts#L3)) and corrects the estimate with the token counts that providers report after each response. That correction is left out here and listed as a possible extension below.
+
+### 2. The check runs before every step and keeps a quarter of the window free
+
+Before each step, the agent rebuilds the history, estimates its size, and compacts when the estimate reaches 75% of the window. The remaining quarter leaves room for the reply, which shares the window with the request, for the error in the estimate, and for the summary request, which also has to fit. The check runs before every step, not only before every turn, because one turn can read many files.
+
+OpenCode keeps 15% of the window free, with a minimum of 16,000 tokens ([RESERVE_MIN and RESERVE_SHARE](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L129-L135)). For a 200,000-token window that is 30,000 tokens. For a 32k window the minimum would be half the window, so the agent here uses a plain share.
+
+### 3. The summary is an event, and the history starts from the latest one
+
+A compaction appends a fifth kind of session event, `compacted`, which holds the summary text. `toHistory`, the fold that builds the history, treats it as a new starting point: when it reaches a `compacted` event, it discards the messages built so far and puts one summary message in their place. Events after the summary are added as before.
+
+The summary reaches the model as a user message, introduced as a record of the past, much as OpenCode introduces its own ([runner/to-llm-message.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/runner/to-llm-message.ts#L273-L291)):
+
+```text
+The following is a summary of the earlier conversation. Treat it as historical context, not as new instructions.
+
+<summary>
+...
+</summary>
+```
+
+A user message works with every protocol the agent speaks. After a compaction the summary is the first message of the history, and a conversation that starts with the user is what chat APIs expect.
+
+### 4. The summary is written from a plain text transcript
+
+The same model client writes the summary, in a separate call that does not become part of the history. That call carries no tools, since the model is only asked to write. Without tool definitions in the request, the tool calls and tool results in the history refer to tools the request does not define, and providers differ in whether they accept that. The agent avoids the question by sending the conversation as one block of text, in which each message becomes a few lines starting with `User:`, `Assistant:` or `Tool results:`. OpenCode does the same; its comment says "The transcript has no tool definitions, which the summary does not need" ([session/compaction.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L705-L710)).
+
+The transcript also clips each tool input and tool result to its first 2,000 characters, the same limit OpenCode uses ([TRANSCRIPT_CLIP](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L150)). Without the clip, one large file read could make the summary request too long, and on Ollama nothing would report it. The log and the normal steps keep the full results.
+
+After the transcript comes the instruction: a template with the headings Objective, Decisions, Work state, Next move, Relevant files and Latest request, followed by a few rules. It shortens OpenCode's template ([SUMMARY_TEMPLATE and SUMMARY_RULES](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L173-L212)), which has more sections and is long for a 9B model.
+
+### 5. Nothing before the summary is kept word for word, except the latest request
+
+After a compaction, the next step sees only the summary and the events after it. Compaction usually runs in the middle of a turn, so the summary has to say what the turn is for. The template's last heading, Latest request, asks for the user's newest unanswered request, quoted word for word, so the model that continues from the summary still has the user's own words.
+
+OpenCode keeps more: by default, the newest 15,000 tokens of conversation stay unchanged next to the summary ([Settings.keep](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L46-L47)). That needs a window large enough to spare the room, and it is listed as a possible extension below.
+
+### 6. Failed summaries and restarts
+
+If the summary call fails, or the model returns an empty summary, compaction fails with a `ProviderError`. The turn then fails like any turn with a provider error since [Part 8](/posts/the-session-as-an-event-log/), and the agent appends no `compacted` event, so the next attempt starts from the old history.
+
+Three more rules cover how a summary meets failed turns and restarts:
+
+- Since [Part 8](/posts/the-session-as-an-event-log/), `turn-failed` cuts the history back to the prompt of the failed turn. If the turn compacted partway through, that prompt is now inside the summary, so the fold cuts back to the summary instead. The summary stays, because the tool calls it describes really ran.
+- After that cut, the history ends with the summary, which is a user message, and `unansweredCalls` from [Part 8](/posts/the-session-as-an-event-log/) reads such a history as a turn the model still has to answer. `resume` therefore checks the last event first: a turn whose last event is `turn-failed` is over and is not resumed.
+- If the latest event is `compacted`, the agent sends the step without compacting again. This happens after a restart that finds a compaction as the last event, and a second summary of nothing but a summary would not shorten the history. OpenCode has the same rule: "A compaction just completed; let the runner rebuild the request from it first" ([session/compaction.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L437-L446)).
+
+### What this leaves for later
+
+A summary loses detail, and the model cannot get it back on its own, although the log still has it. A single tool result larger than the window still makes the next step too long, because compaction only shortens what came before it. The estimate does not know the real tokenizer. The summary is also written while the user waits, which takes as long as a normal step; OpenCode avoids that wait by writing a summary in the background before it is needed.
+
+## Check yourself
+
+<Quiz
+  question="What does Ollama return for a request that is longer than its context?"
+  options={["An error with status 400", "A shortened reply with a warning", "Status 200, with no error", "An empty response"]}
+  correct={2}
+  right="Right. Ollama answers normally, so the agent gets no signal that the request was too long."
+  wrong="Ollama answers with status 200 and no error. llama.cpp is the one that answers 400."
+/>
+
+<Quiz
+  question="When does the agent compact the history?"
+  options={["After every turn", "Before a step, when the estimate reaches 75% of the window", "When the provider returns an error", "When the user asks for it"]}
+  correct={1}
+  right="Right. The check runs before every step and keeps a quarter of the window free. See decision 2."
+  wrong="The agent checks the size itself before every step, and compacts at 75% of the window. See decision 2."
+/>
+
+<Quiz
+  question="How does the agent estimate the size of a request?"
+  options={["It asks the provider to count the tokens", "It counts the words in the last message", "It runs the model's tokenizer", "About four characters per token, over the history and tools as JSON"]}
+  correct={3}
+  right="Right. The agent turns the history and the tool definitions into JSON and divides the length by four. See decision 1."
+  wrong="The agent does not have the model's tokenizer. It divides the length of the history and tools, as JSON, by four. See decision 1."
+/>
+
+<Quiz
+  question="After a compaction, what happens to the events the summary covers?"
+  options={["They stay in the log, and the history starts from the summary", "They are deleted from the log", "They move into the inbox", "They are copied into the summary event"]}
+  correct={0}
+  right="Right. The log only grows. The summary is one more event, and `toHistory` starts from the latest one. See decision 3."
+  wrong="Nothing in the event log is deleted. The summary is appended as a new event, and only the history changes. See decision 3."
+/>
+
+<Quiz
+  question="What happens when the model call that writes the summary fails?"
+  options={["The agent sends the step without a summary", "The turn fails, and nothing is appended as `compacted`", "The agent deletes the oldest events", "The agent retries until a summary arrives"]}
+  correct={1}
+  right="Right. The failure is a `ProviderError`, so the turn fails like any other, and the next attempt starts from the old history. See decision 6."
+  wrong="A failed summary fails the turn with a `ProviderError`, and no `compacted` event is appended. See decision 6."
+/>
+
+## Your turn: compaction
+
+The work happens in the `my-agent` folder from [Part 9](/posts/inbox-vs-execution/), and every path in this Part is relative to that folder. This Part adds one source file and one test file, and changes these files:
+
+| File                                     | Change                                                                                             |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `src/session-event.ts`                   | A fifth event, `compacted`                                                                         |
+| `src/history.ts`, `test/history.test.ts` | `summaryMessage`, and the fold starts from the latest summary; four tests                          |
+| `src/provider.ts`, `src/model-client.ts` | Each route has a `contextWindow`, `CONTEXT_WINDOW` overrides it, and the model client passes it on |
+| `test/fakes.ts`, `test/provider.test.ts` | The scripted model takes a window; two tests for the route's window                                |
+| `src/compaction.ts`                      | New. The estimate, the transcript, the summary prompt and `compactIfDue`                           |
+| `src/agent.ts`                           | `run` compacts before each step, and `resume` leaves a failed turn alone                           |
+| `test/compaction.test.ts`                | New. The estimate, the transcript and compaction in the loop                                       |
+| `test/resume.test.ts`                    | Three tests for a restart after a compaction                                                       |
+
+No new table or migration is needed: a `compacted` event is one more row in the event table, and its data is JSON like every other event. Part 10 adds no dependency either, so `package.json` stays as [Part 9](/posts/inbox-vs-execution/) left it. In the Snapshot the project folder is called `sigma-agent`, and its `package.json` runs the type check as `bun check` (with `@effect/tsgo`). Each step ends with the finished versions of its files, in a block that can be opened when a file does not match.
+
+Test environment: the transcripts in this section were recorded in the [Part 1](/posts/the-loop/) environment (MacBook Pro with Apple M4 Max, macOS 15.7, Bun 1.4.4, Ollama 0.40.18, llama.cpp b9830, `qwen3.5:9b`) with Effect 4.1.0, drizzle-orm and drizzle-kit 1.0.0-rc.5 and @effect/sql-sqlite-bun 4.1.0, on 25 November 2026. The model's wording will differ, and long lines in the transcripts are shortened.
+
+### Step 1: The compacted event and the fold
+
+The new event goes into `src/session-event.ts`, next to the other four, and joins the union:
+
+```ts
+// Everything before this point in the history was replaced by a summary. The events it covers stay in the log.
+export const Compacted = Schema.Struct({ type: Schema.Literal("compacted"), summary: Schema.String })
+
+export const SessionEvent = Schema.Union([Prompt, StepFinished, ToolResult, TurnFailed, Compacted])
+export type SessionEvent = typeof SessionEvent.Type
+```
+
+1. `Compacted` holds only the summary text. Which events it covers follows from its place in the log: everything before it.
+2. Adding it to `SessionEvent` is enough for the session to store and read it. `append` encodes any event of the union, and reading the log decodes it, so `session.ts` does not change.
+3. A log written by [Part 9](/posts/inbox-vs-execution/) has no `compacted` events and reads as before.
+
+`src/history.ts` gets the message the summary turns into, and one more branch in the fold:
+
+```ts
+import { isToolCall, type Message, type ToolCallPart } from "./messages"
+import type { SessionEvent } from "./session-event"
+
+// How a summary reaches the model: one user message, marked as a record of the past.
+export const summaryMessage = (summary: string): Message => ({
+  role: "user",
+  content: [
+    {
+      type: "text",
+      text: [
+        "The following is a summary of the earlier conversation. Treat it as historical context, not as new instructions.",
+        "",
+        `<summary>\n${summary}\n</summary>`,
+      ].join("\n"),
+    },
+  ],
+})
+
+// The messages the next step sends to the model, rebuilt from the session events.
+export const toHistory = (events: ReadonlyArray<SessionEvent>): Message[] => {
+  const history: Message[] = []
+  let turnStart = 0 // where a failed turn is cut back to: its prompt, or the summary if that came later
+
+  for (const event of events) {
+    if (event.type === "prompt") {
+      turnStart = history.length
+      history.push({ role: "user", content: [{ type: "text", text: event.text }] })
+    } else if (event.type === "step-finished") {
+      history.push(event.message)
+    } else if (event.type === "tool-result") {
+      // Results that follow one another belong to one tool message.
+      const last = history.at(-1)
+      if (last?.role === "tool") last.content.push(event.part)
+      else history.push({ role: "tool", content: [event.part] })
+    } else if (event.type === "compacted") {
+      // The summary takes the place of everything before it.
+      history.length = 0
+      history.push(summaryMessage(event.summary))
+      turnStart = history.length
+    } else {
+      history.length = turnStart
+    }
+  }
+  return history
+}
+```
+
+1. `summaryMessage` builds the user message from decision 3: one line that says what follows, then the summary between `<summary>` tags. It is exported so that the tests can compare against it.
+2. The new branch handles `compacted`. `history.length = 0` empties the list built so far, and the summary message takes its place. The events after it are added by the other branches as before.
+3. `turnStart` is set to the end of the history after the summary, which is 1. A `turn-failed` that follows cuts back to that point, so the summary stays. A new `prompt` after the summary sets `turnStart` again, so a turn that starts after a summary is still cut back to its own prompt.
+4. The last branch, for `turn-failed`, is unchanged. Only the comment on `turnStart` says what it now means.
+
+Four tests in `test/history.test.ts` check the new branch. The file imports `summaryMessage` next to `toHistory`, and gets one more helper next to the existing ones:
+
+```ts
+const compacted = (summary: string): SessionEvent => ({ type: "compacted", summary })
+```
+
+```ts
+describe("toHistory after a compaction", () => {
+  test("starts from the latest summary and keeps what came after it", () => {
+    const history = toHistory([prompt("one"), answer("first"), prompt("two"), calls("a"), result("a"), compacted("S1"), answer("second")])
+
+    expect(history).toEqual([summaryMessage("S1"), { role: "assistant", content: [{ type: "text", text: "second" }] }])
+  })
+
+  test("a later summary replaces an earlier one", () => {
+    const history = toHistory([prompt("one"), compacted("S1"), answer("first"), prompt("two"), compacted("S2")])
+
+    expect(history).toEqual([summaryMessage("S2")])
+  })
+
+  test("a turn that fails after a summary is cut back to the summary", () => {
+    const history = toHistory([prompt("go"), calls("a"), result("a"), compacted("S1"), calls("b"), result("b"), failed])
+
+    expect(history).toEqual([summaryMessage("S1")])
+  })
+
+  test("a turn that starts after a summary is cut back to its own prompt", () => {
+    const history = toHistory([prompt("one"), compacted("S1"), answer("first"), prompt("two"), calls("a"), failed])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant"])
+  })
+})
+```
+
+1. The first test has a whole turn before the summary and one answer after it. The history is the summary message and that answer, nothing else.
+2. The second test has two summaries. The later one replaces the earlier one, together with everything between them.
+3. The third test is the case from decision 6: a turn compacts in the middle and then fails. The history is cut back to the summary.
+4. The fourth test starts a new turn after the summary and lets it fail. The cut goes back to that turn's own prompt, so the summary and the answer after it stay.
+
+```text
+$ bun test test/history.test.ts
+bun test v1.4.4 (38afee6c8)
+
+ 10 pass
+ 0 fail
+ 15 expect() calls
+Ran 10 tests across 1 file. [55.00ms]
+```
+
+The line `turnStart = history.length` in the new branch is easy to leave out, and the code still runs without it. With the line removed, `turnStart` keeps the position of the prompt from before the summary, and the third test fails:
+
+```text
+$ bun test test/history.test.ts
+(fail) toHistory after a compaction > a turn that fails after a summary is cut back to the summary [0.19ms]
+
+ 9 pass
+ 1 fail
+```
+
+The failed turn's prompt was at position 0, so the cut went back to an empty history and took the summary with it.
+
+<details>
+<summary>Stuck? The finished session-event.ts, history.ts and history.test.ts</summary>
+
+`src/session-event.ts`
+
+```ts
+import { Schema } from "effect"
+import { Message, ToolResultPart } from "./messages"
+
+// The facts a session records. Nothing here can be worked out from the other events.
+export const Prompt = Schema.Struct({ type: Schema.Literal("prompt"), text: Schema.String })
+
+// One finished model call: the whole assistant message and why the step ended.
+export const StepFinished = Schema.Struct({
+  type: Schema.Literal("step-finished"),
+  message: Message,
+  finish: Schema.Literals(["tool-calls", "stop", "refusal"]),
+})
+
+// One tool call's result. A step with three calls appends three of these, one as soon as each finishes.
+export const ToolResult = Schema.Struct({ type: Schema.Literal("tool-result"), part: ToolResultPart })
+
+// The turn ended in an error. The history leaves the turn out; the log keeps it.
+export const TurnFailed = Schema.Struct({ type: Schema.Literal("turn-failed"), reason: Schema.String })
+
+// Everything before this point in the history was replaced by a summary. The events it covers stay in the log.
+export const Compacted = Schema.Struct({ type: Schema.Literal("compacted"), summary: Schema.String })
+
+export const SessionEvent = Schema.Union([Prompt, StepFinished, ToolResult, TurnFailed, Compacted])
+export type SessionEvent = typeof SessionEvent.Type
+```
+
+`src/history.ts`
+
+```ts
+import { isToolCall, type Message, type ToolCallPart } from "./messages"
+import type { SessionEvent } from "./session-event"
+
+// How a summary reaches the model: one user message, marked as a record of the past.
+export const summaryMessage = (summary: string): Message => ({
+  role: "user",
+  content: [
+    {
+      type: "text",
+      text: [
+        "The following is a summary of the earlier conversation. Treat it as historical context, not as new instructions.",
+        "",
+        `<summary>\n${summary}\n</summary>`,
+      ].join("\n"),
+    },
+  ],
+})
+
+// The messages the next step sends to the model, rebuilt from the session events.
+export const toHistory = (events: ReadonlyArray<SessionEvent>): Message[] => {
+  const history: Message[] = []
+  let turnStart = 0 // where a failed turn is cut back to: its prompt, or the summary if that came later
+
+  for (const event of events) {
+    if (event.type === "prompt") {
+      turnStart = history.length
+      history.push({ role: "user", content: [{ type: "text", text: event.text }] })
+    } else if (event.type === "step-finished") {
+      history.push(event.message)
+    } else if (event.type === "tool-result") {
+      // Results that follow one another belong to one tool message.
+      const last = history.at(-1)
+      if (last?.role === "tool") last.content.push(event.part)
+      else history.push({ role: "tool", content: [event.part] })
+    } else if (event.type === "compacted") {
+      // The summary takes the place of everything before it.
+      history.length = 0
+      history.push(summaryMessage(event.summary))
+      turnStart = history.length
+    } else {
+      history.length = turnStart
+    }
+  }
+  return history
+}
+
+// What a restart finds when the last turn did not finish: the tool calls of the last step that have no result yet.
+// Returns undefined when the turn did finish, and an empty list when the model simply has to answer next.
+export const unansweredCalls = (history: ReadonlyArray<Message>): ToolCallPart[] | undefined => {
+  const last = history.at(-1)
+  if (!last) return undefined
+  if (last.role === "user") return []
+  const assistant = last.role === "tool" ? history.at(-2) : last
+  const calls = assistant?.content.filter(isToolCall) ?? []
+  if (last.role === "assistant" && calls.length === 0) return undefined
+  const answered = last.role === "tool" ? last.content.flatMap((part) => (part.type === "tool-result" ? [part.id] : [])) : []
+  return calls.filter((call) => !answered.includes(call.id))
+}
+```
+
+`test/history.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { summaryMessage, toHistory, unansweredCalls } from "../src/history"
+import type { ToolResultPart } from "../src/messages"
+import type { SessionEvent } from "../src/session-event"
+
+const prompt = (text: string): SessionEvent => ({ type: "prompt", text })
+const answer = (text: string): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: [{ type: "text", text }] },
+  finish: "stop",
+})
+const calls = (...ids: string[]): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: ids.map((id) => ({ type: "tool-call", id, name: "echo", input: {} })) },
+  finish: "tool-calls",
+})
+const result = (id: string): SessionEvent => {
+  const part: ToolResultPart = { type: "tool-result", id, name: "echo", result: { type: "text", value: id } }
+  return { type: "tool-result", part }
+}
+const failed: SessionEvent = { type: "turn-failed", reason: "connection reset" }
+const compacted = (summary: string): SessionEvent => ({ type: "compacted", summary })
+
+describe("toHistory", () => {
+  test("turns events into messages in order", () => {
+    const history = toHistory([prompt("hi"), answer("hello")])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant"])
+  })
+
+  test("puts results that follow one another in one tool message", () => {
+    const history = toHistory([prompt("go"), calls("a", "b"), result("a"), result("b")])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+    expect(history[2]?.content).toHaveLength(2)
+  })
+
+  test("leaves out a failed turn and keeps the turns before it", () => {
+    const history = toHistory([prompt("one"), answer("first"), prompt("two"), calls("a"), failed, prompt("three")])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "user"])
+  })
+})
+
+describe("toHistory after a compaction", () => {
+  test("starts from the latest summary and keeps what came after it", () => {
+    const history = toHistory([prompt("one"), answer("first"), prompt("two"), calls("a"), result("a"), compacted("S1"), answer("second")])
+
+    expect(history).toEqual([summaryMessage("S1"), { role: "assistant", content: [{ type: "text", text: "second" }] }])
+  })
+
+  test("a later summary replaces an earlier one", () => {
+    const history = toHistory([prompt("one"), compacted("S1"), answer("first"), prompt("two"), compacted("S2")])
+
+    expect(history).toEqual([summaryMessage("S2")])
+  })
+
+  test("a turn that fails after a summary is cut back to the summary", () => {
+    const history = toHistory([prompt("go"), calls("a"), result("a"), compacted("S1"), calls("b"), result("b"), failed])
+
+    expect(history).toEqual([summaryMessage("S1")])
+  })
+
+  test("a turn that starts after a summary is cut back to its own prompt", () => {
+    const history = toHistory([prompt("one"), compacted("S1"), answer("first"), prompt("two"), calls("a"), failed])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant"])
+  })
+})
+
+describe("unansweredCalls", () => {
+  test("is undefined when the last turn finished", () => {
+    expect(unansweredCalls(toHistory([prompt("hi"), answer("hello")]))).toBeUndefined()
+    expect(unansweredCalls(toHistory([prompt("hi"), failed]))).toBeUndefined()
+    expect(unansweredCalls([])).toBeUndefined()
+  })
+
+  test("is empty when the model has to answer next", () => {
+    expect(unansweredCalls(toHistory([prompt("hi")]))).toEqual([])
+    expect(unansweredCalls(toHistory([prompt("hi"), calls("a"), result("a")]))).toEqual([])
+  })
+
+  test("lists the calls that have no result", () => {
+    expect(unansweredCalls(toHistory([prompt("go"), calls("a", "b")]))?.map((call) => call.id)).toEqual(["a", "b"])
+    expect(unansweredCalls(toHistory([prompt("go"), calls("a", "b"), result("a")]))?.map((call) => call.id)).toEqual(["b"])
+  })
+})
+```
+
+</details>
+
+### Step 2: The context window
+
+The window belongs to a model on a particular server, so it goes on the route, next to the model name. `src/provider.ts` gives each route a `contextWindow` and reads an override from the environment:
+
+```ts
+// A route binds a protocol to one provider's endpoint and authentication.
+// `contextWindow` is the most tokens the model takes in for one step, the reply included.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string; contextWindow: number }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+// The two local windows match the 32k context the servers were started with in Part 1.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b", contextWindow: 32_768 },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b", contextWindow: 32_768 },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+    contextWindow: 200_000,
+  },
+})
+
+// PROVIDER picks the route. BASE_URL, MODEL and CONTEXT_WINDOW override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  const contextWindow = env.CONTEXT_WINDOW === undefined ? selected.contextWindow : Number(env.CONTEXT_WINDOW)
+  if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+    return Effect.fail(new ConfigError({ reason: `CONTEXT_WINDOW must be a whole number of tokens, not "${env.CONTEXT_WINDOW}"` }))
+  }
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model, contextWindow })
+}
+```
+
+1. `Route` has a new field, `contextWindow`, in tokens.
+2. Both local routes use 32,768, the context the servers were started with in [Part 1](/posts/the-loop/). A server started with a different context needs a matching value in the route or in `CONTEXT_WINDOW`. The Claude route uses 200,000.
+3. `selectRoute` reads `CONTEXT_WINDOW` the way it reads `BASE_URL` and `MODEL`. A value that is not a positive whole number, such as `32k`, fails with a `ConfigError` before the first prompt, like an unknown provider.
+4. The override has a second use: a small window, such as 2,000 tokens, makes compaction happen after a few prompts, which is how Step 6 shows it.
+
+The agent never sees the route, only the `ModelClient` service, so the service passes the window on. In `src/model-client.ts` the service gets one more member, and the live layer fills it in:
+
+```ts
+// What the agent needs from a model: one step, as a stream of events, and how much the model can take in at once.
+// Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Stream.Stream<ModelEvent, ProviderError>
+    readonly contextWindow: number
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools), contextWindow: route.contextWindow })
+  }),
+)
+```
+
+1. `contextWindow` is a plain number next to `chat`. It is part of the service because it describes the model that `chat` talks to.
+2. `ModelClientLive` copies it from the route that `selectRoute` picked.
+
+The compiler now points at the two places in the tests that build these types. The scripted model in `test/fakes.ts` needs a window, and the route in `test/provider.test.ts` needs one too:
+
+```ts
+// A model that follows a script and records the history it was given at each step.
+// `beforeStep` runs when a step starts and holds the stream back until its promise settles.
+// `contextWindow` is large unless a test sets it, so compaction only happens in the tests that ask for it.
+export const scriptedModel = (steps: Step[], beforeStep?: (request: number) => Promise<void>, contextWindow = 1_000_000) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const request = requests.length
+          const next = steps[request - 1] ?? fail("The script has no reply left for this step")
+          const events = Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+          return beforeStep ? Stream.unwrap(Effect.promise(() => beforeStep(request)).pipe(Effect.as(events))) : events
+        }),
+      contextWindow,
+    }),
+  )
+  return { layer, requests }
+}
+```
+
+1. `scriptedModel` takes the window as a third argument. The default, 1,000,000 tokens, is far more than any test history, so the tests from earlier Parts never compact.
+2. In `test/provider.test.ts`, the route in the `step` helper gets `contextWindow: 32_768`. The value does not matter there, since those tests only stream one step.
+
+Two tests at the end of `test/provider.test.ts` check the override. `selectRoute` is imported next to `chat`:
+
+```ts
+describe("the context window", () => {
+  const windowOf = (env: Record<string, string>) =>
+    Effect.runPromise(
+      selectRoute(env).pipe(
+        Effect.map((route) => route.contextWindow),
+        Effect.catchTag("ConfigError", (error) => Effect.succeed(error.message)),
+      ),
+    )
+
+  test("comes from the route unless CONTEXT_WINDOW overrides it", async () => {
+    expect(await windowOf({ PROVIDER: "ollama" })).toBe(32_768)
+    expect(await windowOf({ PROVIDER: "ollama", CONTEXT_WINDOW: "6000" })).toBe(6000)
+  })
+
+  test("refuses a CONTEXT_WINDOW that is not a whole number of tokens", async () => {
+    expect(await windowOf({ CONTEXT_WINDOW: "32k" })).toBe('CONTEXT_WINDOW must be a whole number of tokens, not "32k"')
+  })
+})
+```
+
+```text
+$ bun test test/provider.test.ts
+bun test v1.4.4 (38afee6c8)
+
+ 7 pass
+ 0 fail
+ 12 expect() calls
+Ran 7 tests across 1 file. [65.00ms]
+```
+
+<details>
+<summary>Stuck? The finished provider.ts, model-client.ts, fakes.ts and provider.test.ts</summary>
+
+`src/provider.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol } from "./protocols"
+import { frames } from "./sse"
+import type { Tool } from "./tool"
+
+type Env = Record<string, string | undefined>
+
+// A route binds a protocol to one provider's endpoint and authentication.
+// `contextWindow` is the most tokens the model takes in for one step, the reply included.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string; contextWindow: number }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+// The two local windows match the 32k context the servers were started with in Part 1.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b", contextWindow: 32_768 },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b", contextWindow: 32_768 },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+    contextWindow: 200_000,
+  },
+})
+
+// PROVIDER picks the route. BASE_URL, MODEL and CONTEXT_WINDOW override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  const contextWindow = env.CONTEXT_WINDOW === undefined ? selected.contextWindow : Number(env.CONTEXT_WINDOW)
+  if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+    return Effect.fail(new ConfigError({ reason: `CONTEXT_WINDOW must be a whole number of tokens, not "${env.CONTEXT_WINDOW}"` }))
+  }
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model, contextWindow })
+}
+
+// A stream that ends without a finish event was cut off.
+const requireFinish = (route: Route) => (events: Stream.Stream<ModelEvent, ProviderError>) =>
+  Stream.suspend(() => {
+    let finished = false
+    return events.pipe(
+      Stream.tap((event) =>
+        Effect.sync(() => {
+          if (event.type === "finish") finished = true
+        }),
+      ),
+      Stream.onEnd(
+        Effect.suspend(() =>
+          finished ? Effect.void : Effect.fail(new ProviderError({ reason: `The stream from ${route.baseUrl} ended before the model finished` })),
+        ),
+      ),
+    )
+  })
+
+// One step: one model call, as a stream of events. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.Stream<ModelEvent, ProviderError> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetch(`${route.baseUrl}${route.protocol.path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...route.headers },
+            body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+          }),
+        catch: unreachable,
+      })
+      const body = response.body
+      if (!response.ok || !body) {
+        const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+        return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+      }
+
+      // From here on, the answer is still being written. A failure now happens in the middle of a reply.
+      const bytes = Stream.fromReadableStream({
+        evaluate: () => body,
+        onError: (error) => new ProviderError({ reason: `The stream from ${route.baseUrl} broke off: ${messageOf(error)}` }),
+      })
+      return route.protocol.events(frames(bytes)).pipe(requireFinish(route))
+    }),
+  )
+```
+
+`src/model-client.ts`
+
+```ts
+import { Context, Effect, Layer, type Stream } from "effect"
+import type { ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step, as a stream of events, and how much the model can take in at once.
+// Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Stream.Stream<ModelEvent, ProviderError>
+    readonly contextWindow: number
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools), contextWindow: route.contextWindow })
+  }),
+)
+```
+
+`test/fakes.ts`
+
+```ts
+import { Effect, Layer, Stream } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { ModelEvent } from "../src/events"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import { Terminal } from "../src/terminal"
+
+// What the scripted model streams for one step, in order. A ProviderError makes the stream fail at that point.
+export type Step = Array<ModelEvent | ProviderError>
+
+// A text reply, streamed one word at a time.
+export const reply = (text: string): Step => [
+  ...text.split(/(?<= )/).map((word): ModelEvent => ({ type: "text-delta", text: word })),
+  { type: "finish", reason: "stop" },
+]
+
+export const callTool = (id: string, name: string, input: unknown): Step => [
+  { type: "tool-call", id, name, input },
+  { type: "finish", reason: "tool-calls" },
+]
+
+// A step that fails before sending anything.
+export const fail = (reason: string): Step => [new ProviderError({ reason })]
+
+// A model that follows a script and records the history it was given at each step.
+// `beforeStep` runs when a step starts and holds the stream back until its promise settles.
+// `contextWindow` is large unless a test sets it, so compaction only happens in the tests that ask for it.
+export const scriptedModel = (steps: Step[], beforeStep?: (request: number) => Promise<void>, contextWindow = 1_000_000) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const request = requests.length
+          const next = steps[request - 1] ?? fail("The script has no reply left for this step")
+          const events = Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+          return beforeStep ? Stream.unwrap(Effect.promise(() => beforeStep(request)).pipe(Effect.as(events))) : events
+        }),
+      contextWindow,
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. An answer can be a promise, for a line the user types later.
+// When the answers run out, input ends.
+// Questions that start with "Allow" are answered from `confirmations` instead, so a confirmation reaches the
+// tool that asked even though the reader has already taken every prompt, as the live terminal does.
+// `output` holds the finished lines; `writes` holds every piece passed to `write`, in order.
+export const scriptedTerminal = (answers: Array<string | Promise<string>>, confirmations: string[] = []) => {
+  const output: string[] = []
+  const writes: string[] = []
+  const queue = [...answers]
+  const confirm = [...confirmations]
+  let pending = "" // text written since the last line ended
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(pending + prompt)
+          pending = ""
+          const next = (prompt.startsWith("Allow") ? confirm : queue).shift()
+          if (next === undefined) return Effect.fail(new InputClosed())
+          return typeof next === "string" ? Effect.succeed(next) : Effect.promise(() => next)
+        }),
+      say: (line) =>
+        Effect.sync(() => {
+          output.push(pending + line)
+          pending = ""
+        }),
+      write: (text) =>
+        Effect.sync(() => {
+          writes.push(text)
+          pending += text
+        }),
+    }),
+  )
+  return { layer, output, writes }
+}
+```
+
+`test/provider.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Stream } from "effect"
+import type { ModelEvent } from "../src/events"
+import { openaiChat } from "../src/protocols"
+import { chat, selectRoute, type Route } from "../src/provider"
+
+const sse = (...lines: string[]) => lines.map((line) => `${line}\n\n`).join("")
+
+const chunk = (delta: object, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}`
+
+// Serves one canned answer, runs one step against it, and reports what arrived and how the step ended:
+// the error message, or an empty string when the step finished.
+const step = async (respond: (request: Request) => Response | Promise<Response>, baseUrl?: string) => {
+  const server = Bun.serve({ port: 0, fetch: respond })
+  const route: Route = { protocol: openaiChat, baseUrl: baseUrl ?? `http://127.0.0.1:${server.port}`, headers: {}, model: "test", contextWindow: 32_768 }
+  const events: ModelEvent[] = []
+  try {
+    const failure = await Effect.runPromise(
+      Stream.runForEach(chat(route, [], []), (event) => Effect.sync(() => void events.push(event))).pipe(
+        Effect.as(""),
+        Effect.catchTag("ProviderError", (error) => Effect.succeed(error.message)),
+      ),
+    )
+    return { events, failure }
+  } finally {
+    await server.stop(true)
+  }
+}
+
+describe("one step over HTTP", () => {
+  test("asks for a stream and delivers the events", async () => {
+    let sent: { stream?: boolean } = {}
+    const { events, failure } = await step(async (request) => {
+      sent = (await request.json()) as { stream?: boolean }
+      return new Response(sse(chunk({ content: "Hi" }), chunk({ content: "!" }), chunk({}, "stop"), "data: [DONE]"))
+    })
+
+    expect(failure).toBe("")
+    expect(events).toEqual([
+      { type: "text-delta", text: "Hi" },
+      { type: "text-delta", text: "!" },
+      { type: "finish", reason: "stop" },
+    ])
+    expect(sent.stream).toBe(true)
+  })
+
+  test("fails when the stream ends before the model finishes, after delivering what arrived", async () => {
+    const { events, failure } = await step(() => new Response(sse(chunk({ content: "The answer" }), chunk({ content: " is" }))))
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "The answer" },
+      { type: "text-delta", text: " is" },
+    ])
+    expect(failure).toContain("ended before the model finished")
+  })
+
+  test("fails on a frame that is not JSON", async () => {
+    const { failure } = await step(() => new Response(sse(chunk({ content: "ok" }), "data: {oops")))
+
+    expect(failure).toContain("Could not read the stream")
+  })
+
+  test("reports the server's answer when the status is an error", async () => {
+    const { events, failure } = await step(() => new Response("model not found", { status: 404 }))
+
+    expect(events).toEqual([])
+    expect(failure).toContain("answered 404: model not found")
+  })
+
+  test("reports a server that is not running", async () => {
+    const { failure } = await step(() => new Response(""), "http://127.0.0.1:1")
+
+    expect(failure).toContain("Could not reach")
+  })
+})
+
+describe("the context window", () => {
+  const windowOf = (env: Record<string, string>) =>
+    Effect.runPromise(
+      selectRoute(env).pipe(
+        Effect.map((route) => route.contextWindow),
+        Effect.catchTag("ConfigError", (error) => Effect.succeed(error.message)),
+      ),
+    )
+
+  test("comes from the route unless CONTEXT_WINDOW overrides it", async () => {
+    expect(await windowOf({ PROVIDER: "ollama" })).toBe(32_768)
+    expect(await windowOf({ PROVIDER: "ollama", CONTEXT_WINDOW: "6000" })).toBe(6000)
+  })
+
+  test("refuses a CONTEXT_WINDOW that is not a whole number of tokens", async () => {
+    expect(await windowOf({ CONTEXT_WINDOW: "32k" })).toBe('CONTEXT_WINDOW must be a whole number of tokens, not "32k"')
+  })
+})
+```
+
+</details>
+
+### Step 3: The estimate and the summary
+
+Everything about compaction itself goes into a new file, `src/compaction.ts`. It starts with the estimate and the threshold:
+
+```ts
+import { Effect, Stream } from "effect"
+import { ProviderError, type SessionCorrupt } from "./errors"
+import { toHistory } from "./history"
+import type { Message, Part } from "./messages"
+import { ModelClient } from "./model-client"
+import { Session } from "./session"
+import { Terminal } from "./terminal"
+import type { Tool } from "./tool"
+
+// A rough count of what one step sends: the history and the tool definitions, at about four characters per token.
+// JSON.stringify leaves out each tool's `run` function, which never goes to the model.
+export const estimateTokens = (history: ReadonlyArray<Message>, tools: ReadonlyArray<Tool>) =>
+  Math.ceil(JSON.stringify([history, tools]).length / 4)
+
+// The share of the window kept free for the model's reply, and for the summary when it is written.
+const RESERVE = 0.25
+
+export const isDue = (estimate: number, contextWindow: number) => estimate >= contextWindow * (1 - RESERVE)
+```
+
+1. `estimateTokens` turns the history and the tools into one JSON string and divides its length by four, rounded up. Each tool's `run` is a function, and `JSON.stringify` leaves functions out, so what is counted is the name, the description and the input schema: what the model receives.
+2. `RESERVE` is the share of the window kept free, 25% from decision 2.
+3. `isDue` says whether an estimate has reached the threshold. It is a separate function so the tests can check the boundary.
+
+Next comes the transcript that the summary is written from:
+
+```ts
+// Tool results and tool inputs, such as the content of a file to write, can be long. In the summary request
+// each one keeps its first characters only.
+const CLIP = 2_000
+
+const clip = (text: string) => (text.length <= CLIP ? text : `${text.slice(0, CLIP)}\n[... ${text.length - CLIP} more characters]`)
+
+const partToText = (part: Part) => {
+  if (part.type === "text") return part.text
+  if (part.type === "tool-call") return `[called ${part.name}(${clip(JSON.stringify(part.input))})]`
+  return `[${part.name} ${part.result.type === "error" ? "failed" : "returned"}]\n${clip(part.result.value)}`
+}
+
+// The history as plain text. The summary request carries no tools, and some providers refuse tool calls and
+// results in a request that defines no tools, so the conversation goes out as one text instead.
+export const transcript = (history: ReadonlyArray<Message>) =>
+  history
+    .map((message) => {
+      const who = message.role === "assistant" ? "Assistant" : message.role === "tool" ? "Tool results" : "User"
+      return `${who}:\n${message.content.map(partToText).join("\n")}`
+    })
+    .join("\n\n")
+```
+
+1. `clip` keeps the first 2,000 characters of a text and says how many it left out, so the model knows the text went on.
+2. `partToText` writes one content part as text. Text stays as it is. A tool call becomes a line with the tool's name and its clipped input. A tool result becomes a line that says whether the tool returned or failed, followed by the clipped output.
+3. `transcript` writes each message as a label and its parts, and separates messages with a blank line. A summary from an earlier compaction is a user message, so it appears as the first `User:` entry, and the new summary takes it into account.
+
+Then the instruction, a shortened version of OpenCode's template:
+
+```ts
+// A shorter version of OpenCode's summary template, for a small model.
+export const SUMMARY_PROMPT = `Summarize the conversation above for another agent that will continue the work. That agent will see only your summary, not the conversation.
+
+Use this format, and write "(none)" under a heading that has nothing to say:
+
+## Objective
+- [what the user is trying to accomplish, in one or two sentences]
+
+## Decisions
+- [decisions already made, and why]
+
+## Work state
+- [what is done, what is in progress, what is blocked]
+
+## Next move
+1. [the next actions, in order]
+
+## Relevant files
+- [path]: [why it matters]
+
+## Latest request
+[the user's latest request that is not yet fully answered, quoted word for word]
+
+Rules:
+- Use short, single-line bullets.
+- Keep exact file paths, commands, error messages and identifiers.
+- Do not continue the task and do not call tools. Return only the summary.`
+```
+
+1. The first paragraph tells the model who will read the summary: an agent with no other record of the conversation.
+2. The headings ask for the goal, the decisions, the state of the work and the next actions, which is what an agent needs to continue. Relevant files gives paths, so the next agent can read a file again instead of relying on the summary.
+3. Latest request is decision 5: the user's newest unanswered request, word for word.
+4. The rules keep the summary short and keep exact strings exact, so a summary names the file and quotes the error instead of saying "fixed the error in the config".
+
+The file ends with the summary request and the Effect that runs a compaction:
+
+```ts
+const summaryRequest = (history: ReadonlyArray<Message>): Message[] => [
+  {
+    role: "user",
+    content: [{ type: "text", text: `<conversation>\n${transcript(history)}\n</conversation>\n\n${SUMMARY_PROMPT}` }],
+  },
+]
+
+// Runs before every step. When the next request would come close to the window, the model writes a summary
+// of the history so far, and the summary is appended to the log. The next step then starts from it.
+export const compactIfDue = (tools: Tool[]): Effect.Effect<void, ProviderError | SessionCorrupt, ModelClient | Session | Terminal> =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const session = yield* Session
+    const terminal = yield* Terminal
+
+    const events = yield* session.events
+    // Right after a compaction the history cannot get any shorter, so the step goes out as it is.
+    if (events.at(-1)?.type === "compacted") return
+    const history = toHistory(events)
+    const before = estimateTokens(history, tools)
+    if (!isDue(before, model.contextWindow)) return
+
+    yield* terminal.say(`[compacting: ~${before} tokens]`)
+    const summary = yield* model.chat(summaryRequest(history), []).pipe(
+      Stream.runFold(
+        () => "",
+        (text, event) => (event.type === "text-delta" ? text + event.text : text),
+      ),
+      Effect.map((text) => text.trim()),
+    )
+    if (!summary) return yield* new ProviderError({ reason: "The model returned an empty summary" })
+
+    yield* session.append({ type: "compacted", summary })
+    const after = estimateTokens(toHistory([...events, { type: "compacted", summary }]), tools)
+    yield* terminal.say(`[compacted: ${before} → ${after} tokens]`)
+  })
+```
+
+1. `summaryRequest` builds a history of one user message: the transcript between `<conversation>` tags, then the instruction.
+2. `compactIfDue` reads the log once. If the latest event is already `compacted`, it returns, which is the third rule of decision 6.
+3. It rebuilds the history from those events with `toHistory` and estimates it together with the tools. On almost every step the estimate is below the threshold, and `compactIfDue` returns here.
+4. Otherwise it prints `[compacting: ~N tokens]` and calls the model with the summary request and no tools. `Stream.runFold` collects the text of the reply and ignores every other event, so a tool call the model attempts anyway is dropped. Nothing is printed while the summary streams.
+5. An empty summary fails with a `ProviderError`, as a failed model call already does, and nothing is appended.
+6. A summary that came back is appended as a `compacted` event. The new size is estimated from the same events plus the new one, without reading the log again, and printed as `[compacted: N → M tokens]`.
+7. Its error type is `ProviderError | SessionCorrupt`, the same as `step`, so the code that calls it needs no new error handling.
+
+<details>
+<summary>Stuck? The finished compaction.ts</summary>
+
+`src/compaction.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { ProviderError, type SessionCorrupt } from "./errors"
+import { toHistory } from "./history"
+import type { Message, Part } from "./messages"
+import { ModelClient } from "./model-client"
+import { Session } from "./session"
+import { Terminal } from "./terminal"
+import type { Tool } from "./tool"
+
+// A rough count of what one step sends: the history and the tool definitions, at about four characters per token.
+// JSON.stringify leaves out each tool's `run` function, which never goes to the model.
+export const estimateTokens = (history: ReadonlyArray<Message>, tools: ReadonlyArray<Tool>) =>
+  Math.ceil(JSON.stringify([history, tools]).length / 4)
+
+// The share of the window kept free for the model's reply, and for the summary when it is written.
+const RESERVE = 0.25
+
+export const isDue = (estimate: number, contextWindow: number) => estimate >= contextWindow * (1 - RESERVE)
+
+// Tool results and tool inputs, such as the content of a file to write, can be long. In the summary request
+// each one keeps its first characters only.
+const CLIP = 2_000
+
+const clip = (text: string) => (text.length <= CLIP ? text : `${text.slice(0, CLIP)}\n[... ${text.length - CLIP} more characters]`)
+
+const partToText = (part: Part) => {
+  if (part.type === "text") return part.text
+  if (part.type === "tool-call") return `[called ${part.name}(${clip(JSON.stringify(part.input))})]`
+  return `[${part.name} ${part.result.type === "error" ? "failed" : "returned"}]\n${clip(part.result.value)}`
+}
+
+// The history as plain text. The summary request carries no tools, and some providers refuse tool calls and
+// results in a request that defines no tools, so the conversation goes out as one text instead.
+export const transcript = (history: ReadonlyArray<Message>) =>
+  history
+    .map((message) => {
+      const who = message.role === "assistant" ? "Assistant" : message.role === "tool" ? "Tool results" : "User"
+      return `${who}:\n${message.content.map(partToText).join("\n")}`
+    })
+    .join("\n\n")
+
+// A shorter version of OpenCode's summary template, for a small model.
+export const SUMMARY_PROMPT = `Summarize the conversation above for another agent that will continue the work. That agent will see only your summary, not the conversation.
+
+Use this format, and write "(none)" under a heading that has nothing to say:
+
+## Objective
+- [what the user is trying to accomplish, in one or two sentences]
+
+## Decisions
+- [decisions already made, and why]
+
+## Work state
+- [what is done, what is in progress, what is blocked]
+
+## Next move
+1. [the next actions, in order]
+
+## Relevant files
+- [path]: [why it matters]
+
+## Latest request
+[the user's latest request that is not yet fully answered, quoted word for word]
+
+Rules:
+- Use short, single-line bullets.
+- Keep exact file paths, commands, error messages and identifiers.
+- Do not continue the task and do not call tools. Return only the summary.`
+
+const summaryRequest = (history: ReadonlyArray<Message>): Message[] => [
+  {
+    role: "user",
+    content: [{ type: "text", text: `<conversation>\n${transcript(history)}\n</conversation>\n\n${SUMMARY_PROMPT}` }],
+  },
+]
+
+// Runs before every step. When the next request would come close to the window, the model writes a summary
+// of the history so far, and the summary is appended to the log. The next step then starts from it.
+export const compactIfDue = (tools: Tool[]): Effect.Effect<void, ProviderError | SessionCorrupt, ModelClient | Session | Terminal> =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const session = yield* Session
+    const terminal = yield* Terminal
+
+    const events = yield* session.events
+    // Right after a compaction the history cannot get any shorter, so the step goes out as it is.
+    if (events.at(-1)?.type === "compacted") return
+    const history = toHistory(events)
+    const before = estimateTokens(history, tools)
+    if (!isDue(before, model.contextWindow)) return
+
+    yield* terminal.say(`[compacting: ~${before} tokens]`)
+    const summary = yield* model.chat(summaryRequest(history), []).pipe(
+      Stream.runFold(
+        () => "",
+        (text, event) => (event.type === "text-delta" ? text + event.text : text),
+      ),
+      Effect.map((text) => text.trim()),
+    )
+    if (!summary) return yield* new ProviderError({ reason: "The model returned an empty summary" })
+
+    yield* session.append({ type: "compacted", summary })
+    const after = estimateTokens(toHistory([...events, { type: "compacted", summary }]), tools)
+    yield* terminal.say(`[compacted: ${before} → ${after} tokens]`)
+  })
+```
+
+</details>
+
+### Step 4: Compact before every step
+
+In `src/agent.ts`, `run` calls `compactIfDue` at the top of its loop, before each step. `compactIfDue` is imported from `./compaction`:
+
+```ts
+// Steps until the model stops asking for tools. Each result is appended as soon as its tool finishes.
+// Before each step, the history is compacted if the request would come close to the context window.
+const run = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const tools = yield* Tools
+
+  while (true) {
+    yield* compactIfDue(tools)
+    const { message, finish } = yield* step(tools)
+    if (finish !== "tool-calls") return
+
+    for (const call of message.content.filter(isToolCall)) {
+      yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const part = yield* runTool(call)
+      if (part.result.type === "error") yield* terminal.say(`[error] ${part.result.value}`)
+      yield* session.append({ type: "tool-result", part })
+    }
+  }
+})
+```
+
+1. `yield* compactIfDue(tools)` runs before every `step`, including the first step of a turn, right after the prompt was delivered. A compaction at that point covers the new prompt too, which is why the template asks for the latest request word for word.
+2. `step` does not change. It still reloads the history from the log, so after a compaction it reads the summary and the events after it.
+3. A failed compaction fails `run` with a `ProviderError`, and `guarded` in the REPL records `turn-failed`, as it does for a failed step.
+
+The tests for compaction in the loop go into a new file, `test/compaction.test.ts`. The setup runs one prompt, `read it`, on a session in memory, with a model whose window the test chooses:
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { estimateTokens, isDue, SUMMARY_PROMPT, transcript } from "../src/compaction"
+import { summaryMessage } from "../src/history"
+import type { Message } from "../src/messages"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, fail, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const textOfFirst = (request: Message[] | undefined) => {
+  const part = request?.[0]?.content[0]
+  return part?.type === "text" ? part.text : ""
+}
+
+// Runs one prompt on a session kept in memory, with a model whose window is `contextWindow` tokens.
+const run = async (model: Step[], contextWindow: number) => {
+  const scripted = scriptedModel(model, undefined, contextWindow)
+  const terminal = scriptedTerminal(["read it"])
+  const layers = Layer.mergeAll(scripted.layer, terminal.layer, Layer.succeed(Tools, [echo]), SessionLive({ path: ":memory:", id: "test" }))
+  const events = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      return yield* (yield* Session).events
+    }).pipe(Effect.provide(layers)),
+  )
+  return { events, requests: scripted.requests, output: terminal.output }
+}
+
+// 4,000 characters are about 1,000 tokens, once as the call's input and once as its result.
+const long = "x".repeat(4_000)
+```
+
+1. `echo` returns its input, so a long input makes a long result without touching the disk.
+2. `textOfFirst` takes the text of the first message of a request, which is where the summary request puts everything.
+3. `run` builds the layers like the tests in `agent.test.ts` do, with the window passed to `scriptedModel`.
+4. `long` is 4,000 characters. As the input of a tool call and again as its result, it adds about 2,000 tokens to the history.
+
+The first group checks the pieces of `compaction.ts` on their own:
+
+```ts
+describe("the estimate", () => {
+  test("counts about one token per four characters of history and tools", () => {
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: long }] }]
+
+    expect(estimateTokens(history, [])).toBe(Math.ceil(JSON.stringify([history, []]).length / 4))
+    expect(estimateTokens(history, [echo])).toBeGreaterThan(estimateTokens(history, []))
+  })
+
+  test("is due from three quarters of the window", () => {
+    expect(isDue(749, 1_000)).toBe(false)
+    expect(isDue(750, 1_000)).toBe(true)
+  })
+
+  test("the transcript clips long tool inputs and results", () => {
+    const text = transcript([
+      { role: "assistant", content: [{ type: "tool-call", id: "a", name: "echo", input: { text: long } }] },
+      { role: "tool", content: [{ type: "tool-result", id: "a", name: "echo", result: { type: "text", value: long } }] },
+    ])
+
+    expect(text).toContain("[... 2000 more characters]")
+    expect(text.length).toBeLessThan(5_000)
+  })
+})
+```
+
+1. The estimate is the length of the JSON divided by four, and adding a tool makes it larger.
+2. `isDue` starts at exactly three quarters of the window.
+3. A transcript of a long call and a long result clips both. The result is under 5,000 characters, although the two texts alone are 8,000.
+
+The second group runs the loop:
+
+```ts
+describe("compaction", () => {
+  test("summarizes the history when the next request comes close to the window", async () => {
+    const { events, requests, output } = await run(
+      [callTool("call_1", "echo", { text: long }), reply("The user asked to read it."), reply("Done.")],
+      1_000,
+    )
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "compacted", "step-finished"])
+    // The second request is the summary request: the conversation as text, then the instructions.
+    expect(requests[1]).toHaveLength(1)
+    expect(textOfFirst(requests[1])).toStartWith("<conversation>\nUser:\nread it")
+    expect(textOfFirst(requests[1])).toEndWith(SUMMARY_PROMPT)
+    // The step after it starts from the summary alone.
+    expect(requests[2]).toEqual([summaryMessage("The user asked to read it.")])
+    expect(output.some((line) => /^\[compacting: ~\d+ tokens\]$/.test(line))).toBe(true)
+    expect(output.some((line) => /^\[compacted: \d+ → \d+ tokens\]$/.test(line))).toBe(true)
+  })
+
+  test("leaves a history that fits alone", async () => {
+    const { events, requests } = await run([callTool("call_1", "echo", { text: long }), reply("Done.")], 100_000)
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "step-finished"])
+    expect(requests).toHaveLength(2)
+  })
+
+  test("a summary that fails fails the turn, and nothing is compacted", async () => {
+    const { events, output } = await run([callTool("call_1", "echo", { text: long }), fail("connection reset")], 1_000)
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "turn-failed"])
+    expect(output).toContain("[provider error] connection reset")
+  })
+
+  test("an empty summary fails the turn too", async () => {
+    const { events, output } = await run([callTool("call_1", "echo", { text: long }), reply("  ")], 1_000)
+
+    expect(events.at(-1)).toEqual({ type: "turn-failed", reason: "The model returned an empty summary" })
+    expect(output).toContain("[provider error] The model returned an empty summary")
+  })
+})
+```
+
+1. In the first test the window is 1,000 tokens, so the threshold is 750. Before the first step, the history is the prompt and the tool definitions, well below it. The model calls `echo` with the long text. Before the second step, the history is above the threshold, so the second request is the summary request. The third request, the next step, is the summary message alone.
+2. The test checks the log, the shape of the summary request (one message that starts with the transcript and ends with the instruction), the request after it, and the two lines printed on the terminal.
+3. The second test runs the same turn with a window of 100,000 tokens. Nothing is compacted, and the model gets two requests, as in [Part 9](/posts/inbox-vs-execution/).
+4. The third test lets the summary call fail. The turn fails with the provider's message, and there is no `compacted` event.
+5. The fourth test returns a summary of two spaces. It counts as empty, and the turn fails with "The model returned an empty summary".
+
+```text
+$ bun test test/compaction.test.ts
+bun test v1.4.4 (38afee6c8)
+
+ 7 pass
+ 0 fail
+ 19 expect() calls
+Ran 7 tests across 1 file. [92.00ms]
+```
+
+Step 5 changes `resume` in the same file, so the finished `agent.ts` is at the end of Step 5.
+
+<details>
+<summary>Stuck? The finished compaction.test.ts</summary>
+
+`test/compaction.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { estimateTokens, isDue, SUMMARY_PROMPT, transcript } from "../src/compaction"
+import { summaryMessage } from "../src/history"
+import type { Message } from "../src/messages"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, fail, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const textOfFirst = (request: Message[] | undefined) => {
+  const part = request?.[0]?.content[0]
+  return part?.type === "text" ? part.text : ""
+}
+
+// Runs one prompt on a session kept in memory, with a model whose window is `contextWindow` tokens.
+const run = async (model: Step[], contextWindow: number) => {
+  const scripted = scriptedModel(model, undefined, contextWindow)
+  const terminal = scriptedTerminal(["read it"])
+  const layers = Layer.mergeAll(scripted.layer, terminal.layer, Layer.succeed(Tools, [echo]), SessionLive({ path: ":memory:", id: "test" }))
+  const events = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      return yield* (yield* Session).events
+    }).pipe(Effect.provide(layers)),
+  )
+  return { events, requests: scripted.requests, output: terminal.output }
+}
+
+// 4,000 characters are about 1,000 tokens, once as the call's input and once as its result.
+const long = "x".repeat(4_000)
+
+describe("the estimate", () => {
+  test("counts about one token per four characters of history and tools", () => {
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: long }] }]
+
+    expect(estimateTokens(history, [])).toBe(Math.ceil(JSON.stringify([history, []]).length / 4))
+    expect(estimateTokens(history, [echo])).toBeGreaterThan(estimateTokens(history, []))
+  })
+
+  test("is due from three quarters of the window", () => {
+    expect(isDue(749, 1_000)).toBe(false)
+    expect(isDue(750, 1_000)).toBe(true)
+  })
+
+  test("the transcript clips long tool inputs and results", () => {
+    const text = transcript([
+      { role: "assistant", content: [{ type: "tool-call", id: "a", name: "echo", input: { text: long } }] },
+      { role: "tool", content: [{ type: "tool-result", id: "a", name: "echo", result: { type: "text", value: long } }] },
+    ])
+
+    expect(text).toContain("[... 2000 more characters]")
+    expect(text.length).toBeLessThan(5_000)
+  })
+})
+
+describe("compaction", () => {
+  test("summarizes the history when the next request comes close to the window", async () => {
+    const { events, requests, output } = await run(
+      [callTool("call_1", "echo", { text: long }), reply("The user asked to read it."), reply("Done.")],
+      1_000,
+    )
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "compacted", "step-finished"])
+    // The second request is the summary request: the conversation as text, then the instructions.
+    expect(requests[1]).toHaveLength(1)
+    expect(textOfFirst(requests[1])).toStartWith("<conversation>\nUser:\nread it")
+    expect(textOfFirst(requests[1])).toEndWith(SUMMARY_PROMPT)
+    // The step after it starts from the summary alone.
+    expect(requests[2]).toEqual([summaryMessage("The user asked to read it.")])
+    expect(output.some((line) => /^\[compacting: ~\d+ tokens\]$/.test(line))).toBe(true)
+    expect(output.some((line) => /^\[compacted: \d+ → \d+ tokens\]$/.test(line))).toBe(true)
+  })
+
+  test("leaves a history that fits alone", async () => {
+    const { events, requests } = await run([callTool("call_1", "echo", { text: long }), reply("Done.")], 100_000)
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "step-finished"])
+    expect(requests).toHaveLength(2)
+  })
+
+  test("a summary that fails fails the turn, and nothing is compacted", async () => {
+    const { events, output } = await run([callTool("call_1", "echo", { text: long }), fail("connection reset")], 1_000)
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "turn-failed"])
+    expect(output).toContain("[provider error] connection reset")
+  })
+
+  test("an empty summary fails the turn too", async () => {
+    const { events, output } = await run([callTool("call_1", "echo", { text: long }), reply("  ")], 1_000)
+
+    expect(events.at(-1)).toEqual({ type: "turn-failed", reason: "The model returned an empty summary" })
+    expect(output).toContain("[provider error] The model returned an empty summary")
+  })
+})
+```
+
+</details>
+
+### Step 5: Restarts after a compaction
+
+A process can die at any moment, including just after a compaction, and the restart from [Part 8](/posts/the-session-as-an-event-log/) has to read such a log correctly. `resume` needs one change, the second rule of decision 6. It reads the events instead of the history, looks at the last one, and builds the history itself. `toHistory` is imported next to `unansweredCalls`:
+
+```ts
+// A restart can find a turn that did not finish. Tool calls without a result get an error result instead of
+// running again, since a command that already ran must not run twice. Then the turn continues.
+const resume = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const events = yield* session.events
+  // A failed turn is over. After a compaction its history can end in the summary, which reads like an open turn.
+  if (events.at(-1)?.type === "turn-failed") return
+  const calls = unansweredCalls(toHistory(events))
+  if (calls === undefined) return
+
+  yield* terminal.say(`[resuming session ${session.id}]`)
+  for (const call of calls) {
+    yield* terminal.say(`[interrupted] ${call.name}(${JSON.stringify(call.input)})`)
+    yield* session.append({
+      type: "tool-result",
+      part: { type: "tool-result", id: call.id, name: call.name, result: { type: "error", value: interrupted } },
+    })
+  }
+  yield* run
+})
+```
+
+1. `session.events` reads the log once. The check and the history both come from that one read.
+2. If the last event is `turn-failed`, the last turn is over, and there is nothing to resume.
+3. Otherwise everything is as in [Part 8](/posts/the-session-as-an-event-log/): `unansweredCalls` finds the calls without a result, each gets an error result, and `run` continues the turn. `run` now compacts before its steps, so a resumed turn compacts too when it needs to.
+
+In `test/resume.test.ts`, the `restart` helper passes a window on to the scripted model:
+
+```ts
+// Process two: a new agent on the same file. No input, so it only finishes what it finds.
+const restart = async (modelSteps: Parameters<typeof scriptedModel>[0], contextWindow?: number) => {
+  const model = scriptedModel(modelSteps, undefined, contextWindow)
+```
+
+Three tests at the end of the file write a log that a process could leave behind after a compaction. They compare requests with `summaryMessage`, which the file imports from `../src/history`:
+
+```ts
+  test("continues a turn that stopped right after a compaction, from the summary", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a"), { type: "compacted", summary: "S1" }])
+
+    const { requests, output } = await restart([reply("Done.")])
+
+    expect(output).toContain("[resuming session s]")
+    expect(requests[0]).toEqual([summaryMessage("S1")])
+  })
+
+  test("does not summarize a history that is already only a summary", async () => {
+    await crashAfter([prompt("go"), { type: "compacted", summary: "S1" }])
+
+    // A window of 10 tokens: even the summary is over the limit.
+    const { requests, events } = await restart([reply("Done.")], 10)
+
+    expect(requests).toEqual([[summaryMessage("S1")]])
+    expect(events.map((event) => event.type)).toEqual(["prompt", "compacted", "step-finished"])
+  })
+
+  test("leaves a turn alone that failed after a compaction", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a"), { type: "compacted", summary: "S1" }, { type: "turn-failed", reason: "connection reset" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+})
+```
+
+1. In the first test, the process died right after the `compacted` event, before the next step. The new agent resumes the turn, and its first request is the summary alone.
+2. In the second test the window is only 10 tokens, so even the summary is over the threshold. Because the last event is already `compacted`, the agent does not write a second summary. The only request is the step, and the log gets one `step-finished` and nothing else.
+3. In the third test, a turn compacted and then failed. The history ends with the summary, and the agent does not resume it. There are no requests and no `[resuming` line.
+
+```text
+$ bun test
+bun test v1.4.4 (38afee6c8)
+
+ 65 pass
+ 0 fail
+ 5467 expect() calls
+Ran 65 tests across 9 files. [359.00ms]
+```
+
+Each of the two rules can be removed to see which test depends on it. Without the line `if (events.at(-1)?.type === "turn-failed") return` in `resume`, the failed turn is resumed after the restart:
+
+```text
+$ bun test
+(fail) resuming a session > leaves a turn alone that failed after a compaction [7.43ms]
+
+ 64 pass
+ 1 fail
+```
+
+Without the line `if (events.at(-1)?.type === "compacted") return` in `compactIfDue`, the 10-token window makes the agent summarize the summary. The test's first request is then a summary request, and the expected step comes second:
+
+```text
+$ bun test
+(fail) resuming a session > does not summarize a history that is already only a summary [4.70ms]
+
+ 64 pass
+ 1 fail
+```
+
+<details>
+<summary>Stuck? The finished agent.ts and resume.test.ts</summary>
+
+`src/agent.ts`
+
+```ts
+import { Effect, Queue, Stream } from "effect"
+import { compactIfDue } from "./compaction"
+import { messageOf, type InputClosed, type ProviderError, type SessionCorrupt } from "./errors"
+import type { FinishReason } from "./events"
+import { toHistory, unansweredCalls } from "./history"
+import { isToolCall, type Message, type Part } from "./messages"
+import { ModelClient } from "./model-client"
+import { Session } from "./session"
+import { Terminal } from "./terminal"
+import { runTool, Tools, type Tool } from "./tool"
+
+// One step: reload the history from the log, stream the model's events, show the text as it arrives,
+// and append the finished message to the log.
+const step = (tools: Tool[]) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const session = yield* Session
+    const history = yield* session.history
+    const content: Part[] = []
+    let text = "" // the text block being written, if any
+    const outcome: { finish: FinishReason; native?: unknown } = { finish: "stop" }
+
+    // A text block ends when anything else arrives, or when the stream does, even by failing.
+    const endText = Effect.suspend(() => {
+      if (!text) return Effect.void
+      content.push({ type: "text", text })
+      text = ""
+      return terminal.say("")
+    })
+
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    ).pipe(Effect.ensuring(endText))
+
+    const message: Message = { role: "assistant", content, ...(outcome.native === undefined ? {} : { native: outcome.native }) }
+    yield* session.append({ type: "step-finished", message, finish: outcome.finish })
+    return { message, finish: outcome.finish }
+  })
+
+// Steps until the model stops asking for tools. Each result is appended as soon as its tool finishes.
+// Before each step, the history is compacted if the request would come close to the context window.
+const run = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const tools = yield* Tools
+
+  while (true) {
+    yield* compactIfDue(tools)
+    const { message, finish } = yield* step(tools)
+    if (finish !== "tool-calls") return
+
+    for (const call of message.content.filter(isToolCall)) {
+      yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const part = yield* runTool(call)
+      if (part.result.type === "error") yield* terminal.say(`[error] ${part.result.value}`)
+      yield* session.append({ type: "tool-result", part })
+    }
+  }
+})
+
+const interrupted =
+  "The agent stopped before this tool finished, so it may or may not have run. Check the current state before repeating it."
+
+// A restart can find a turn that did not finish. Tool calls without a result get an error result instead of
+// running again, since a command that already ran must not run twice. Then the turn continues.
+const resume = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const events = yield* session.events
+  // A failed turn is over. After a compaction its history can end in the summary, which reads like an open turn.
+  if (events.at(-1)?.type === "turn-failed") return
+  const calls = unansweredCalls(toHistory(events))
+  if (calls === undefined) return
+
+  yield* terminal.say(`[resuming session ${session.id}]`)
+  for (const call of calls) {
+    yield* terminal.say(`[interrupted] ${call.name}(${JSON.stringify(call.input)})`)
+    yield* session.append({
+      type: "tool-result",
+      part: { type: "tool-result", id: call.id, name: call.name, result: { type: "error", value: interrupted } },
+    })
+  }
+  yield* run
+})
+
+const queued = (count: number) => `${count} queued prompt${count === 1 ? "" : "s"}`
+
+// The read-eval-print loop, in two halves that do not wait for each other.
+// - The reader asks for a line, saves it in the inbox, and asks again, even while a turn is running.
+// - The worker finishes an interrupted turn, then delivers one prompt at a time and runs its turn.
+// The reader rings a bell after each prompt. The ring carries no prompt: it only tells the worker to look at the inbox.
+export const repl = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+
+  // A turn that fails is recorded as failed, so the next prompt starts from a consistent history.
+  const failed = (label: string, reason: string) =>
+    session.append({ type: "turn-failed", reason }).pipe(Effect.andThen(terminal.say(`[${label}] ${reason}`)))
+  const guarded = <R>(work: Effect.Effect<void, ProviderError | SessionCorrupt | InputClosed, R>) =>
+    work.pipe(
+      Effect.catchTag("ProviderError", (error) => failed("provider error", error.message)),
+      Effect.catchDefect((defect) => failed("bug", messageOf(defect))),
+    )
+
+  // At most one ring waits at a time: two rings in a row mean the same thing as one.
+  const wake = yield* Queue.dropping<void>(1)
+  let inputEnded = false
+
+  const reader = Effect.gen(function* () {
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+      yield* session.admit(input)
+      yield* terminal.say("[queued]")
+      yield* Queue.offer(wake, undefined)
+    }
+  }).pipe(
+    Effect.catchTag("InputClosed", () => Effect.sync(() => void (inputEnded = true))),
+    Effect.andThen(Queue.offer(wake, undefined)),
+  )
+
+  // What the last run left in the inbox, counted before the reader can add anything.
+  const left = yield* session.pending
+  if (left > 0) yield* terminal.say(`[${queued(left)} from an earlier run]`)
+
+  yield* Effect.forkChild(reader)
+  yield* guarded(resume)
+
+  while (true) {
+    // Read before delivering: a prompt admitted before the input ended is then always found by the delivery below.
+    const ended = inputEnded
+    if ((yield* session.deliver) !== undefined) {
+      yield* guarded(run)
+      continue
+    }
+    if (ended) return
+    yield* Queue.take(wake)
+  }
+})
+```
+
+`test/resume.test.ts`
+
+```ts
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { repl } from "../src/agent"
+import type { SessionEvent } from "../src/session-event"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { summaryMessage } from "../src/history"
+import { callTool, reply, scriptedModel, scriptedTerminal } from "./fakes"
+
+// A crash leaves the log as it was at the moment the process died. These tests write that log with
+// `append`, close the file, and start the agent again on it.
+let dir: string
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "agent-session-"))
+})
+afterEach(() => rm(dir, { recursive: true, force: true }))
+
+const ran: string[] = []
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => (ran.push(text), text),
+})
+
+const prompt = (text: string): SessionEvent => ({ type: "prompt", text })
+const calls = (...ids: string[]): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: ids.map((id) => ({ type: "tool-call", id, name: "echo", input: { text: id } })) },
+  finish: "tool-calls",
+})
+const result = (id: string): SessionEvent => ({
+  type: "tool-result",
+  part: { type: "tool-result", id, name: "echo", result: { type: "text", value: id } },
+})
+
+// Process one: the events that were written before the crash, and the prompts that were still in the inbox.
+const crashAfter = (events: SessionEvent[], inbox: string[] = []) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      for (const event of events) yield* session.append(event)
+      for (const text of inbox) yield* session.admit(text)
+    }).pipe(Effect.provide(SessionLive({ path: join(dir, "agent.db"), id: "s" }))),
+  )
+
+// Process two: a new agent on the same file. No input, so it only finishes what it finds.
+const restart = async (modelSteps: Parameters<typeof scriptedModel>[0], contextWindow?: number) => {
+  const model = scriptedModel(modelSteps, undefined, contextWindow)
+  const terminal = scriptedTerminal([])
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo]), SessionLive({ path: join(dir, "agent.db"), id: "s" }))
+  const events = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      return yield* (yield* Session).events
+    }).pipe(Effect.provide(layers)),
+  )
+  return { events, requests: model.requests, output: terminal.output }
+}
+
+describe("resuming a session", () => {
+  test("answers a call that has no result with an error and never runs it again", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go"), calls("a", "b"), result("a")])
+
+    const { events, requests, output } = await restart([reply("Understood.")])
+
+    expect(output[0]).toBe("[resuming session s]")
+    expect(ran).toEqual([])
+    const tool = requests[0]?.at(-1)
+    expect(tool?.role).toBe("tool")
+    expect(tool?.content.map((part) => (part.type === "tool-result" ? [part.id, part.result.type] : []))).toEqual([
+      ["a", "text"],
+      ["b", "error"],
+    ])
+    expect(JSON.stringify(tool)).toContain("stopped before this tool finished")
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "tool-result", "step-finished"])
+  })
+
+  test("continues a turn that stopped right after the prompt", async () => {
+    await crashAfter([prompt("hello")])
+
+    const { requests, output } = await restart([reply("Hi.")])
+
+    expect(output).toContain("Agent: Hi.")
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+  })
+
+  test("continues a turn that stopped between the last result and the next step", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a")])
+
+    const { requests } = await restart([reply("Done.")])
+
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+  })
+
+  test("leaves a finished turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("leaves a failed turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "turn-failed", reason: "connection reset" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("a resumed turn that calls a tool runs it like any other", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go")])
+
+    await restart([callTool("c9", "echo", { text: "again" }), reply("Done.")])
+
+    expect(ran).toEqual(["again"])
+  })
+
+  test("runs the prompts that were still in the inbox, in order", async () => {
+    await crashAfter([], ["one", "two"])
+
+    const { events, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output).toContain("[2 queued prompts from an earlier run]")
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["one", "step-finished", "two", "step-finished"])
+  })
+
+  test("finishes the interrupted turn before it delivers the next prompt", async () => {
+    await crashAfter([prompt("first")], ["second"])
+
+    const { events, requests, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output.slice(0, 2)).toEqual(["[1 queued prompt from an earlier run]", "[resuming session s]"])
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["first", "step-finished", "second", "step-finished"])
+  })
+
+  test("says nothing about the inbox when it is empty", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { output } = await restart([])
+
+    expect(output.join("\n")).not.toContain("queued prompt")
+  })
+
+  test("continues a turn that stopped right after a compaction, from the summary", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a"), { type: "compacted", summary: "S1" }])
+
+    const { requests, output } = await restart([reply("Done.")])
+
+    expect(output).toContain("[resuming session s]")
+    expect(requests[0]).toEqual([summaryMessage("S1")])
+  })
+
+  test("does not summarize a history that is already only a summary", async () => {
+    await crashAfter([prompt("go"), { type: "compacted", summary: "S1" }])
+
+    // A window of 10 tokens: even the summary is over the limit.
+    const { requests, events } = await restart([reply("Done.")], 10)
+
+    expect(requests).toEqual([[summaryMessage("S1")]])
+    expect(events.map((event) => event.type)).toEqual(["prompt", "compacted", "step-finished"])
+  })
+
+  test("leaves a turn alone that failed after a compaction", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a"), { type: "compacted", summary: "S1" }, { type: "turn-failed", reason: "connection reset" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+})
+```
+
+</details>
+
+### Step 6: A small window and a real model
+
+With the real 32k window, a session needs many prompts before it compacts. `CONTEXT_WINDOW=2000` lowers the threshold to 1,500 tokens, about 650 of which are the tool definitions, so compaction comes after a few prompts. The first run pipes in three prompts: a story, two file reads, and a second story. The database goes into a separate file, so the run starts with an empty session:
+
+```text
+$ printf '%s\n' "Write a story of about 200 words about a lighthouse keeper named Ada." "Read notes/todo.txt and README.md and tell me what each one says." "Write a second story of about 200 words, about Ada's brother Tomas." | CONTEXT_WINDOW=2000 DB_PATH=../compaction.db bun ../src/index.ts
+You: [queued]
+You: [queued]
+You: [queued]
+You: Agent: Ada tended the lantern with the precision of a surgeon, her fingers stained with oil that smelled of brine…
+…
+[tool] read_file({"path":"notes/todo.txt"})
+[tool] read_file({"path":"README.md"})
+Agent: Here is what each file says:
+
+**notes/todo.txt**:
+- buy milk
+- water the plants
+
+**README.md**:
+# Playground
+A scratch folder for testing the agent.
+Agent: Tomas watched from the shore, his boots sinking into the wet sand as the tide receded, leaving behind a mosaic…
+…
+```
+
+The stories are shortened here to their first lines. The history grew with each turn, but each check before a step found it under 1,500 tokens, so nothing was compacted. The last story pushed the history over the threshold. The next run starts the agent again on the same file with a question about the earlier turns:
+
+```text
+$ printf '%s\n' "What is the name of Ada's brother, and what is the first item in notes/todo.txt?" | CONTEXT_WINDOW=2000 DB_PATH=../compaction.db bun ../src/index.ts
+You: [queued]
+You: [compacting: ~1707 tokens]
+[compacted: 1707 → 934 tokens]
+Agent: Based on the summary provided:
+
+*   **Name of Ada's brother:** Tomas
+*   **First item in notes/todo.txt:** buy milk
+```
+
+The check before the first step of this turn found the history at about 1,700 tokens, over the threshold. The model wrote the summary, and the step that answered the question received only the summary message, so the answer came from the summary: the model did not read `notes/todo.txt` again. The log shows where the summary sits:
+
+```text
+$ sqlite3 ../compaction.db "select seq || ' ' || type from event"
+1 prompt
+2 step-finished
+3 prompt
+4 step-finished
+5 tool-result
+6 tool-result
+7 step-finished
+8 prompt
+9 step-finished
+10 prompt
+11 compacted
+12 step-finished
+```
+
+All the events of the first run are still there, and the summary sits between the new prompt and its answer. This is the summary the model wrote:
+
+```text
+$ sqlite3 ../compaction.db "select json_extract(data, '$.summary') from event where type = 'compacted'"
+## Objective
+- Continue the fictional story about Ada and Tomas based on established character details and file contents.
+- Answer a specific factual question regarding the protagonist's brother's name and a list item from a local file.
+
+## Decisions
+- The protagonist's name is confirmed as Ada, and her brother's name is Tomas.
+- The first item in `notes/todo.txt` is "buy milk".
+
+## Work state
+- Two stories have been written: one about Ada (approx 200 words) and one about Tomas (approx 200 words).
+- Factual questions about the story details and file contents have been answered.
+
+## Next move
+1. Acknowledge the user's latest factual question based on previously provided information.
+
+## Relevant files
+- notes/todo.txt: Contains the list including the requested item "buy milk".
+
+## Latest request
+What is the name of Ada's brother, and what is the first item in notes/todo.txt?
+```
+
+The model followed the template, including the last section, which quotes the question that was still open. The same two runs on llama.cpp, with `PROVIDER=llamacpp`, compact at the same point, since the estimate does not depend on the provider, and give the same answer.
+
+The last run shows a compaction in the middle of a turn. It uses a window of 1,100 tokens, just above the tool definitions, and one prompt that reads three files one at a time:
+
+```text
+$ printf '%s\n' "Read README.md, then notes/todo.txt, then secret-file.txt, one file at a time, and then tell me in one sentence what each file contains." | CONTEXT_WINDOW=1100 DB_PATH=../mid-turn.db bun ../src/index.ts
+You: [queued]
+You: [tool] read_file({"path":"README.md"})
+[tool] read_file({"path":"notes/todo.txt"})
+[compacting: ~854 tokens]
+[compacted: 854 → 959 tokens]
+[tool] read_file({"path":"secret-file.txt"})
+[compacting: ~1050 tokens]
+[compacted: 1050 → 974 tokens]
+Agent: - **README.md**: This is the project documentation for "Playground."
+- **notes/todo.txt**: This file lists personal to-do items ("buy milk", "water the plants").
+- **secret-file.txt**: This file contains a riddle about a key ("I have keys but no locks...").
+```
+
+> **Watch for this.** Here the summary was longer than the history it replaced: 854 tokens became 959. The files are tiny, and a summary that follows a six-heading template has a minimum size. With a window this close to the fixed cost of the tool definitions, every step is over the threshold, so the agent compacts before every step. The turn still finishes correctly, but each step costs two model calls. Compaction shortens the history only when the history is much longer than a summary, as it is with a real window, so a window set by hand works best with several thousand tokens above the tool definitions.
+
+> **Result.** Before every step, the agent estimates the size of the next request. At three quarters of the context window, the model writes a summary from a clipped transcript, the agent appends it to the log, and the next step starts from it. The log keeps every event, a failed summary fails the turn like any provider error, and a restart reads a log that contains summaries correctly.
+
+### Possible extensions
+
+These additions fit the design and are not built here:
+
+- The agent could use measured sizes. Providers report how many tokens a request used: OpenAI-style servers in a `usage` field when the request sets `stream_options: {"include_usage": true}`, and Anthropic in the `message_start` and `message_delta` events. The `finish` model event could carry that number and `step-finished` could store it, so the estimate would only need to cover what was added since the last step.
+- The agent could compact after a refusal. llama.cpp's `exceed_context_size_error` says exactly what went wrong, so the agent could recognize it, compact, and send the step once more, as a fallback behind the estimate.
+- Compaction could keep the newest few thousand tokens of the history as they are and summarize only the rest, splitting at a step boundary so that a tool call never loses its result. The `compacted` event would then also record where the kept part starts.
+- The agent could skip a compaction that does not help, by comparing the history without the tool definitions to a minimum size, such as 2,000 tokens, and sending the step unchanged below it. That avoids the case in the callout above.
+
+### OpenCode does more
+
+OpenCode's compaction goes further than this Part:
+
+- It uses native compaction where a provider offers it, so the provider compacts the conversation itself.
+- It can write a summary in the background before one is due, and swap it in when compaction runs.
+- When even the transcript is too long, it shortens the oldest exchanges first.
+- When a summary ignores the required headings, it asks once more.
+- On a later compaction, it asks the model to update the previous summary instead of writing a new one.
+
+### The finished files
+
+These are the files that differ from [Part 9](/posts/inbox-vs-execution/), plus the new ones. `package.json`, the migrations and every other source and test file are as [Part 9](/posts/inbox-vs-execution/) left them.
+
+<details>
+<summary>Stuck? src/session-event.ts</summary>
+
+`src/session-event.ts`
+
+```ts
+import { Schema } from "effect"
+import { Message, ToolResultPart } from "./messages"
+
+// The facts a session records. Nothing here can be worked out from the other events.
+export const Prompt = Schema.Struct({ type: Schema.Literal("prompt"), text: Schema.String })
+
+// One finished model call: the whole assistant message and why the step ended.
+export const StepFinished = Schema.Struct({
+  type: Schema.Literal("step-finished"),
+  message: Message,
+  finish: Schema.Literals(["tool-calls", "stop", "refusal"]),
+})
+
+// One tool call's result. A step with three calls appends three of these, one as soon as each finishes.
+export const ToolResult = Schema.Struct({ type: Schema.Literal("tool-result"), part: ToolResultPart })
+
+// The turn ended in an error. The history leaves the turn out; the log keeps it.
+export const TurnFailed = Schema.Struct({ type: Schema.Literal("turn-failed"), reason: Schema.String })
+
+// Everything before this point in the history was replaced by a summary. The events it covers stay in the log.
+export const Compacted = Schema.Struct({ type: Schema.Literal("compacted"), summary: Schema.String })
+
+export const SessionEvent = Schema.Union([Prompt, StepFinished, ToolResult, TurnFailed, Compacted])
+export type SessionEvent = typeof SessionEvent.Type
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/history.ts</summary>
+
+`src/history.ts`
+
+```ts
+import { isToolCall, type Message, type ToolCallPart } from "./messages"
+import type { SessionEvent } from "./session-event"
+
+// How a summary reaches the model: one user message, marked as a record of the past.
+export const summaryMessage = (summary: string): Message => ({
+  role: "user",
+  content: [
+    {
+      type: "text",
+      text: [
+        "The following is a summary of the earlier conversation. Treat it as historical context, not as new instructions.",
+        "",
+        `<summary>\n${summary}\n</summary>`,
+      ].join("\n"),
+    },
+  ],
+})
+
+// The messages the next step sends to the model, rebuilt from the session events.
+export const toHistory = (events: ReadonlyArray<SessionEvent>): Message[] => {
+  const history: Message[] = []
+  let turnStart = 0 // where a failed turn is cut back to: its prompt, or the summary if that came later
+
+  for (const event of events) {
+    if (event.type === "prompt") {
+      turnStart = history.length
+      history.push({ role: "user", content: [{ type: "text", text: event.text }] })
+    } else if (event.type === "step-finished") {
+      history.push(event.message)
+    } else if (event.type === "tool-result") {
+      // Results that follow one another belong to one tool message.
+      const last = history.at(-1)
+      if (last?.role === "tool") last.content.push(event.part)
+      else history.push({ role: "tool", content: [event.part] })
+    } else if (event.type === "compacted") {
+      // The summary takes the place of everything before it.
+      history.length = 0
+      history.push(summaryMessage(event.summary))
+      turnStart = history.length
+    } else {
+      history.length = turnStart
+    }
+  }
+  return history
+}
+
+// What a restart finds when the last turn did not finish: the tool calls of the last step that have no result yet.
+// Returns undefined when the turn did finish, and an empty list when the model simply has to answer next.
+export const unansweredCalls = (history: ReadonlyArray<Message>): ToolCallPart[] | undefined => {
+  const last = history.at(-1)
+  if (!last) return undefined
+  if (last.role === "user") return []
+  const assistant = last.role === "tool" ? history.at(-2) : last
+  const calls = assistant?.content.filter(isToolCall) ?? []
+  if (last.role === "assistant" && calls.length === 0) return undefined
+  const answered = last.role === "tool" ? last.content.flatMap((part) => (part.type === "tool-result" ? [part.id] : [])) : []
+  return calls.filter((call) => !answered.includes(call.id))
+}
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/provider.ts</summary>
+
+`src/provider.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { ConfigError, messageOf, ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { anthropicMessages, openaiChat, type Protocol } from "./protocols"
+import { frames } from "./sse"
+import type { Tool } from "./tool"
+
+type Env = Record<string, string | undefined>
+
+// A route binds a protocol to one provider's endpoint and authentication.
+// `contextWindow` is the most tokens the model takes in for one step, the reply included.
+export type Route = { protocol: Protocol; baseUrl: string; headers: Record<string, string>; model: string; contextWindow: number }
+
+// The routes the agent knows. They read the environment they are given, so nothing happens at import time.
+// The two local windows match the 32k context the servers were started with in Part 1.
+const routes = (env: Env): Record<string, Route> => ({
+  ollama: { protocol: openaiChat, baseUrl: "http://127.0.0.1:11434/v1", headers: {}, model: "qwen3.5:9b", contextWindow: 32_768 },
+  llamacpp: { protocol: openaiChat, baseUrl: "http://127.0.0.1:9931/v1", headers: {}, model: "qwen3.5:9b", contextWindow: 32_768 },
+  claude: {
+    protocol: anthropicMessages,
+    baseUrl: "https://api.anthropic.com",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2026-10-21" },
+    model: "claude-sonnet-5-5",
+    contextWindow: 200_000,
+  },
+})
+
+// PROVIDER picks the route. BASE_URL, MODEL and CONTEXT_WINDOW override the route's defaults.
+export const selectRoute = (env: Env): Effect.Effect<Route, ConfigError> => {
+  const name = env.PROVIDER ?? "ollama"
+  const selected = routes(env)[name]
+  if (!selected) return Effect.fail(new ConfigError({ reason: `Unknown PROVIDER "${name}". Choose one of: ${Object.keys(routes(env)).join(", ")}` }))
+  if (name === "claude" && !env.ANTHROPIC_API_KEY) return Effect.fail(new ConfigError({ reason: "Set ANTHROPIC_API_KEY first" }))
+  const contextWindow = env.CONTEXT_WINDOW === undefined ? selected.contextWindow : Number(env.CONTEXT_WINDOW)
+  if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+    return Effect.fail(new ConfigError({ reason: `CONTEXT_WINDOW must be a whole number of tokens, not "${env.CONTEXT_WINDOW}"` }))
+  }
+  return Effect.succeed({ ...selected, baseUrl: env.BASE_URL ?? selected.baseUrl, model: env.MODEL ?? selected.model, contextWindow })
+}
+
+// A stream that ends without a finish event was cut off.
+const requireFinish = (route: Route) => (events: Stream.Stream<ModelEvent, ProviderError>) =>
+  Stream.suspend(() => {
+    let finished = false
+    return events.pipe(
+      Stream.tap((event) =>
+        Effect.sync(() => {
+          if (event.type === "finish") finished = true
+        }),
+      ),
+      Stream.onEnd(
+        Effect.suspend(() =>
+          finished ? Effect.void : Effect.fail(new ProviderError({ reason: `The stream from ${route.baseUrl} ended before the model finished` })),
+        ),
+      ),
+    )
+  })
+
+// One step: one model call, as a stream of events. It fails with a ProviderError that the user reads; the model never sees it.
+export const chat = (route: Route, history: Message[], tools: Tool[]): Stream.Stream<ModelEvent, ProviderError> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const unreachable = (error: unknown) => new ProviderError({ reason: `Could not reach ${route.baseUrl}: ${messageOf(error)}` })
+
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetch(`${route.baseUrl}${route.protocol.path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...route.headers },
+            body: JSON.stringify(route.protocol.body(route.model, history, tools)),
+          }),
+        catch: unreachable,
+      })
+      const body = response.body
+      if (!response.ok || !body) {
+        const text = yield* Effect.tryPromise({ try: () => response.text(), catch: unreachable })
+        return yield* new ProviderError({ reason: `${route.baseUrl} answered ${response.status}: ${text}` })
+      }
+
+      // From here on, the answer is still being written. A failure now happens in the middle of a reply.
+      const bytes = Stream.fromReadableStream({
+        evaluate: () => body,
+        onError: (error) => new ProviderError({ reason: `The stream from ${route.baseUrl} broke off: ${messageOf(error)}` }),
+      })
+      return route.protocol.events(frames(bytes)).pipe(requireFinish(route))
+    }),
+  )
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/model-client.ts</summary>
+
+`src/model-client.ts`
+
+```ts
+import { Context, Effect, Layer, type Stream } from "effect"
+import type { ProviderError } from "./errors"
+import type { ModelEvent } from "./events"
+import type { Message } from "./messages"
+import { chat, selectRoute, type Route } from "./provider"
+import type { Tool } from "./tool"
+
+// What the agent needs from a model: one step, as a stream of events, and how much the model can take in at once.
+// Which provider answers is not its business.
+export class ModelClient extends Context.Service<
+  ModelClient,
+  {
+    readonly chat: (history: Message[], tools: Tool[]) => Stream.Stream<ModelEvent, ProviderError>
+    readonly contextWindow: number
+  }
+>()("@agent/ModelClient") {}
+
+// The real model client. Building the layer reads the environment, so a bad PROVIDER fails here, before the first prompt.
+export const ModelClientLive = Layer.effect(
+  ModelClient,
+  Effect.gen(function* () {
+    const route: Route = yield* selectRoute(process.env)
+    return ModelClient.of({ chat: (history, tools) => chat(route, history, tools), contextWindow: route.contextWindow })
+  }),
+)
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/compaction.ts</summary>
+
+`src/compaction.ts`
+
+```ts
+import { Effect, Stream } from "effect"
+import { ProviderError, type SessionCorrupt } from "./errors"
+import { toHistory } from "./history"
+import type { Message, Part } from "./messages"
+import { ModelClient } from "./model-client"
+import { Session } from "./session"
+import { Terminal } from "./terminal"
+import type { Tool } from "./tool"
+
+// A rough count of what one step sends: the history and the tool definitions, at about four characters per token.
+// JSON.stringify leaves out each tool's `run` function, which never goes to the model.
+export const estimateTokens = (history: ReadonlyArray<Message>, tools: ReadonlyArray<Tool>) =>
+  Math.ceil(JSON.stringify([history, tools]).length / 4)
+
+// The share of the window kept free for the model's reply, and for the summary when it is written.
+const RESERVE = 0.25
+
+export const isDue = (estimate: number, contextWindow: number) => estimate >= contextWindow * (1 - RESERVE)
+
+// Tool results and tool inputs, such as the content of a file to write, can be long. In the summary request
+// each one keeps its first characters only.
+const CLIP = 2_000
+
+const clip = (text: string) => (text.length <= CLIP ? text : `${text.slice(0, CLIP)}\n[... ${text.length - CLIP} more characters]`)
+
+const partToText = (part: Part) => {
+  if (part.type === "text") return part.text
+  if (part.type === "tool-call") return `[called ${part.name}(${clip(JSON.stringify(part.input))})]`
+  return `[${part.name} ${part.result.type === "error" ? "failed" : "returned"}]\n${clip(part.result.value)}`
+}
+
+// The history as plain text. The summary request carries no tools, and some providers refuse tool calls and
+// results in a request that defines no tools, so the conversation goes out as one text instead.
+export const transcript = (history: ReadonlyArray<Message>) =>
+  history
+    .map((message) => {
+      const who = message.role === "assistant" ? "Assistant" : message.role === "tool" ? "Tool results" : "User"
+      return `${who}:\n${message.content.map(partToText).join("\n")}`
+    })
+    .join("\n\n")
+
+// A shorter version of OpenCode's summary template, for a small model.
+export const SUMMARY_PROMPT = `Summarize the conversation above for another agent that will continue the work. That agent will see only your summary, not the conversation.
+
+Use this format, and write "(none)" under a heading that has nothing to say:
+
+## Objective
+- [what the user is trying to accomplish, in one or two sentences]
+
+## Decisions
+- [decisions already made, and why]
+
+## Work state
+- [what is done, what is in progress, what is blocked]
+
+## Next move
+1. [the next actions, in order]
+
+## Relevant files
+- [path]: [why it matters]
+
+## Latest request
+[the user's latest request that is not yet fully answered, quoted word for word]
+
+Rules:
+- Use short, single-line bullets.
+- Keep exact file paths, commands, error messages and identifiers.
+- Do not continue the task and do not call tools. Return only the summary.`
+
+const summaryRequest = (history: ReadonlyArray<Message>): Message[] => [
+  {
+    role: "user",
+    content: [{ type: "text", text: `<conversation>\n${transcript(history)}\n</conversation>\n\n${SUMMARY_PROMPT}` }],
+  },
+]
+
+// Runs before every step. When the next request would come close to the window, the model writes a summary
+// of the history so far, and the summary is appended to the log. The next step then starts from it.
+export const compactIfDue = (tools: Tool[]): Effect.Effect<void, ProviderError | SessionCorrupt, ModelClient | Session | Terminal> =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const session = yield* Session
+    const terminal = yield* Terminal
+
+    const events = yield* session.events
+    // Right after a compaction the history cannot get any shorter, so the step goes out as it is.
+    if (events.at(-1)?.type === "compacted") return
+    const history = toHistory(events)
+    const before = estimateTokens(history, tools)
+    if (!isDue(before, model.contextWindow)) return
+
+    yield* terminal.say(`[compacting: ~${before} tokens]`)
+    const summary = yield* model.chat(summaryRequest(history), []).pipe(
+      Stream.runFold(
+        () => "",
+        (text, event) => (event.type === "text-delta" ? text + event.text : text),
+      ),
+      Effect.map((text) => text.trim()),
+    )
+    if (!summary) return yield* new ProviderError({ reason: "The model returned an empty summary" })
+
+    yield* session.append({ type: "compacted", summary })
+    const after = estimateTokens(toHistory([...events, { type: "compacted", summary }]), tools)
+    yield* terminal.say(`[compacted: ${before} → ${after} tokens]`)
+  })
+```
+
+</details>
+
+<details>
+<summary>Stuck? src/agent.ts</summary>
+
+`src/agent.ts`
+
+```ts
+import { Effect, Queue, Stream } from "effect"
+import { compactIfDue } from "./compaction"
+import { messageOf, type InputClosed, type ProviderError, type SessionCorrupt } from "./errors"
+import type { FinishReason } from "./events"
+import { toHistory, unansweredCalls } from "./history"
+import { isToolCall, type Message, type Part } from "./messages"
+import { ModelClient } from "./model-client"
+import { Session } from "./session"
+import { Terminal } from "./terminal"
+import { runTool, Tools, type Tool } from "./tool"
+
+// One step: reload the history from the log, stream the model's events, show the text as it arrives,
+// and append the finished message to the log.
+const step = (tools: Tool[]) =>
+  Effect.gen(function* () {
+    const model = yield* ModelClient
+    const terminal = yield* Terminal
+    const session = yield* Session
+    const history = yield* session.history
+    const content: Part[] = []
+    let text = "" // the text block being written, if any
+    const outcome: { finish: FinishReason; native?: unknown } = { finish: "stop" }
+
+    // A text block ends when anything else arrives, or when the stream does, even by failing.
+    const endText = Effect.suspend(() => {
+      if (!text) return Effect.void
+      content.push({ type: "text", text })
+      text = ""
+      return terminal.say("")
+    })
+
+    yield* Stream.runForEach(model.chat(history, tools), (event) =>
+      Effect.gen(function* () {
+        if (event.type === "text-delta") {
+          if (!text) yield* terminal.write("Agent: ")
+          text += event.text
+          yield* terminal.write(event.text)
+          return
+        }
+        yield* endText
+        if (event.type === "tool-call") content.push(event)
+        else {
+          outcome.finish = event.reason
+          outcome.native = event.native
+        }
+      }),
+    ).pipe(Effect.ensuring(endText))
+
+    const message: Message = { role: "assistant", content, ...(outcome.native === undefined ? {} : { native: outcome.native }) }
+    yield* session.append({ type: "step-finished", message, finish: outcome.finish })
+    return { message, finish: outcome.finish }
+  })
+
+// Steps until the model stops asking for tools. Each result is appended as soon as its tool finishes.
+// Before each step, the history is compacted if the request would come close to the context window.
+const run = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const tools = yield* Tools
+
+  while (true) {
+    yield* compactIfDue(tools)
+    const { message, finish } = yield* step(tools)
+    if (finish !== "tool-calls") return
+
+    for (const call of message.content.filter(isToolCall)) {
+      yield* terminal.say(`[tool] ${call.name}(${JSON.stringify(call.input)})`)
+      const part = yield* runTool(call)
+      if (part.result.type === "error") yield* terminal.say(`[error] ${part.result.value}`)
+      yield* session.append({ type: "tool-result", part })
+    }
+  }
+})
+
+const interrupted =
+  "The agent stopped before this tool finished, so it may or may not have run. Check the current state before repeating it."
+
+// A restart can find a turn that did not finish. Tool calls without a result get an error result instead of
+// running again, since a command that already ran must not run twice. Then the turn continues.
+const resume = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+  const events = yield* session.events
+  // A failed turn is over. After a compaction its history can end in the summary, which reads like an open turn.
+  if (events.at(-1)?.type === "turn-failed") return
+  const calls = unansweredCalls(toHistory(events))
+  if (calls === undefined) return
+
+  yield* terminal.say(`[resuming session ${session.id}]`)
+  for (const call of calls) {
+    yield* terminal.say(`[interrupted] ${call.name}(${JSON.stringify(call.input)})`)
+    yield* session.append({
+      type: "tool-result",
+      part: { type: "tool-result", id: call.id, name: call.name, result: { type: "error", value: interrupted } },
+    })
+  }
+  yield* run
+})
+
+const queued = (count: number) => `${count} queued prompt${count === 1 ? "" : "s"}`
+
+// The read-eval-print loop, in two halves that do not wait for each other.
+// - The reader asks for a line, saves it in the inbox, and asks again, even while a turn is running.
+// - The worker finishes an interrupted turn, then delivers one prompt at a time and runs its turn.
+// The reader rings a bell after each prompt. The ring carries no prompt: it only tells the worker to look at the inbox.
+export const repl = Effect.gen(function* () {
+  const terminal = yield* Terminal
+  const session = yield* Session
+
+  // A turn that fails is recorded as failed, so the next prompt starts from a consistent history.
+  const failed = (label: string, reason: string) =>
+    session.append({ type: "turn-failed", reason }).pipe(Effect.andThen(terminal.say(`[${label}] ${reason}`)))
+  const guarded = <R>(work: Effect.Effect<void, ProviderError | SessionCorrupt | InputClosed, R>) =>
+    work.pipe(
+      Effect.catchTag("ProviderError", (error) => failed("provider error", error.message)),
+      Effect.catchDefect((defect) => failed("bug", messageOf(defect))),
+    )
+
+  // At most one ring waits at a time: two rings in a row mean the same thing as one.
+  const wake = yield* Queue.dropping<void>(1)
+  let inputEnded = false
+
+  const reader = Effect.gen(function* () {
+    while (true) {
+      const input = yield* terminal.ask("You: ")
+      yield* session.admit(input)
+      yield* terminal.say("[queued]")
+      yield* Queue.offer(wake, undefined)
+    }
+  }).pipe(
+    Effect.catchTag("InputClosed", () => Effect.sync(() => void (inputEnded = true))),
+    Effect.andThen(Queue.offer(wake, undefined)),
+  )
+
+  // What the last run left in the inbox, counted before the reader can add anything.
+  const left = yield* session.pending
+  if (left > 0) yield* terminal.say(`[${queued(left)} from an earlier run]`)
+
+  yield* Effect.forkChild(reader)
+  yield* guarded(resume)
+
+  while (true) {
+    // Read before delivering: a prompt admitted before the input ended is then always found by the delivery below.
+    const ended = inputEnded
+    if ((yield* session.deliver) !== undefined) {
+      yield* guarded(run)
+      continue
+    }
+    if (ended) return
+    yield* Queue.take(wake)
+  }
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/fakes.ts</summary>
+
+`test/fakes.ts`
+
+```ts
+import { Effect, Layer, Stream } from "effect"
+import { InputClosed, ProviderError } from "../src/errors"
+import type { ModelEvent } from "../src/events"
+import type { Message } from "../src/messages"
+import { ModelClient } from "../src/model-client"
+import { Terminal } from "../src/terminal"
+
+// What the scripted model streams for one step, in order. A ProviderError makes the stream fail at that point.
+export type Step = Array<ModelEvent | ProviderError>
+
+// A text reply, streamed one word at a time.
+export const reply = (text: string): Step => [
+  ...text.split(/(?<= )/).map((word): ModelEvent => ({ type: "text-delta", text: word })),
+  { type: "finish", reason: "stop" },
+]
+
+export const callTool = (id: string, name: string, input: unknown): Step => [
+  { type: "tool-call", id, name, input },
+  { type: "finish", reason: "tool-calls" },
+]
+
+// A step that fails before sending anything.
+export const fail = (reason: string): Step => [new ProviderError({ reason })]
+
+// A model that follows a script and records the history it was given at each step.
+// `beforeStep` runs when a step starts and holds the stream back until its promise settles.
+// `contextWindow` is large unless a test sets it, so compaction only happens in the tests that ask for it.
+export const scriptedModel = (steps: Step[], beforeStep?: (request: number) => Promise<void>, contextWindow = 1_000_000) => {
+  const requests: Message[][] = []
+  const layer = Layer.succeed(
+    ModelClient,
+    ModelClient.of({
+      chat: (history) =>
+        Stream.suspend(() => {
+          requests.push([...history])
+          const request = requests.length
+          const next = steps[request - 1] ?? fail("The script has no reply left for this step")
+          const events = Stream.fromIterable(next).pipe(
+            Stream.mapEffect((item) => (item instanceof ProviderError ? Effect.fail(item) : Effect.succeed(item))),
+          )
+          return beforeStep ? Stream.unwrap(Effect.promise(() => beforeStep(request)).pipe(Effect.as(events))) : events
+        }),
+      contextWindow,
+    }),
+  )
+  return { layer, requests }
+}
+
+// A terminal where the user types the given answers, in order. An answer can be a promise, for a line the user types later.
+// When the answers run out, input ends.
+// Questions that start with "Allow" are answered from `confirmations` instead, so a confirmation reaches the
+// tool that asked even though the reader has already taken every prompt, as the live terminal does.
+// `output` holds the finished lines; `writes` holds every piece passed to `write`, in order.
+export const scriptedTerminal = (answers: Array<string | Promise<string>>, confirmations: string[] = []) => {
+  const output: string[] = []
+  const writes: string[] = []
+  const queue = [...answers]
+  const confirm = [...confirmations]
+  let pending = "" // text written since the last line ended
+  const layer = Layer.succeed(
+    Terminal,
+    Terminal.of({
+      ask: (prompt) =>
+        Effect.suspend(() => {
+          output.push(pending + prompt)
+          pending = ""
+          const next = (prompt.startsWith("Allow") ? confirm : queue).shift()
+          if (next === undefined) return Effect.fail(new InputClosed())
+          return typeof next === "string" ? Effect.succeed(next) : Effect.promise(() => next)
+        }),
+      say: (line) =>
+        Effect.sync(() => {
+          output.push(pending + line)
+          pending = ""
+        }),
+      write: (text) =>
+        Effect.sync(() => {
+          writes.push(text)
+          pending += text
+        }),
+    }),
+  )
+  return { layer, output, writes }
+}
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/history.test.ts</summary>
+
+`test/history.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { summaryMessage, toHistory, unansweredCalls } from "../src/history"
+import type { ToolResultPart } from "../src/messages"
+import type { SessionEvent } from "../src/session-event"
+
+const prompt = (text: string): SessionEvent => ({ type: "prompt", text })
+const answer = (text: string): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: [{ type: "text", text }] },
+  finish: "stop",
+})
+const calls = (...ids: string[]): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: ids.map((id) => ({ type: "tool-call", id, name: "echo", input: {} })) },
+  finish: "tool-calls",
+})
+const result = (id: string): SessionEvent => {
+  const part: ToolResultPart = { type: "tool-result", id, name: "echo", result: { type: "text", value: id } }
+  return { type: "tool-result", part }
+}
+const failed: SessionEvent = { type: "turn-failed", reason: "connection reset" }
+const compacted = (summary: string): SessionEvent => ({ type: "compacted", summary })
+
+describe("toHistory", () => {
+  test("turns events into messages in order", () => {
+    const history = toHistory([prompt("hi"), answer("hello")])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant"])
+  })
+
+  test("puts results that follow one another in one tool message", () => {
+    const history = toHistory([prompt("go"), calls("a", "b"), result("a"), result("b")])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+    expect(history[2]?.content).toHaveLength(2)
+  })
+
+  test("leaves out a failed turn and keeps the turns before it", () => {
+    const history = toHistory([prompt("one"), answer("first"), prompt("two"), calls("a"), failed, prompt("three")])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant", "user"])
+  })
+})
+
+describe("toHistory after a compaction", () => {
+  test("starts from the latest summary and keeps what came after it", () => {
+    const history = toHistory([prompt("one"), answer("first"), prompt("two"), calls("a"), result("a"), compacted("S1"), answer("second")])
+
+    expect(history).toEqual([summaryMessage("S1"), { role: "assistant", content: [{ type: "text", text: "second" }] }])
+  })
+
+  test("a later summary replaces an earlier one", () => {
+    const history = toHistory([prompt("one"), compacted("S1"), answer("first"), prompt("two"), compacted("S2")])
+
+    expect(history).toEqual([summaryMessage("S2")])
+  })
+
+  test("a turn that fails after a summary is cut back to the summary", () => {
+    const history = toHistory([prompt("go"), calls("a"), result("a"), compacted("S1"), calls("b"), result("b"), failed])
+
+    expect(history).toEqual([summaryMessage("S1")])
+  })
+
+  test("a turn that starts after a summary is cut back to its own prompt", () => {
+    const history = toHistory([prompt("one"), compacted("S1"), answer("first"), prompt("two"), calls("a"), failed])
+
+    expect(history.map((message) => message.role)).toEqual(["user", "assistant"])
+  })
+})
+
+describe("unansweredCalls", () => {
+  test("is undefined when the last turn finished", () => {
+    expect(unansweredCalls(toHistory([prompt("hi"), answer("hello")]))).toBeUndefined()
+    expect(unansweredCalls(toHistory([prompt("hi"), failed]))).toBeUndefined()
+    expect(unansweredCalls([])).toBeUndefined()
+  })
+
+  test("is empty when the model has to answer next", () => {
+    expect(unansweredCalls(toHistory([prompt("hi")]))).toEqual([])
+    expect(unansweredCalls(toHistory([prompt("hi"), calls("a"), result("a")]))).toEqual([])
+  })
+
+  test("lists the calls that have no result", () => {
+    expect(unansweredCalls(toHistory([prompt("go"), calls("a", "b")]))?.map((call) => call.id)).toEqual(["a", "b"])
+    expect(unansweredCalls(toHistory([prompt("go"), calls("a", "b"), result("a")]))?.map((call) => call.id)).toEqual(["b"])
+  })
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/provider.test.ts</summary>
+
+`test/provider.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Stream } from "effect"
+import type { ModelEvent } from "../src/events"
+import { openaiChat } from "../src/protocols"
+import { chat, selectRoute, type Route } from "../src/provider"
+
+const sse = (...lines: string[]) => lines.map((line) => `${line}\n\n`).join("")
+
+const chunk = (delta: object, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}`
+
+// Serves one canned answer, runs one step against it, and reports what arrived and how the step ended:
+// the error message, or an empty string when the step finished.
+const step = async (respond: (request: Request) => Response | Promise<Response>, baseUrl?: string) => {
+  const server = Bun.serve({ port: 0, fetch: respond })
+  const route: Route = { protocol: openaiChat, baseUrl: baseUrl ?? `http://127.0.0.1:${server.port}`, headers: {}, model: "test", contextWindow: 32_768 }
+  const events: ModelEvent[] = []
+  try {
+    const failure = await Effect.runPromise(
+      Stream.runForEach(chat(route, [], []), (event) => Effect.sync(() => void events.push(event))).pipe(
+        Effect.as(""),
+        Effect.catchTag("ProviderError", (error) => Effect.succeed(error.message)),
+      ),
+    )
+    return { events, failure }
+  } finally {
+    await server.stop(true)
+  }
+}
+
+describe("one step over HTTP", () => {
+  test("asks for a stream and delivers the events", async () => {
+    let sent: { stream?: boolean } = {}
+    const { events, failure } = await step(async (request) => {
+      sent = (await request.json()) as { stream?: boolean }
+      return new Response(sse(chunk({ content: "Hi" }), chunk({ content: "!" }), chunk({}, "stop"), "data: [DONE]"))
+    })
+
+    expect(failure).toBe("")
+    expect(events).toEqual([
+      { type: "text-delta", text: "Hi" },
+      { type: "text-delta", text: "!" },
+      { type: "finish", reason: "stop" },
+    ])
+    expect(sent.stream).toBe(true)
+  })
+
+  test("fails when the stream ends before the model finishes, after delivering what arrived", async () => {
+    const { events, failure } = await step(() => new Response(sse(chunk({ content: "The answer" }), chunk({ content: " is" }))))
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "The answer" },
+      { type: "text-delta", text: " is" },
+    ])
+    expect(failure).toContain("ended before the model finished")
+  })
+
+  test("fails on a frame that is not JSON", async () => {
+    const { failure } = await step(() => new Response(sse(chunk({ content: "ok" }), "data: {oops")))
+
+    expect(failure).toContain("Could not read the stream")
+  })
+
+  test("reports the server's answer when the status is an error", async () => {
+    const { events, failure } = await step(() => new Response("model not found", { status: 404 }))
+
+    expect(events).toEqual([])
+    expect(failure).toContain("answered 404: model not found")
+  })
+
+  test("reports a server that is not running", async () => {
+    const { failure } = await step(() => new Response(""), "http://127.0.0.1:1")
+
+    expect(failure).toContain("Could not reach")
+  })
+})
+
+describe("the context window", () => {
+  const windowOf = (env: Record<string, string>) =>
+    Effect.runPromise(
+      selectRoute(env).pipe(
+        Effect.map((route) => route.contextWindow),
+        Effect.catchTag("ConfigError", (error) => Effect.succeed(error.message)),
+      ),
+    )
+
+  test("comes from the route unless CONTEXT_WINDOW overrides it", async () => {
+    expect(await windowOf({ PROVIDER: "ollama" })).toBe(32_768)
+    expect(await windowOf({ PROVIDER: "ollama", CONTEXT_WINDOW: "6000" })).toBe(6000)
+  })
+
+  test("refuses a CONTEXT_WINDOW that is not a whole number of tokens", async () => {
+    expect(await windowOf({ CONTEXT_WINDOW: "32k" })).toBe('CONTEXT_WINDOW must be a whole number of tokens, not "32k"')
+  })
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/compaction.test.ts</summary>
+
+`test/compaction.test.ts`
+
+```ts
+import { describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { repl } from "../src/agent"
+import { estimateTokens, isDue, SUMMARY_PROMPT, transcript } from "../src/compaction"
+import { summaryMessage } from "../src/history"
+import type { Message } from "../src/messages"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { callTool, fail, reply, scriptedModel, scriptedTerminal, type Step } from "./fakes"
+
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => text,
+})
+
+const textOfFirst = (request: Message[] | undefined) => {
+  const part = request?.[0]?.content[0]
+  return part?.type === "text" ? part.text : ""
+}
+
+// Runs one prompt on a session kept in memory, with a model whose window is `contextWindow` tokens.
+const run = async (model: Step[], contextWindow: number) => {
+  const scripted = scriptedModel(model, undefined, contextWindow)
+  const terminal = scriptedTerminal(["read it"])
+  const layers = Layer.mergeAll(scripted.layer, terminal.layer, Layer.succeed(Tools, [echo]), SessionLive({ path: ":memory:", id: "test" }))
+  const events = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      return yield* (yield* Session).events
+    }).pipe(Effect.provide(layers)),
+  )
+  return { events, requests: scripted.requests, output: terminal.output }
+}
+
+// 4,000 characters are about 1,000 tokens, once as the call's input and once as its result.
+const long = "x".repeat(4_000)
+
+describe("the estimate", () => {
+  test("counts about one token per four characters of history and tools", () => {
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: long }] }]
+
+    expect(estimateTokens(history, [])).toBe(Math.ceil(JSON.stringify([history, []]).length / 4))
+    expect(estimateTokens(history, [echo])).toBeGreaterThan(estimateTokens(history, []))
+  })
+
+  test("is due from three quarters of the window", () => {
+    expect(isDue(749, 1_000)).toBe(false)
+    expect(isDue(750, 1_000)).toBe(true)
+  })
+
+  test("the transcript clips long tool inputs and results", () => {
+    const text = transcript([
+      { role: "assistant", content: [{ type: "tool-call", id: "a", name: "echo", input: { text: long } }] },
+      { role: "tool", content: [{ type: "tool-result", id: "a", name: "echo", result: { type: "text", value: long } }] },
+    ])
+
+    expect(text).toContain("[... 2000 more characters]")
+    expect(text.length).toBeLessThan(5_000)
+  })
+})
+
+describe("compaction", () => {
+  test("summarizes the history when the next request comes close to the window", async () => {
+    const { events, requests, output } = await run(
+      [callTool("call_1", "echo", { text: long }), reply("The user asked to read it."), reply("Done.")],
+      1_000,
+    )
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "compacted", "step-finished"])
+    // The second request is the summary request: the conversation as text, then the instructions.
+    expect(requests[1]).toHaveLength(1)
+    expect(textOfFirst(requests[1])).toStartWith("<conversation>\nUser:\nread it")
+    expect(textOfFirst(requests[1])).toEndWith(SUMMARY_PROMPT)
+    // The step after it starts from the summary alone.
+    expect(requests[2]).toEqual([summaryMessage("The user asked to read it.")])
+    expect(output.some((line) => /^\[compacting: ~\d+ tokens\]$/.test(line))).toBe(true)
+    expect(output.some((line) => /^\[compacted: \d+ → \d+ tokens\]$/.test(line))).toBe(true)
+  })
+
+  test("leaves a history that fits alone", async () => {
+    const { events, requests } = await run([callTool("call_1", "echo", { text: long }), reply("Done.")], 100_000)
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "step-finished"])
+    expect(requests).toHaveLength(2)
+  })
+
+  test("a summary that fails fails the turn, and nothing is compacted", async () => {
+    const { events, output } = await run([callTool("call_1", "echo", { text: long }), fail("connection reset")], 1_000)
+
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "turn-failed"])
+    expect(output).toContain("[provider error] connection reset")
+  })
+
+  test("an empty summary fails the turn too", async () => {
+    const { events, output } = await run([callTool("call_1", "echo", { text: long }), reply("  ")], 1_000)
+
+    expect(events.at(-1)).toEqual({ type: "turn-failed", reason: "The model returned an empty summary" })
+    expect(output).toContain("[provider error] The model returned an empty summary")
+  })
+})
+```
+
+</details>
+
+<details>
+<summary>Stuck? test/resume.test.ts</summary>
+
+`test/resume.test.ts`
+
+```ts
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { Effect, Layer, Schema } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { repl } from "../src/agent"
+import type { SessionEvent } from "../src/session-event"
+import { Session, SessionLive } from "../src/session"
+import { defineTool, Tools } from "../src/tool"
+import { summaryMessage } from "../src/history"
+import { callTool, reply, scriptedModel, scriptedTerminal } from "./fakes"
+
+// A crash leaves the log as it was at the moment the process died. These tests write that log with
+// `append`, close the file, and start the agent again on it.
+let dir: string
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "agent-session-"))
+})
+afterEach(() => rm(dir, { recursive: true, force: true }))
+
+const ran: string[] = []
+const echo = defineTool({
+  name: "echo",
+  description: "Returns its text.",
+  input: Schema.Struct({ text: Schema.String }),
+  execute: async ({ text }) => (ran.push(text), text),
+})
+
+const prompt = (text: string): SessionEvent => ({ type: "prompt", text })
+const calls = (...ids: string[]): SessionEvent => ({
+  type: "step-finished",
+  message: { role: "assistant", content: ids.map((id) => ({ type: "tool-call", id, name: "echo", input: { text: id } })) },
+  finish: "tool-calls",
+})
+const result = (id: string): SessionEvent => ({
+  type: "tool-result",
+  part: { type: "tool-result", id, name: "echo", result: { type: "text", value: id } },
+})
+
+// Process one: the events that were written before the crash, and the prompts that were still in the inbox.
+const crashAfter = (events: SessionEvent[], inbox: string[] = []) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* Session
+      for (const event of events) yield* session.append(event)
+      for (const text of inbox) yield* session.admit(text)
+    }).pipe(Effect.provide(SessionLive({ path: join(dir, "agent.db"), id: "s" }))),
+  )
+
+// Process two: a new agent on the same file. No input, so it only finishes what it finds.
+const restart = async (modelSteps: Parameters<typeof scriptedModel>[0], contextWindow?: number) => {
+  const model = scriptedModel(modelSteps, undefined, contextWindow)
+  const terminal = scriptedTerminal([])
+  const layers = Layer.mergeAll(model.layer, terminal.layer, Layer.succeed(Tools, [echo]), SessionLive({ path: join(dir, "agent.db"), id: "s" }))
+  const events = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* repl
+      return yield* (yield* Session).events
+    }).pipe(Effect.provide(layers)),
+  )
+  return { events, requests: model.requests, output: terminal.output }
+}
+
+describe("resuming a session", () => {
+  test("answers a call that has no result with an error and never runs it again", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go"), calls("a", "b"), result("a")])
+
+    const { events, requests, output } = await restart([reply("Understood.")])
+
+    expect(output[0]).toBe("[resuming session s]")
+    expect(ran).toEqual([])
+    const tool = requests[0]?.at(-1)
+    expect(tool?.role).toBe("tool")
+    expect(tool?.content.map((part) => (part.type === "tool-result" ? [part.id, part.result.type] : []))).toEqual([
+      ["a", "text"],
+      ["b", "error"],
+    ])
+    expect(JSON.stringify(tool)).toContain("stopped before this tool finished")
+    expect(events.map((event) => event.type)).toEqual(["prompt", "step-finished", "tool-result", "tool-result", "step-finished"])
+  })
+
+  test("continues a turn that stopped right after the prompt", async () => {
+    await crashAfter([prompt("hello")])
+
+    const { requests, output } = await restart([reply("Hi.")])
+
+    expect(output).toContain("Agent: Hi.")
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+  })
+
+  test("continues a turn that stopped between the last result and the next step", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a")])
+
+    const { requests } = await restart([reply("Done.")])
+
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+  })
+
+  test("leaves a finished turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("leaves a failed turn alone", async () => {
+    await crashAfter([prompt("hi"), { type: "turn-failed", reason: "connection reset" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+
+  test("a resumed turn that calls a tool runs it like any other", async () => {
+    ran.length = 0
+    await crashAfter([prompt("go")])
+
+    await restart([callTool("c9", "echo", { text: "again" }), reply("Done.")])
+
+    expect(ran).toEqual(["again"])
+  })
+
+  test("runs the prompts that were still in the inbox, in order", async () => {
+    await crashAfter([], ["one", "two"])
+
+    const { events, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output).toContain("[2 queued prompts from an earlier run]")
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["one", "step-finished", "two", "step-finished"])
+  })
+
+  test("finishes the interrupted turn before it delivers the next prompt", async () => {
+    await crashAfter([prompt("first")], ["second"])
+
+    const { events, requests, output } = await restart([reply("A."), reply("B.")])
+
+    expect(output.slice(0, 2)).toEqual(["[1 queued prompt from an earlier run]", "[resuming session s]"])
+    expect(requests[0]?.map((message) => message.role)).toEqual(["user"])
+    expect(events.map((event) => (event.type === "prompt" ? event.text : event.type))).toEqual(["first", "step-finished", "second", "step-finished"])
+  })
+
+  test("says nothing about the inbox when it is empty", async () => {
+    await crashAfter([prompt("hi"), { type: "step-finished", message: { role: "assistant", content: [{ type: "text", text: "Hello." }] }, finish: "stop" }])
+
+    const { output } = await restart([])
+
+    expect(output.join("\n")).not.toContain("queued prompt")
+  })
+
+  test("continues a turn that stopped right after a compaction, from the summary", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a"), { type: "compacted", summary: "S1" }])
+
+    const { requests, output } = await restart([reply("Done.")])
+
+    expect(output).toContain("[resuming session s]")
+    expect(requests[0]).toEqual([summaryMessage("S1")])
+  })
+
+  test("does not summarize a history that is already only a summary", async () => {
+    await crashAfter([prompt("go"), { type: "compacted", summary: "S1" }])
+
+    // A window of 10 tokens: even the summary is over the limit.
+    const { requests, events } = await restart([reply("Done.")], 10)
+
+    expect(requests).toEqual([[summaryMessage("S1")]])
+    expect(events.map((event) => event.type)).toEqual(["prompt", "compacted", "step-finished"])
+  })
+
+  test("leaves a turn alone that failed after a compaction", async () => {
+    await crashAfter([prompt("go"), calls("a"), result("a"), { type: "compacted", summary: "S1" }, { type: "turn-failed", reason: "connection reset" }])
+
+    const { requests, output } = await restart([])
+
+    expect(requests).toEqual([])
+    expect(output.join("\n")).not.toContain("resuming")
+  })
+})
+```
+
+</details>
+
+## Sources
+
+The first item is the primary source for this Part. OpenCode's `session/compaction.ts` is the full version of what this Part builds, including the features listed under "OpenCode does more" and the measured sizes from the extensions. This Part keeps its core: an estimate before each step, a summary appended to the log, and a history rebuilt from the latest summary.
+
+- OpenCode's [session/compaction.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts): [the reserve](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L129-L135), [the transcript clip](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L150), [the summary template and rules](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L173-L212) and [no compaction right after one](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/compaction.ts#L437-L446)
+- OpenCode's [runner/to-llm-message.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/session/runner/to-llm-message.ts#L273-L291) (how a summary reaches the model) and [util/token.ts](https://github.com/anomalyco/opencode/blob/97be25f046/packages/core/src/util/token.ts#L3) (four characters per token)
+- Ollama's docs on [context length](https://docs.ollama.com/context-length)
+
+The session now keeps working when its history outgrows the model, and this Part ends Stage B. Stage C is about what the agent is allowed to do, and in [the roadmap](/posts/the-roadmap/) it starts with _Permissions_: the model proposes a tool call, a policy decides, and only then does the agent act.

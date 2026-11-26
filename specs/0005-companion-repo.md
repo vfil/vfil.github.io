@@ -12,7 +12,7 @@ Vlad is building the agent from _Building an agent from scratch_ in parallel, in
 
 A Series can name its Companion repo, and each Part can name the Snapshot (the Git tag) that matches it. Every page of such a Series then says where the code lives:
 
-- **Top of a Part**: a plain sentence in the Foreword, written by hand, linking to the Snapshot ("The code for this Part is available as the `Part1_the_loop` snapshot of vfil/sigma-agent, the repo where I build this agent in parallel."). A generated label read as ambiguous, so the top is prose and states a fact; it doesn't tell the reader what to do with it.
+- **Top of a Part**: a plain sentence in the Foreword, written by hand, linking to the Snapshot ("The code for this Part is available in the repo https://github.com/vfil/sigma-agent/tree/Part1_the_loop.", with the URL as the link text). A generated label read as ambiguous, so the top is prose and states a fact; it doesn't tell the reader what to do with it.
 - **Bottom of a Part**, above the previous/next links: "Explore the code as it stands in this Part: `Part1_the_loop` in vfil/sigma-agent ↗", linking to the Snapshot.
 - **Series page**: a sentence in the Series introduction, written by hand, saying the agent is built in parallel there and that each Part has a Snapshot.
 
